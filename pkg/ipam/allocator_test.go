@@ -29,7 +29,7 @@ type ownerMock struct{}
 
 func (o *ownerMock) K8sEventReceived(scope string, action string, valid, equal bool) {}
 func (o *ownerMock) K8sEventProcessed(scope string, action string, status bool)      {}
-func (o *ownerMock) UpdateCiliumNodeResource()                                       {}
+func (o *ownerMock) UpdateCiliumNodeResource() error                                 { return nil }
 
 func (s *IPAMSuite) TestAllocatedIPDump(c *C) {
 	fakeAddressing := fake.NewNodeAddressing()

@@ -62,7 +62,7 @@ type Owner interface {
 	// UpdateCiliumNodeResource is called to create/update the CiliumNode
 	// resource. The function must block until the custom resource has been
 	// created.
-	UpdateCiliumNodeResource()
+	UpdateCiliumNodeResource() error
 }
 
 type K8sEventRegister interface {

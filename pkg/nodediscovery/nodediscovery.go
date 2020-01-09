@@ -16,6 +16,7 @@ package nodediscovery
 
 import (
 	"context"
+	goerrors "errors"
 	"time"
 
 	"github.com/cilium/cilium/pkg/aws/metadata"
@@ -36,6 +37,7 @@ import (
 	"github.com/cilium/cilium/pkg/source"
 
 	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -175,11 +177,11 @@ func (n *NodeDiscovery) StartDiscovery(nodeName string) {
 		}
 	}()
 
-	if k8s.IsEnabled() {
-		// Creation or update of the CiliumNode can be done in the
-		// background, nothing depends on the completion of this.
-		go n.UpdateCiliumNodeResource()
-	}
+//	if k8s.IsEnabled() {
+//		// Creation or update of the CiliumNode can be done in the
+//		// background, nothing depends on the completion of this.
+//		go n.UpdateCiliumNodeResource()
+//	}
 
 	if option.Config.KVStore != "" {
 		go func() {
@@ -205,22 +207,29 @@ func (n *NodeDiscovery) Close() {
 
 // UpdateCiliumNodeResource updates the CiliumNode resource representing the
 // local node
-func (n *NodeDiscovery) UpdateCiliumNodeResource() {
+func (n *NodeDiscovery) UpdateCiliumNodeResource() (err error) {
 	if !option.Config.AutoCreateCiliumNodeResource {
-		return
+		return nil
 	}
 
 	ciliumClient := k8s.CiliumClient()
 
 	performUpdate := true
 	nodeResource, err := ciliumClient.CiliumV2().CiliumNodes().Get(node.GetName(), metav1.GetOptions{})
-	if err != nil {
-		performUpdate = false
-		nodeResource = &ciliumv2.CiliumNode{
-			ObjectMeta: metav1.ObjectMeta{
-				Name: node.GetName(),
-			},
-		}
+	if err == nil {
+		log.Infof("Existing CiliumNode resource for node %s found", node.GetName())
+		return nil
+	}
+	if err != nil && !errors.IsNotFound(err) {
+		// TODO fixme
+		return goerrors.New("K8S error")
+
+	}
+	performUpdate = false
+	nodeResource = &ciliumv2.CiliumNode{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: node.GetName(),
+		},
 	}
 
 	// Tie the CiliumNode custom resource lifecycle to the lifecycle of the
@@ -322,4 +331,5 @@ func (n *NodeDiscovery) UpdateCiliumNodeResource() {
 			log.Info("Successfully created CiliumNode resource")
 		}
 	}
+	return nil
 }
