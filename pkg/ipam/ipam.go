@@ -16,6 +16,8 @@ package ipam
 
 import (
 	"net"
+	"os"
+	"strings"
 
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/datapath"
@@ -132,6 +134,29 @@ func NewIPAM(nodeAddressing datapath.NodeAddressing, c Configuration, owner Owne
 		}
 	default:
 		log.Fatalf("Unknown IPAM backend %s", c.IPAMMode())
+	}
+
+	if flag, ok := os.LookupEnv(ENABLE_FIXED_IP); ok {
+		flag = strings.ToLower(flag)
+		switch flag {
+		case "true":
+			EnableFixedIP = true
+		case "false":
+			EnableFixedIP = false
+		default:
+			log.Errorf("invalid configuration in ENV: %s=%s, use default "+
+				"value: true", ENABLE_FIXED_IP, flag)
+			EnableFixedIP = true
+		}
+	} else {
+		log.Infof("ENV: %s not set, use default: true", ENABLE_FIXED_IP)
+		EnableFixedIP = true
+	}
+
+	if EnableFixedIP {
+		if err := cleanStaleIpamStates(ipam); err != nil {
+			log.Errorf("clean stale IPAM states failed: %s", err)
+		}
 	}
 
 	return ipam

@@ -19,7 +19,7 @@ CONFDIR?=/etc
 
 INSTALL = install
 
-CONTAINER_ENGINE?=docker
+CONTAINER_ENGINE?=sudo docker
 
 # Set DOCKER_DEV_ACCOUNT with "cilium" by default
 ifeq ($(DOCKER_DEV_ACCOUNT),)

@@ -543,6 +543,12 @@ func NewDaemon(ctx context.Context, epMgr *endpointmanager.EndpointManager, dp d
 	if err != nil {
 		log.WithError(err).Error("Unable to restore existing endpoints")
 	}
+
+	// This step must run after restoreOldEndpoints(). If that method is
+	// successful, the IP addresses would have already been	reserved.
+	// This IPAM method is only for a remedy in case the EP	restoration
+	// process encountered some errors.
+	d.ipam.ReservePinnedIPs()
 	bootstrapStats.restore.End(true)
 
 	if err := d.allocateIPs(); err != nil {

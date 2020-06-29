@@ -31,10 +31,10 @@ docker-image-no-clean: GIT_VERSION $(BUILD_DIR)/Dockerfile build-context-update
 		--build-arg V=${V} \
 		--build-arg LIBNETWORK_PLUGIN=${LIBNETWORK_PLUGIN} \
 		--build-arg CILIUM_SHA=$(firstword $(GIT_VERSION)) \
-		-t cilium/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG) $(DOCKER_BUILD_DIR)
-	$(QUIET)$(CONTAINER_ENGINE) tag cilium/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG) cilium/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG)-${GOARCH}
+		-t hub.cloud.ctripcorp.com/cloud-network/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG) $(DOCKER_BUILD_DIR)
+	$(QUIET)$(CONTAINER_ENGINE) tag hub.cloud.ctripcorp.com/cloud-network/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG) hub.cloud.ctripcorp.com/cloud-network/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG)-${GOARCH}
 	@echo "Push like this when ready:"
-	@echo "${CONTAINER_ENGINE} push cilium/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG)-${GOARCH}"
+	@echo "${CONTAINER_ENGINE} push hub.cloud.ctripcorp.com/cloud-network/cilium$(UNSTRIPPED):$(DOCKER_IMAGE_TAG)-${GOARCH}"
 
 docker-image-no-clean-unstripped: NOSTRIP=1
 docker-image-no-clean-unstripped: UNSTRIPPED=-unstripped
