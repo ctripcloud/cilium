@@ -667,12 +667,12 @@ if [ "$HOST_DEV1" != "$HOST_DEV2" ]; then
 fi
 
 # Remove bpf_xdp.o from previously used devices
-for iface in $(ip -o -a l | awk '{print $2}' | cut -d: -f1 | cut -d@ -f1 | grep -v cilium); do
-	[ "$iface" == "$XDP_DEV" ] && continue
-	for mode in xdpdrv xdpgeneric; do
-		xdp_unload "$iface" "$mode"
-	done
-done
+# for iface in $(ip -o -a l | awk '{print $2}' | cut -d: -f1 | cut -d@ -f1 | grep -v cilium); do
+# 	[ "$iface" == "$XDP_DEV" ] && continue
+# 	for mode in xdpdrv xdpgeneric; do
+# 		xdp_unload "$iface" "$mode"
+# 	done
+# done
 
 if [ "$XDP_DEV" != "<nil>" ]; then
 	if ip -one link show dev $XDP_DEV | grep -v -q $XDP_MODE; then
