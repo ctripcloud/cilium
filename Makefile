@@ -130,8 +130,20 @@ build: $(SUBDIRS)
 build-container:
 	for i in $(SUBDIRS_CILIUM_CONTAINER); do $(MAKE) $(SUBMAKEOPTS) -C $$i all; done
 
-$(SUBDIRS): force
+$(SUBDIRS): trip-preflight force
 	@ $(MAKE) $(SUBMAKEOPTS) -C $@ all
+
+trip-preflight:
+	@ echo "================================================================"
+	@ echo "Trip.com: downloading additional dependencies ..."
+	go mod vendor
+
+	@ # We'd like to download dependencies to local vendor/, but do not want
+	@ # to update the modules.txt, otherwise we may get troubles when merging
+	@ # with upstream code.
+	@ echo "Trip.com: resetting vendor/modules.txt to upstream version ..."
+	git checkout vendor/modules.txt
+	@ echo "================================================================"
 
 jenkins-precheck:
 	docker-compose -f test/docker-compose.yml -p $(JOB_BASE_NAME)-$$BUILD_NUMBER run --rm precheck

@@ -16,51 +16,63 @@ package k8s
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strconv"
 	"strings"
 
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 )
+
+const (
+	KIND_STATEFULSET         = "StatefulSet"
+	API_VERSION_STS          = "apps/v1"
+	API_VERSION_ADVANCED_STS = "apps.kruise.io/v1alpha1"
+)
+
+func getPodInfo(ns, podName string) (string, string, string, error) {
+	pod, err := Client().CoreV1().Pods(ns).Get(context.TODO(), podName, metav1.GetOptions{})
+	if err != nil {
+		return "", "", "", err
+	}
+
+	for _, ref := range pod.OwnerReferences {
+		if *ref.Controller {
+			return ref.Kind, ref.Name, ref.APIVersion, nil
+		}
+	}
+
+	log.Warnf("Get pod info: controller not found in pod.OwnerReferences, %s/%s", ns, podName)
+	return "", "", "", nil
+}
 
 // IsStsPod determines if the given pod is a sts pod by retrieving the metadata
 // in k8s API
 func IsStsPod(fullPodName string) (bool, error) {
-	// extract sts name
 	items := strings.Split(fullPodName, "/")
 	if len(items) != 2 {
-		log.Infof("%s is not sts pod: contains more than 1 slashes", fullPodName)
+		log.Infof("IsStsPod: false, pod %s contains more than 1 slashes", fullPodName)
 		return false, nil
 	}
 
-	namespace, podName := items[0], items[1]
-	i := strings.LastIndex(podName, "-")
-	if i < 1 {
-		log.Infof("%s is not sts pod: contains more than 1 dashes", fullPodName)
-		return false, nil
-	}
-
-	stsName := podName[:i]
-	if _, err := strconv.Atoi(podName[i+1:]); err != nil {
-		log.Infof("%s is not sts pod: index not found", fullPodName)
-		return false, nil
-	}
-
-	// get info through K8S API
-	_, err := Client().AppsV1().StatefulSets(namespace).Get(context.TODO(),
-		stsName, metav1.GetOptions{})
+	ns, podName := items[0], items[1]
+	kind, _, apiVersion, err := getPodInfo(ns, podName)
 	if err != nil {
-		switch err.Error() {
-		case `statefulsets.apps "` + stsName + `" not found`:
-			log.Infof("%s is not sts pod: sts not found in k8s", fullPodName)
-			return false, nil
-		default:
-			return false, err
-		}
+		return false, nil
 	}
 
-	log.Infof("%s is sts pod", fullPodName)
-	return true, nil
+	// STS and ASTS both have kind=="StatefulSet", the APIVersion field
+	// separates them.
+	if kind == KIND_STATEFULSET {
+		log.Infof("IsStsPod: true, pod %s, APIVersion %s\n", fullPodName, apiVersion)
+		return true, nil
+	}
+
+	log.Infof("IsStsPod: false, pod %s, Kind %s, APIVersion %s", fullPodName, kind, apiVersion)
+	return false, nil
 }
 
 // IsStsPodDeleted determines if the pod is deleted from the node by retrieving
@@ -79,43 +91,38 @@ func IsStsPodDeleted(nodeName string, fullPodName string) (bool, error) {
 		return false, fmt.Errorf("mal-formed pod name %s", podName)
 	}
 
-	stsName := podName[:i]
 	podIndex, err := strconv.Atoi(podName[i+1:])
 	if err != nil {
 		return false, err
 	}
 
-	// get info through K8S API
-	log.Infof("determin if %s/%s still exists in apiserver", ns, stsName)
-	sts, err := Client().AppsV1().StatefulSets(ns).Get(context.TODO(),
-		stsName, metav1.GetOptions{})
+	// Get pod info
+	kind, name, apiVersion, err := getPodInfo(ns, podName)
 	if err != nil {
-		switch err.Error() {
-		case `statefulsets.apps "` + stsName + `" not found`:
-			log.Infof("check pod existence: %s, the whole sts has been deleted",
-				fullPodName)
-			return true, nil
-		default:
+		return false, nil
+	}
+
+	if kind != KIND_STATEFULSET {
+		log.Infof("IsStsPodDeleted: %s is not sts/asts", fullPodName)
+		return true, nil
+	}
+
+	// Get replicas
+	replicas := -1
+	switch apiVersion {
+	case API_VERSION_STS:
+		if replicas, err = getReplicasSts(ns, name); err != nil {
 			return false, err
 		}
-	}
-
-	const (
-		foreground = "foregroundDeletion"
-	)
-
-	// If the resource is being deleted with PropagationPolicy foreground,
-	// the replicas field will remain unchanged, so we need to handle such cases here.
-	finalizers := (*sts).ObjectMeta.Finalizers
-	if len(finalizers) > 0 {
-		propagationPolicy := finalizers[0]
-		if propagationPolicy == foreground {
-			return true, nil
+	case API_VERSION_ADVANCED_STS:
+		if replicas, err = getReplicasAdvancedSts(ns, name); err != nil {
+			return false, err
 		}
+	default:
+		return false, fmt.Errorf("unsupported STS APIVersion %s", apiVersion)
 	}
 
-	replicas := int(*sts.Spec.Replicas)
-	log.Infof("sts replicas: %d, pod index: %d", replicas, podIndex)
+	log.Infof("STS %s: replicas %d, pod index %d", kind, replicas, podIndex)
 	if replicas > 0 && podIndex < replicas {
 		return false, nil // valid index, pod still in sts replicas
 	} else {
@@ -123,9 +130,106 @@ func IsStsPodDeleted(nodeName string, fullPodName string) (bool, error) {
 	}
 }
 
+func getReplicasSts(ns, name string) (int, error) {
+	log.Infof("Determine if STS %s/%s still exists in k8s", ns, name)
+
+	sts, err := Client().AppsV1().StatefulSets(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			log.Infof("Get STS %s: not found", name)
+			return 0, nil
+		}
+
+		log.Errorf("Get STS %s failed: %v", name, err)
+		return -1, err
+	}
+
+	// If the resource is being deleted with PropagationPolicy foreground,
+	// the replicas field will remain unchanged, so we need to handle such cases here.
+	finalizers := (*sts).ObjectMeta.Finalizers
+	if len(finalizers) > 0 {
+		propagationPolicy := finalizers[0]
+		if propagationPolicy == "foregroundDeletion" {
+			return 0, nil
+		}
+	}
+
+	return int(*sts.Spec.Replicas), nil
+}
+
+type StsSpec struct {
+	Replicas *int32 `json:"replicas,omitempty"`
+}
+
+type StatefulSet struct {
+	metav1.TypeMeta   `json:",inline"`
+	metav1.ObjectMeta `json:"metadata,omitempty"`
+
+	Spec StsSpec `json:"spec,omitempty"`
+}
+
+func getReplicasAdvancedSts(ns, name string) (int, error) {
+	log.Infof("Determine if ASTS %s/%s still exists in k8s", ns, name)
+
+	c, err := createDynamicClient()
+	if err != nil {
+		return -1, err
+	}
+
+	resource := schema.GroupVersionResource{
+		Group:    "apps.kruise.io",
+		Version:  "v1alpha1",
+		Resource: "statefulsets",
+	}
+
+	asts, err := c.Resource(resource).Namespace(ns).Get(context.TODO(), name, metav1.GetOptions{})
+	if err != nil {
+		if k8serrors.IsNotFound(err) {
+			log.Infof("Get ASTS %s: not found", name)
+			return 0, nil
+		}
+
+		log.Errorf("Get ASTS %s failed: %v", name, err)
+		return -1, err
+	}
+
+	data, err := asts.MarshalJSON()
+	if err != nil {
+		return -1, err
+	}
+
+	var sts StatefulSet
+	if err := json.Unmarshal(data, &sts); err != nil {
+		return -1, err
+	}
+
+	finalizers := sts.GetFinalizers()
+	ts := sts.GetDeletionTimestamp()
+	if len(finalizers) > 0 && !ts.IsZero() {
+		log.Infof("ASTS %s/%s is being deleting: finalizers %v, deletion timestamp %v",
+			ns, name, finalizers, ts)
+		return 0, nil
+	}
+
+	return int(*sts.Spec.Replicas), nil
+}
+
+func createDynamicClient() (dynamic.Interface, error) {
+	config, err := CreateConfig()
+	if err != nil {
+		return nil, fmt.Errorf("unable to create k8s client restConfig: %s", err)
+	}
+
+	config.ContentConfig.ContentType = `application/vnd.kubernetes.protobuf`
+
+	return dynamic.NewForConfig(config)
+}
+
 // GetNodeStsPods returns all sts pods on this node by retrieving the metadata
 // in k8s API
 func GetNodeStsPods(nodeName string) ([]string, error) {
+	log.Infof("Filtering sts pods on node %s", nodeName)
+
 	podNames := []string{}
 	options := metav1.ListOptions{FieldSelector: "spec.nodeName=" + nodeName}
 	podList, err := Client().CoreV1().Pods("").List(context.TODO(), options)
@@ -134,25 +238,25 @@ func GetNodeStsPods(nodeName string) ([]string, error) {
 	}
 
 	for _, p := range podList.Items {
-		namespace := p.ObjectMeta.Namespace
+		ns := p.ObjectMeta.Namespace
 		podName := p.ObjectMeta.Name
 		owners := p.ObjectMeta.OwnerReferences
 
 		isSts := false
 		for _, r := range owners {
-			if r.Kind == "StatefulSet" {
-				name := namespace + "/" + podName
-				podNames = append(podNames, name)
+			if r.Kind == KIND_STATEFULSET {
+				podNames = append(podNames, ns+"/"+podName)
 				isSts = true
 				break
 			}
 		}
 
 		if isSts {
+			log.Infof("Pod %s is sts pod", podName)
 			continue
 		}
 
-		log.Infof("Skip pod %s, owners %v\n", podName, owners)
+		log.Infof("Pod %s is not sts pod, owners %v\n", podName, owners)
 	}
 
 	return podNames, nil
