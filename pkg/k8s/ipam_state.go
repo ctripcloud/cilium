@@ -45,7 +45,7 @@ func getPodInfo(ns, podName string) (string, string, string, error) {
 		}
 	}
 
-	log.Warnf("Get pod info: controller not found in pod.OwnerReferences, %s/%s", ns, podName)
+	log.Infof("Get pod info: controller not found in pod.OwnerReferences, %s/%s", ns, podName)
 	return "", "", "", nil
 }
 
