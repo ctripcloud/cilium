@@ -115,8 +115,55 @@ func cleanStaleIpamStates(ipam *IPAM) error {
 	return nil
 }
 
-func isStsPod(fullPodName string) (bool, error) {
-	return k8s.IsStsPod(fullPodName)
+func shouldPinIPForPod(fullPodName string) (bool, error) {
+	items := strings.Split(fullPodName, "/")
+	if len(items) != 2 {
+		log.Infof("shouldPinIPForPod: false, reason: format mismatch of pod name %s", fullPodName)
+		return false, nil
+	}
+
+	ns, podName := items[0], items[1]
+	pod, err := k8s.GetPod(ns, podName)
+	if err != nil {
+		return false, fmt.Errorf("shouldPinIPForPod: false, reason: get pod failed: %v", err)
+	}
+
+	// Retrieve kind, api version
+	kind := ""
+	apiVersion := ""
+	for _, ref := range pod.OwnerReferences {
+		if *ref.Controller {
+			kind = ref.Kind
+			apiVersion = ref.APIVersion
+			break
+		}
+	}
+
+	// STS and ASTS both have kind=="StatefulSet", the APIVersion field separates them.
+	if kind != k8s.KIND_STATEFULSET {
+		log.Infof("shouldPinIPForPod: false, reason: %s is not STS, kind %s, APIVersion %s", fullPodName, kind, apiVersion)
+		return false, nil
+	}
+
+	// Advanced statefulset
+	if apiVersion == k8s.API_VERSION_ADVANCED_STS {
+		if value, ok := pod.ObjectMeta.Labels[k8s.FIXED_IP_LABEL]; ok {
+			if value == "true" {
+				log.Infof("shouldPinIPForPod: true, reason: %s is ASTS and %s=%s", fullPodName, k8s.FIXED_IP_LABEL, value)
+				return true, nil
+			}
+
+			log.Infof("shouldPinIPForPod: false, reason: %s is ASTS but %s=%s", fullPodName, k8s.FIXED_IP_LABEL, value)
+			return false, nil
+		}
+
+		log.Infof("shouldPinIPForPod: false, reason: %s is ASTS but label %s not found", fullPodName, k8s.FIXED_IP_LABEL)
+		return false, nil
+	}
+
+	// Vanilla statefulset
+	log.Infof("shouldPinIPForPod: true, reason: %s is STS, APIVersion %s", fullPodName, apiVersion)
+	return true, nil
 }
 
 // getPinnedIP returns the IP info that pinned to the given owner
@@ -178,11 +225,11 @@ func deserializeIPState(content string) (string, *AllocationResult, error) {
 	case 0:
 		return "", nil, fmt.Errorf("deserialize IP state: content empty")
 	case 1: // legacy IPState contains only owner name
-		log.Infof("deserialize IP state (old foramt): %v", items)
+		log.Infof("Deserialize IP state (old foramt): %v", items)
 		owner = items[0]
 		return owner, nil, nil
 	default:
-		log.Infof("deserialize IP state: %v", items)
+		log.Infof("Deserialize IP state: %v", items)
 		for _, item := range items {
 			a := strings.SplitAfterN(item, " ", 2)
 			if len(a) != 2 {
@@ -370,14 +417,11 @@ func getPodWithPinnedIP(ip net.IP) (string, error) {
 	}
 }
 
-// isPinnedPodDeleted decides if the given pod is deleted from k8s cluster
-func isPinnedPodDeleted(pod string) (bool, error) {
-	nodeName := os.Getenv(k8sConst.EnvNodeNameSpec)
-	if nodeName == "" {
-		return false, fmt.Errorf("node %s not found", k8sConst.EnvNodeNameSpec)
-	}
-
-	return k8s.IsStsPodDeleted(nodeName, pod)
+// Should unpin IP if
+// 1. Pod label k8s.FIXED_IP_LABEL value changed to non-true, or
+// 2. The pod is scaled down
+func shouldUnpinIPForPod(pod string) (bool, error) {
+	return k8s.ShouldUnpinIP(pod)
 }
 
 // reservePinnedIPs reserves some IPs from IPAM CIDR to avoid being

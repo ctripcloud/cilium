@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -31,6 +32,7 @@ const (
 	KIND_STATEFULSET         = "StatefulSet"
 	API_VERSION_STS          = "apps/v1"
 	API_VERSION_ADVANCED_STS = "apps.kruise.io/v1alpha1"
+	FIXED_IP_LABEL           = "cloud.ctrip.com/fixed-ip"
 )
 
 func getPodInfo(ns, podName string) (string, string, string, error) {
@@ -49,36 +51,12 @@ func getPodInfo(ns, podName string) (string, string, string, error) {
 	return "", "", "", nil
 }
 
-// IsStsPod determines if the given pod is a sts pod by retrieving the metadata
-// in k8s API
-func IsStsPod(fullPodName string) (bool, error) {
-	items := strings.Split(fullPodName, "/")
-	if len(items) != 2 {
-		log.Infof("IsStsPod: false, pod %s contains more than 1 slashes", fullPodName)
-		return false, nil
-	}
-
-	ns, podName := items[0], items[1]
-	kind, _, apiVersion, err := getPodInfo(ns, podName)
-	if err != nil {
-		return false, nil
-	}
-
-	// STS and ASTS both have kind=="StatefulSet", the APIVersion field
-	// separates them.
-	if kind == KIND_STATEFULSET {
-		log.Infof("IsStsPod: true, pod %s, APIVersion %s\n", fullPodName, apiVersion)
-		return true, nil
-	}
-
-	log.Infof("IsStsPod: false, pod %s, Kind %s, APIVersion %s", fullPodName, kind, apiVersion)
-	return false, nil
+func GetPod(ns, podName string) (*corev1.Pod, error) {
+	return Client().CoreV1().Pods(ns).Get(context.TODO(), podName, metav1.GetOptions{})
 }
 
-// IsStsPodDeleted determines if the pod is deleted from the node by retrieving
-// the metadata in k8s API
 // pod name format: <namespace>/<stsName>-<podIndex>
-func IsStsPodDeleted(nodeName string, fullPodName string) (bool, error) {
+func ShouldUnpinIP(fullPodName string) (bool, error) {
 	// extract sts name
 	items := strings.Split(fullPodName, "/")
 	if len(items) != 2 {
@@ -97,13 +75,26 @@ func IsStsPodDeleted(nodeName string, fullPodName string) (bool, error) {
 	}
 
 	// Get pod info
-	kind, name, apiVersion, err := getPodInfo(ns, podName)
+	pod, err := GetPod(ns, podName)
 	if err != nil {
 		return false, nil
 	}
 
+	// Retrieve kind, sts name, api version
+	kind := ""
+	name := ""
+	apiVersion := ""
+	for _, ref := range pod.OwnerReferences {
+		if *ref.Controller {
+			kind = ref.Kind
+			name = ref.Name
+			apiVersion = ref.APIVersion
+			break
+		}
+	}
+
 	if kind != KIND_STATEFULSET {
-		log.Infof("IsStsPodDeleted: %s is not sts/asts", fullPodName)
+		log.Infof("ShouldUnpinIP: false, reason: %s is not sts/asts", fullPodName)
 		return true, nil
 	}
 
@@ -115,6 +106,17 @@ func IsStsPodDeleted(nodeName string, fullPodName string) (bool, error) {
 			return false, err
 		}
 	case API_VERSION_ADVANCED_STS:
+		if value, ok := pod.ObjectMeta.Labels[FIXED_IP_LABEL]; !ok {
+			log.Infof("ShouldUnpinIP: true, reason: pod %s label %s removed", fullPodName, FIXED_IP_LABEL)
+			return true, nil
+		} else {
+			if value != "true" {
+				log.Infof("ShouldUnpinIP: true, reason: pod %s label changed to non-true: %s=%s",
+					fullPodName, FIXED_IP_LABEL, value)
+				return true, nil
+			}
+		}
+
 		if replicas, err = getReplicasAdvancedSts(ns, name); err != nil {
 			return false, err
 		}

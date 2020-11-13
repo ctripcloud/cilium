@@ -146,7 +146,7 @@ func (ipam *IPAM) allocateNextFamily(family Family, owner string, needSyncUpstre
 			return nil, e
 		} else {
 			if r != nil {
-				log.Infof("Reusing pinned IP for %s: %s", owner, r.IP)
+				log.Infof("Pinned IP found, reusing %s for %s", r.IP, owner)
 				return r, nil
 			}
 
@@ -191,22 +191,20 @@ func (ipam *IPAM) allocateNextFamily(family Family, owner string, needSyncUpstre
 
 			// pin IP to owner (pod) for statefulset
 			if EnableFixedIP && owner != "loopback" && owner != "health" {
-				isSts := false
-				if isSts, err = isStsPod(owner); err != nil {
-					log.Errorf("Determine whether %s is StsPod failed: %s, "+
+				shouldPin := false
+				if shouldPin, err = shouldPinIPForPod(owner); err != nil {
+					log.Errorf("Determine whether to pin IP for %s failed: %s, "+
 						"will not pin this IP", owner, err)
 					return
 				}
 
-				if isSts {
+				if shouldPin {
 					if err = pinIP(result, owner); err != nil {
-						log.Errorf("Pin IP %v to owner %s failed: %s",
-							result, owner, err)
+						log.Errorf("Pin IP %v to owner %s failed: %s", result, owner, err)
 						return
 					}
 				} else {
-					log.Infof("%s is not a sts-pod, skip IP pinning "+
-						"for this Pod", owner)
+					log.Infof("Skip IP pinning for pod %s", owner)
 				}
 			}
 
@@ -306,16 +304,17 @@ func (ipam *IPAM) releaseIPLocked(ip net.IP) error {
 		}
 
 		if EnableFixedIP {
-			// Actually we should only try to unpin IP for sts pod.
+			// Actually we should only try to unpin IP for sts or some-asts pods.
 			// But current pin/unpin implementation doesn't keep states in memory.
 			// So at this stage, we could no longer determine if this is a sts pod
 			// or not. Thus we try to unpin for every pod.
 			// If state file not found, just goto the release IP logic.
 			fullPodName, err := getPodWithPinnedIP(ip)
 			if err != nil {
-				// even encountering errors, we should still release this IP
+				// Even encountering errors, we should still release this IP,
+				// so there is no "return" statement in this branch
 				if strings.Contains(err.Error(), "state file not found") {
-					log.Infof("%s: may not be a sts pod, going to release IP", err)
+					log.Infof("%s: may not be a sts/asts pod, going to release IP", err)
 				} else {
 					stateFileFound = true
 					log.Errorf("Get Pod with pinned IP %s failed: %s, going to "+
@@ -324,15 +323,15 @@ func (ipam *IPAM) releaseIPLocked(ip net.IP) error {
 			} else {
 				stateFileFound = true
 
-				deleted, err := isPinnedPodDeleted(fullPodName)
+				shouldUnpin, err := shouldUnpinIPForPod(fullPodName)
 				if err != nil {
-					log.Errorf("Determine if pod %s has been deleted failed: %s",
+					log.Errorf("Determine whether to unpin IP for pod %s failed: %s",
 						fullPodName, err)
 					return err
 				}
 
-				if !deleted {
-					log.Infof("Skip release IP %s as sts/pod template still exist", ip)
+				if !shouldUnpin {
+					log.Infof("Skip to release IP %s for pod %s", ip, fullPodName)
 					return nil
 				}
 			}
@@ -366,12 +365,12 @@ func (ipam *IPAM) releaseIPLocked(ip net.IP) error {
 
 	if EnableFixedIP && stateFileFound {
 		if err := unpinIP(ip); err != nil {
-			log.Errorf("UnpinIP %s failed: %s, you may need to manually "+
+			log.Errorf("Unpin IP %s failed: %s, you need to manually "+
 				"delete the state file", ip, err)
 			return err
 		}
 
-		log.Infof("UnpinIP %s successful", ip)
+		log.Infof("Unpin IP %s successful", ip)
 	}
 
 	return nil
