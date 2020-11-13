@@ -404,3 +404,13 @@ func (s EndpointSelectorSlice) SelectsAllEndpoints() bool {
 	}
 	return false
 }
+
+func (s *EndpointSelector) DeepEqual(o *EndpointSelector) bool {
+	switch {
+	case (s == nil) != (o == nil):
+		return false
+	case (s == nil) && (o == nil):
+		return true
+	}
+	return s.deepEqual(o)
+}
