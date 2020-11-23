@@ -80,6 +80,11 @@ func (h *patchConfig) Handle(params PatchConfigParams) middleware.Responder {
 	}
 
 	changes += option.Config.Opts.ApplyValidated(om, changedOption, d)
+	err = d.endpointManager.OverrideEndpointOpts(om)
+	if err != nil {
+		msg := fmt.Errorf("Override endpoint configuration failed %s", err)
+		return api.Error(PatchConfigFailureCode, msg)
+	}
 
 	log.WithField("count", changes).Debug("Applied changes to daemon's configuration")
 	option.Config.ConfigPatchMutex.Unlock()
@@ -91,7 +96,10 @@ func (h *patchConfig) Handle(params PatchConfigParams) middleware.Responder {
 			msg := fmt.Errorf("Unable to recompile base programs: %s", err)
 			return api.Error(PatchConfigFailureCode, msg)
 		}
-		d.TriggerPolicyUpdates(true, "agent configuration update")
+		// Most agent configuration changes require endpoint datapath regeneration,
+		// trigger datapath regeneration anyway in case we miss the regeneration
+		// due to a future change in BPF code.
+		d.TriggerDatapathRegen(true, "agent configuration update")
 	}
 
 	return NewPatchConfigOK()

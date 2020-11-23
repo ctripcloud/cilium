@@ -412,6 +412,16 @@ func (mgr *EndpointManager) RegenerateAllEndpoints(regenMetadata *regeneration.E
 	return &wg
 }
 
+// OverrideEndpointOpts applies the given options to all endpoints.
+func (mgr *EndpointManager) OverrideEndpointOpts(om option.OptionMap) error {
+	for _, ep := range mgr.GetEndpoints() {
+		if _, err := ep.ApplyOpts(om); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // HasGlobalCT returns true if the endpoints have a global CT, false otherwise.
 func (mgr *EndpointManager) HasGlobalCT() bool {
 	eps := mgr.GetEndpoints()
