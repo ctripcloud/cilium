@@ -670,6 +670,10 @@ func calculateInterval(mapType bpf.MapType, prevInterval time.Duration, maxDelet
 	interval = prevInterval
 
 	if maxDeleteRatio == 0.0 {
+		log.WithFields(logrus.Fields{
+			"newInterval": interval,
+			"deleteRatio": maxDeleteRatio,
+		}).Info("Conntrack garbage collector interval unchanged as maxDeleteRatio == 0.0")
 		return
 	}
 
@@ -709,6 +713,11 @@ func calculateInterval(mapType bpf.MapType, prevInterval time.Duration, maxDelet
 			"newInterval": interval,
 			"deleteRatio": maxDeleteRatio,
 		}).Info("Conntrack garbage collector interval recalculated")
+	} else {
+		log.WithFields(logrus.Fields{
+			"newInterval": interval,
+			"deleteRatio": maxDeleteRatio,
+		}).Info("Conntrack garbage collector interval unchanged")
 	}
 
 	cachedGCInterval = interval
