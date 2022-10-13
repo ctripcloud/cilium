@@ -235,6 +235,25 @@ func deriveVpcCIDR(node *ciliumv2.CiliumNode) (result *cidr.CIDR) {
 			return
 		}
 	}
+
+	if len(node.Status.OCI.VNICs) > 0 {
+		for _, vnic := range node.Status.OCI.VNICs {
+			for _, cidrStr := range vnic.VCN.CidrBlocks {
+				c, err := cidr.ParseCIDR(cidrStr)
+				if err == nil {
+					// NOTE: current code assumes each OCI instance having VNICs of a single VCN;
+					// if this is not the case, the logic need to be refined here.
+					vpcCIDRs = append(vpcCIDRs, c)
+				}
+			}
+
+			if len(vpcCIDRs) >= 1 {
+				primaryCIDR = vpcCIDRs[0]
+				vpcCIDRs = vpcCIDRs[1:]
+			}
+		}
+	}
+
 	return
 }
 
@@ -270,8 +289,32 @@ func (n *nodeStore) hasMinimumIPsInPool() (minimumReached bool, required, numAva
 			minimumReached = true
 		}
 
-		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud {
-			if vpcCIDR := deriveVpcCIDR(n.ownNode); vpcCIDR != nil {
+		if n.conf.IPAMMode() == ipamOption.IPAMENI || n.conf.IPAMMode() == ipamOption.IPAMOCI {
+			if vpcCIDR, vpcCIDRs := deriveVpcCIDR(n.ownNode); vpcCIDR != nil {
+				if nativeCIDR := n.conf.IPv4NativeRoutingCIDR(); nativeCIDR != nil {
+					logFields := logrus.Fields{
+						"vpc-cidr":                   vpcCIDR.String(),
+						option.IPv4NativeRoutingCIDR: nativeCIDR.String(),
+					}
+
+					ranges4, _ := ip.CoalesceCIDRs([]*net.IPNet{nativeCIDR.IPNet, vpcCIDR.IPNet})
+					if len(ranges4) != 1 {
+						log.WithFields(logFields).Fatal("Native routing CIDR does not contain VPC CIDR.")
+					} else {
+						log.WithFields(logFields).Info("Ignoring autodetected VPC CIDR.")
+					}
+				} else {
+					log.WithFields(logrus.Fields{
+						"vpc-cidr": vpcCIDR.String(),
+					}).Info("Using autodetected VPC CIDR.")
+					n.conf.SetIPv4NativeRoutingCIDR(vpcCIDR)
+					n.conf.SetIPv4NativeRoutingCIDRs(vpcCIDRs)
+				}
+			} else {
+				minimumReached = false
+			}
+		} else if n.conf.IPAMMode() == ipamOption.IPAMAzure || n.conf.IPAMMode() == ipamOption.IPAMAlibabaCloud {
+			if vpcCIDR, _ := deriveVpcCIDR(n.ownNode); vpcCIDR != nil {
 				if nativeCIDR := n.conf.IPv4NativeRoutingCIDR(); nativeCIDR != nil {
 					logFields := logrus.Fields{
 						"vpc-cidr":                   vpcCIDR.String(),
@@ -566,6 +609,29 @@ func (a *crdAllocator) buildAllocationResult(ip net.IP, ipInfo *ipamTypes.Alloca
 			result.GatewayIP = deriveGatewayIP(eni.VSwitch.CIDRBlock, -3)
 			result.InterfaceNumber = strconv.Itoa(alibabaCloud.GetENIIndexFromTags(eni.Tags))
 			return
+		}
+		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
+
+	case ipamOption.IPAMOCI:
+		for _, vnic := range a.store.ownNode.Status.OCI.VNICs {
+			if vnic.ID == ipInfo.Resource {
+				result.PrimaryMAC = vnic.MAC
+				result.CIDRs = vnic.VCN.CidrBlocks
+				// Add manually configured Native Routing CIDR
+				// if a.conf.IPv4NativeRoutingCIDR() != nil {
+				// 	result.CIDRs = append(result.CIDRs, a.conf.IPv4NativeRoutingCIDR().String())
+				// }
+				if vnic.Subnet.CIDR != "" {
+					// NOTE: The gateway for a subnet and VPC is always x.x.x.1, TODO: Add oracle doc link
+					result.GatewayIP = deriveGatewayIP(vnic.Subnet.CIDR, 1)
+				}
+
+				// TODO: implement this, take reference of alibabacloud to allocate index
+				result.InterfaceNumber = "200" // strconv.Itoa(vnic.Number)
+
+				log.Infof("AllocatedResult: %+v\n\n", result)
+				return
+			}
 		}
 		return nil, fmt.Errorf("unable to find ENI %s", ipInfo.Resource)
 	}

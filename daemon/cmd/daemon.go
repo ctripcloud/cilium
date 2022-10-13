@@ -277,7 +277,10 @@ func restoreCiliumHostIPs(ipv6 bool, fromK8s net.IP) {
 		fromFS = node.GetIPv6Router()
 	} else {
 		switch option.Config.IPAMMode() {
-		case ipamOption.IPAMCRD, ipamOption.IPAMENI, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud:
+		case ipamOption.IPAMENI:
+			nodecidr = option.Config.IPv4NativeRoutingCIDR()
+			nodecidrs = option.Config.IPv4NativeRoutingCIDRs()
+		case ipamOption.IPAMCRD, ipamOption.IPAMAzure, ipamOption.IPAMAlibabaCloud, ipamOption.IPAMOCI:
 			// The native routing CIDR is the pod CIDR in these IPAM modes.
 			cidr = option.Config.IPv4NativeRoutingCIDR()
 		default:
@@ -804,7 +807,7 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
 	// Start IPAM
 	d.startIPAM()
 
-	// After the IPAM is started, in particular IPAM modes (CRD, ENI, Alibaba)
+	// After the IPAM is started, in particular IPAM modes (CRD, ENI, Alibaba, OCI)
 	// which use the VPC CIDR as the pod CIDR, we must attempt restoring the
 	// router IPs from the K8s resources if we weren't able to restore them
 	// from the fs. We must do this after IPAM because we must wait until the
@@ -860,8 +863,11 @@ func NewDaemon(ctx context.Context, cancel context.CancelFunc, epMgr *endpointma
 
 	// Trigger refresh and update custom resource in the apiserver with all restored endpoints.
 	// Trigger after nodeDiscovery.StartDiscovery to avoid custom resource update conflict.
-	if option.Config.IPAM == ipamOption.IPAMCRD || option.Config.IPAM == ipamOption.IPAMENI || option.Config.IPAM == ipamOption.IPAMAzure ||
-		option.Config.IPAM == ipamOption.IPAMAlibabaCloud {
+	if option.Config.IPAM == ipamOption.IPAMCRD ||
+		option.Config.IPAM == ipamOption.IPAMENI ||
+		option.Config.IPAM == ipamOption.IPAMAzure ||
+		option.Config.IPAM == ipamOption.IPAMAlibabaCloud ||
+		option.Config.IPAM == ipamOption.IPAMOCI {
 		if option.Config.EnableIPv6 {
 			d.ipam.IPv6Allocator.RestoreFinished()
 		}

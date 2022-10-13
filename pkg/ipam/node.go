@@ -721,6 +721,8 @@ func (n *Node) syncToAPIServer() (err error) {
 
 		n.ops.PopulateStatusFields(node)
 
+		log.Infof("Org %+v, \nNow %+v\n", origNode.Status.OCI, node.Status.OCI)
+		log.Infof("Org deepEqual Now: %v", origNode.Status.DeepEqual(&node.Status))
 		err = n.update(origNode, node, retry, true)
 		if err == nil {
 			break

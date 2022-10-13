@@ -201,6 +201,16 @@ const (
 	// Enabling this option reduces waste of IP addresses but may increase
 	// the number of API calls to AlibabaCloud ECS service.
 	AlibabaCloudReleaseExcessIPs = "alibaba-cloud-release-excess-ips"
+
+	// OCI options
+
+	// OCIVPCID allows user to specific vcn
+	OCIVCNID = "oci-vcn-id"
+
+	// OCIReleaseExcessIPs allows releasing excess free IP addresses from ENI.
+	// Enabling this option reduces waste of IP addresses but may increase
+	// the number of API calls to OCI ECS service.
+	OCIReleaseExcessIPs = "oci-cloud-release-excess-ips"
 )
 
 // OperatorConfig is the configuration used by the operator.
@@ -368,6 +378,11 @@ type OperatorConfig struct {
 	// Enabling this option reduces waste of IP addresses but may increase
 	// the number of API calls to AlibabaCloud ECS service.
 	AlibabaCloudReleaseExcessIPs bool
+
+	// OCI options
+
+	// OCIVCNID allow user to specific vcn
+	OCIVCNID string
 }
 
 // Populate sets all options with the values from viper.
@@ -424,6 +439,10 @@ func (c *OperatorConfig) Populate() {
 
 	c.AlibabaCloudVPCID = viper.GetString(AlibabaCloudVPCID)
 	c.AlibabaCloudReleaseExcessIPs = viper.GetBool(AlibabaCloudReleaseExcessIPs)
+
+	// OCI options
+
+	c.OCIVCNID = viper.GetString(OCIVCNID)
 
 	// Option maps and slices
 

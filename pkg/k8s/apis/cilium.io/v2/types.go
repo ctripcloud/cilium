@@ -23,6 +23,7 @@ import (
 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/node/addressing"
+	ociTypes "github.com/cilium/cilium/pkg/oci/vnic/types"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -387,6 +388,11 @@ type NodeSpec struct {
 	// +kubebuilder:validation:Optional
 	AlibabaCloud alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
 
+	// OCI is the OCI IPAM specific configuration.
+	//
+	// +kubebuilder:validation:Optional
+	OCI ociTypes.OciSpec `json:"oci,omitempty"`
+
 	// IPAM is the address management specification. This section can be
 	// populated by a user or it can be automatically populated by an IPAM
 	// operator.
@@ -444,6 +450,11 @@ type NodeStatus struct {
 	//
 	// +kubebuilder:validation:Optional
 	AlibabaCloud alibabaCloudTypes.ENIStatus `json:"alibaba-cloud,omitempty"`
+
+	// OCI is the Oracle Cloud Infrastructure specific status of the node.
+	//
+	// +kubebuilder:validation:Optional
+	OCI ociTypes.OciStatus `json:"oci,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

@@ -36,4 +36,7 @@ const (
 
 	// IPAMAlibabaCloud is the value to select the AlibabaCloud ENI IPAM plugin for option.IPAM
 	IPAMAlibabaCloud = "alibabacloud"
+
+	// IPAMOCI is the value to select the Oracle Cloud Infrastructure (OCI) VNIC IPAM plugin for option.IPAM
+	IPAMOCI = "oci"
 )

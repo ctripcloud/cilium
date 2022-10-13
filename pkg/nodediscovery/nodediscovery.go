@@ -44,6 +44,8 @@ import (
 	nodemanager "github.com/cilium/cilium/pkg/node/manager"
 	nodestore "github.com/cilium/cilium/pkg/node/store"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+	ociMetadata "github.com/cilium/cilium/pkg/oci/metadata"
+	ociTypes "github.com/cilium/cilium/pkg/oci/vnic/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
 	cnitypes "github.com/cilium/cilium/plugins/cilium-cni/types"
@@ -621,6 +623,56 @@ func (n *NodeDiscovery) mutateNodeResource(nodeResource *ciliumv2.CiliumNode) er
 				nodeResource.Spec.AlibabaCloud.SecurityGroupTags = c.AlibabaCloud.SecurityGroupTags
 			}
 		}
+
+	case ipamOption.IPAMOCI:
+		nodeResource.Spec.OCI = ociTypes.OciSpec{}
+		instanceID, instanceType, availabilityZone, vpcID, err := ociMetadata.GetInstanceMetadata()
+		if err != nil {
+			log.WithError(err).Fatal("Unable to retrieve InstanceID of own OCI instance")
+		}
+
+		if instanceID == "" {
+			return errors.New("InstanceID of own OCI instance is empty")
+		}
+
+		nodeResource.Spec.OCI.VCNID = vpcID
+		// nodeResource.Spec.OCI.FirstInterfaceIndex = getInt(defaults.ENIFirstInterfaceIndex)
+
+		if c := n.NetConf; c != nil {
+			if c.IPAM.MinAllocate != 0 {
+				nodeResource.Spec.IPAM.MinAllocate = c.IPAM.MinAllocate
+			}
+
+			if c.IPAM.PreAllocate != 0 {
+				nodeResource.Spec.IPAM.PreAllocate = c.IPAM.PreAllocate
+			}
+
+			// if c.ENI.FirstInterfaceIndex != nil {
+			// 	nodeResource.Spec.ENI.FirstInterfaceIndex = c.ENI.FirstInterfaceIndex
+			// }
+
+			// if len(c.ENI.SecurityGroups) > 0 {
+			// 	nodeResource.Spec.ENI.SecurityGroups = c.ENI.SecurityGroups
+			// }
+
+			if len(c.OCI.SubnetTags) > 0 {
+				nodeResource.Spec.OCI.SubnetTags = c.OCI.SubnetTags
+			}
+
+			if c.OCI.VCNID != "" {
+				log.WithFields(logrus.Fields{
+					"vcnIDFromMetadata": vpcID,
+					"vcnIDFromCNIConf":  c.OCI.VCNID,
+				}).Info("Using the VCN ID from CNI configuration file instead of from OCI metadata")
+				nodeResource.Spec.OCI.VCNID = c.OCI.VCNID
+			}
+
+			// nodeResource.Spec.OCI.DeleteOnTermination = c.OCI.DeleteOnTermination
+		}
+
+		nodeResource.Spec.InstanceID = instanceID
+		nodeResource.Spec.OCI.Shape = instanceType
+		nodeResource.Spec.OCI.AvailabilityDomain = availabilityZone
 	}
 
 	return nil

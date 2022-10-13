@@ -24,6 +24,7 @@ import (
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+	ociTypes "github.com/cilium/cilium/pkg/oci/vnic/types"
 
 	cniTypes "github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/pkg/types/current"
@@ -39,6 +40,7 @@ type NetConf struct {
 	Azure        azureTypes.AzureSpec   `json:"azure,omitempty"`
 	IPAM         ipamTypes.IPAMSpec     `json:"ipam,omitempty"`
 	AlibabaCloud alibabaCloudTypes.Spec `json:"alibaba-cloud,omitempty"`
+	OCI          ociTypes.OciSpec       `json:"oci,omitempty"`
 	EnableDebug  bool                   `json:"enable-debug"`
 	LogFormat    string                 `json:"log-format"`
 }
