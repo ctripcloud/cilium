@@ -1,0 +1,190 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kvstoremesh-config
+  namespace: kube-system
+data:
+  cluster-name: "k8s-cluster1"
+  cluster-id: "2"
+
+  kvstore: etcd
+  kvstore-opt: '{"etcd.config": "/tmp/cilium/config-map/etcd-config", "etcd.qps": "200"}'
+  etcd-config: |-
+    ---
+    endpoints:
+      - https://10.5.5.200:2379
+      - https://10.5.5.201:2379
+      - https://10.5.5.202:2379
+
+    # the following files will be mounted via k8s secrets
+    ca-file:   '/var/lib/etcd-secrets/etcd-client-ca.crt'
+    key-file:  '/var/lib/etcd-secrets/etcd-client.key'
+    cert-file: '/var/lib/etcd-secrets/etcd-client.crt'
+
+  remote-kvstores-config-dir: "/var/lib/kvstoremesh/"
+
+  # debug: "false"
+
+  enable-ipv4: "true"
+  enable-ipv6: "false"
+
+  # api-serve-addr: "0.0.0.0:9234"
+  # prometheus-serve-addr: ":9090"
+
+  # reconnect remote kvstore only if 1000 times (> 1 day) consecutive errors
+  # has been observed.
+  kvstore-max-consecutive-quorum-errors: "1000"
+
+  # profiling API, if enabled, will serve at localhost:6060
+  pprof: "false"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kvstoremesh-operator
+  namespace: kube-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kvstoremesh-operator
+rules:
+- apiGroups:
+  - discovery.k8s.io
+  resources:
+  - endpointslices # k8s api discovery needs this
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - ""
+  resources: # access kube-apiserver ServiceIP
+  - services
+  - endpoints
+  - namespaces # to check apiserver connectivity
+  verbs:
+  - get
+# For kvstoremesh-operator running in HA mode.
+#
+# Running in HA mode requires the use of ResourceLock for Leader Election
+# between mulitple running instances.
+# The preferred way of doing this is to use LeasesResourceLock as edits to Leases are less
+# common and fewer objects in the cluster watch "all Leases".
+- apiGroups:
+  - coordination.k8s.io
+  resources:
+  - leases
+  verbs:
+  - create
+  - get
+  - update
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kvstoremesh-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kvstoremesh-operator
+subjects:
+- kind: ServiceAccount
+  name: kvstoremesh-operator
+  namespace: kube-system
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  labels:
+    name: kvstoremesh-operator
+    app: kvstoremesh-operator
+  name: kvstoremesh-operator
+  namespace: kube-system
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      name: kvstoremesh-operator
+      app: kvstoremesh-operator
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        name: kvstoremesh-operator
+        app: kvstoremesh-operator
+    spec:
+      # In HA mode, kvstoremesh-operator pods must not be scheduled on the same
+      # node as they will clash with each other.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchExpressions:
+              - key: name
+                operator: In
+                values:
+                - kvstoremesh-operator
+            topologyKey: "kubernetes.io/hostname"
+        nodeAffinity: # Trip.com: select node by cni
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: cloud.ctrip.com/cni
+                operator: In
+                values:
+                - "cilium"
+      containers:
+      - args:
+        - --config-dir=/tmp/cilium/config-map
+        command:
+        - /kvstoremesh-operator
+        image: kvstoremesh-operator:v0.1.0-rc1
+        imagePullPolicy: IfNotPresent
+        name: kvstoremesh-operator
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 9235
+            scheme: HTTP
+          initialDelaySeconds: 60
+          periodSeconds: 10
+          timeoutSeconds: 3
+        volumeMounts:
+        - mountPath: /tmp/cilium/config-map
+          name: kvstoremesh-config-path
+          readOnly: true
+        - mountPath: /var/lib/etcd-secrets
+          name: etcd-secrets
+          readOnly: true
+        - mountPath: /var/lib/kvstoremesh
+          name: kvstoremesh-secrets
+          readOnly: true
+      hostNetwork: false
+      priorityClassName: system-cluster-critical
+      restartPolicy: Always
+      serviceAccount: kvstoremesh-operator
+      serviceAccountName: kvstoremesh-operator
+      tolerations:
+      - effect: "NoSchedule"
+        operator: Exists
+      volumes:
+      # To read the etcd config stored in config maps
+      - configMap:
+          name: kvstoremesh-config
+        name: kvstoremesh-config-path
+      - name: etcd-secrets
+        secret:
+          defaultMode: 420
+          optional: true
+          secretName: cilium-etcd-secrets
+      - name: kvstoremesh-secrets
+        secret:
+          defaultMode: 420
+          optional: true
+          secretName: cilium-kvstoremesh-secrets
