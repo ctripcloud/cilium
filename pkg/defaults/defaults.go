@@ -509,6 +509,10 @@ const (
 
 	// Enable BGP control plane features.
 	EnableBGPControlPlane = false
+
+	// MaxControllerRetryInterval is the default value for a
+	// controller's maximum wait interval in error retries.
+	MaxControllerRetryInterval = 1 * time.Minute
 )
 
 var (

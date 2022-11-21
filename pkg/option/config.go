@@ -636,6 +636,10 @@ const (
 	// of MaxControllerInterval.
 	MaxCtrlIntervalName = "max-controller-interval"
 
+	// MaxCtrlRetryIntervalName and MaxCtrlRetryIntervalNameEnv allow
+	// configuration of MaxControllerRetryInterval.
+	MaxCtrlRetryIntervalName = "max-controller-retry-interval"
+
 	// SockopsEnableName is the name of the option to enable sockops
 	SockopsEnableName = "sockops-enable"
 
@@ -1447,6 +1451,10 @@ type DaemonConfig struct {
 	// MaxControllerInterval is the maximum value for a controller's
 	// RunInterval. Zero means unlimited.
 	MaxControllerInterval int
+
+	// MaxControllerRetryInterval is the maximum value for a controller's
+	// error retry interval.
+	MaxControllerRetryInterval time.Duration
 
 	// UseSingleClusterRoute specifies whether to use a single cluster route
 	// instead of per-node routes.
@@ -2304,6 +2312,8 @@ var (
 		ExternalClusterIP:     defaults.ExternalClusterIP,
 		EnableVTEP:            defaults.EnableVTEP,
 		EnableBGPControlPlane: defaults.EnableBGPControlPlane,
+
+		MaxControllerRetryInterval: defaults.MaxControllerRetryInterval,
 	}
 )
 
@@ -3239,6 +3249,7 @@ func (c *DaemonConfig) Populate(vp *viper.Viper) {
 	c.K8sNamespace = vp.GetString(K8sNamespaceName)
 	c.AgentNotReadyNodeTaintKey = vp.GetString(AgentNotReadyNodeTaintKeyName)
 	c.MaxControllerInterval = vp.GetInt(MaxCtrlIntervalName)
+	c.MaxControllerRetryInterval = viper.GetDuration(MaxCtrlRetryIntervalName)
 	c.PolicyQueueSize = sanitizeIntParam(vp, PolicyQueueSize, defaults.PolicyQueueSize)
 	c.EndpointQueueSize = sanitizeIntParam(vp, EndpointQueueSize, defaults.EndpointQueueSize)
 	c.EndpointGCInterval = vp.GetDuration(EndpointGCInterval)

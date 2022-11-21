@@ -688,6 +688,10 @@ func initializeFlags() {
 	flags.MarkHidden(option.MaxCtrlIntervalName)
 	option.BindEnv(Vp, option.MaxCtrlIntervalName)
 
+	flags.Duration(option.MaxCtrlRetryIntervalName, defaults.MaxControllerRetryInterval, "Maximum interval for controller error retries")
+	flags.MarkHidden(option.MaxCtrlRetryIntervalName)
+	option.BindEnv(Vp, option.MaxCtrlRetryIntervalName)
+
 	flags.StringSlice(option.Metrics, []string{}, "Metrics that should be enabled or disabled from the default metric list. (+metric_foo to enable metric_foo , -metric_bar to disable metric_bar)")
 	option.BindEnv(Vp, option.Metrics)
 
@@ -1230,6 +1234,10 @@ func initEnv() {
 
 	if option.Config.MaxControllerInterval < 0 {
 		scopedLog.Fatalf("Invalid %s value %d", option.MaxCtrlIntervalName, option.Config.MaxControllerInterval)
+	}
+
+	if option.Config.MaxControllerRetryInterval < 5*time.Second || option.Config.MaxControllerRetryInterval > 5*time.Minute {
+		scopedLog.Fatalf("Invalid %s value %d, valid range [5s, 5m]", option.MaxCtrlRetryIntervalName, option.Config.MaxControllerRetryInterval)
 	}
 
 	// set rlimit Memlock to INFINITY before creating any bpf resources.

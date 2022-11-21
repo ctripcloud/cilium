@@ -188,6 +188,7 @@ func (c *Controller) GetLastErrorTimestamp() time.Time {
 
 func (c *Controller) runController() {
 	errorRetries := 1
+	maxRetryInterval := option.Config.MaxControllerRetryInterval
 
 	c.mutex.RLock()
 	params := c.params
@@ -234,6 +235,14 @@ func (c *Controller) runController() {
 							interval = time.Duration(errorRetries) * params.ErrorRetryBaseDuration
 						} else {
 							interval = time.Duration(errorRetries) * time.Second
+						}
+
+						if interval > maxRetryInterval {
+							c.getLogger().WithFields(logrus.Fields{
+								"calculatedInterval": interval,
+								"maxAllowedInterval": maxRetryInterval,
+							}).Debug("Cap retry interval to max allowed value")
+							interval = maxRetryInterval
 						}
 
 						errorRetries++
