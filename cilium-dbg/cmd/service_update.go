@@ -120,6 +120,10 @@ func updateService(cmd *cobra.Command, args []string) {
 	warnIdTypeDeprecation()
 
 	id := int64(idU)
+	if id > 65535 {
+		Fatalf("Service ID %d exceeds the maximum limit of 65535", id)
+	}
+
 	fa := parseFrontendAddress(protocol, frontend)
 	skipFrontendCheck := false
 
