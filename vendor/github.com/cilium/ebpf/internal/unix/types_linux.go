@@ -9,25 +9,6 @@ import (
 )
 
 const (
-	ENOENT     = linux.ENOENT
-	EEXIST     = linux.EEXIST
-	EAGAIN     = linux.EAGAIN
-	ENOSPC     = linux.ENOSPC
-	EINVAL     = linux.EINVAL
-	EPOLLIN    = linux.EPOLLIN
-	EINTR      = linux.EINTR
-	EPERM      = linux.EPERM
-	ESRCH      = linux.ESRCH
-	ENODEV     = linux.ENODEV
-	EBADF      = linux.EBADF
-	E2BIG      = linux.E2BIG
-	EFAULT     = linux.EFAULT
-	EACCES     = linux.EACCES
-	EILSEQ     = linux.EILSEQ
-	EOPNOTSUPP = linux.EOPNOTSUPP
-)
-
-const (
 	BPF_F_NO_PREALLOC         = linux.BPF_F_NO_PREALLOC
 	BPF_F_NUMA_NODE           = linux.BPF_F_NUMA_NODE
 	BPF_F_RDONLY              = linux.BPF_F_RDONLY
@@ -35,9 +16,12 @@ const (
 	BPF_F_RDONLY_PROG         = linux.BPF_F_RDONLY_PROG
 	BPF_F_WRONLY_PROG         = linux.BPF_F_WRONLY_PROG
 	BPF_F_SLEEPABLE           = linux.BPF_F_SLEEPABLE
+	BPF_F_XDP_HAS_FRAGS       = linux.BPF_F_XDP_HAS_FRAGS
 	BPF_F_MMAPABLE            = linux.BPF_F_MMAPABLE
 	BPF_F_INNER_MAP           = linux.BPF_F_INNER_MAP
 	BPF_F_KPROBE_MULTI_RETURN = linux.BPF_F_KPROBE_MULTI_RETURN
+	BPF_F_UPROBE_MULTI_RETURN = linux.BPF_F_UPROBE_MULTI_RETURN
+	BPF_F_LOCK                = linux.BPF_F_LOCK
 	BPF_OBJ_NAME_LEN          = linux.BPF_OBJ_NAME_LEN
 	BPF_TAG_SIZE              = linux.BPF_TAG_SIZE
 	BPF_RINGBUF_BUSY_BIT      = linux.BPF_RINGBUF_BUSY_BIT
@@ -49,9 +33,12 @@ const (
 	EPOLL_CLOEXEC             = linux.EPOLL_CLOEXEC
 	O_CLOEXEC                 = linux.O_CLOEXEC
 	O_NONBLOCK                = linux.O_NONBLOCK
+	PROT_NONE                 = linux.PROT_NONE
 	PROT_READ                 = linux.PROT_READ
 	PROT_WRITE                = linux.PROT_WRITE
+	MAP_ANON                  = linux.MAP_ANON
 	MAP_SHARED                = linux.MAP_SHARED
+	MAP_PRIVATE               = linux.MAP_PRIVATE
 	PERF_ATTR_SIZE_VER1       = linux.PERF_ATTR_SIZE_VER1
 	PERF_TYPE_SOFTWARE        = linux.PERF_TYPE_SOFTWARE
 	PERF_TYPE_TRACEPOINT      = linux.PERF_TYPE_TRACEPOINT
@@ -60,6 +47,7 @@ const (
 	PERF_EVENT_IOC_ENABLE     = linux.PERF_EVENT_IOC_ENABLE
 	PERF_EVENT_IOC_SET_BPF    = linux.PERF_EVENT_IOC_SET_BPF
 	PerfBitWatermark          = linux.PerfBitWatermark
+	PerfBitWriteBackward      = linux.PerfBitWriteBackward
 	PERF_SAMPLE_RAW           = linux.PERF_SAMPLE_RAW
 	PERF_FLAG_FD_CLOEXEC      = linux.PERF_FLAG_FD_CLOEXEC
 	RLIM_INFINITY             = linux.RLIM_INFINITY
@@ -73,10 +61,16 @@ const (
 	SO_DETACH_BPF             = linux.SO_DETACH_BPF
 	SOL_SOCKET                = linux.SOL_SOCKET
 	SIGPROF                   = linux.SIGPROF
+	SIGUSR1                   = linux.SIGUSR1
 	SIG_BLOCK                 = linux.SIG_BLOCK
 	SIG_UNBLOCK               = linux.SIG_UNBLOCK
-	EM_NONE                   = linux.EM_NONE
-	EM_BPF                    = linux.EM_BPF
+	BPF_FS_MAGIC              = linux.BPF_FS_MAGIC
+	TRACEFS_MAGIC             = linux.TRACEFS_MAGIC
+	DEBUGFS_MAGIC             = linux.DEBUGFS_MAGIC
+	BPF_RB_NO_WAKEUP          = linux.BPF_RB_NO_WAKEUP
+	BPF_RB_FORCE_WAKEUP       = linux.BPF_RB_FORCE_WAKEUP
+	AF_UNSPEC                 = linux.AF_UNSPEC
+	IFF_UP                    = linux.IFF_UP
 )
 
 type Statfs_t = linux.Statfs_t
@@ -88,6 +82,7 @@ type PerfEventMmapPage = linux.PerfEventMmapPage
 type EpollEvent = linux.EpollEvent
 type PerfEventAttr = linux.PerfEventAttr
 type Utsname = linux.Utsname
+type CPUSet = linux.CPUSet
 
 func Syscall(trap, a1, a2, a3 uintptr) (r1, r2 uintptr, err syscall.Errno) {
 	return linux.Syscall(trap, a1, a2, a3)
@@ -173,6 +168,10 @@ func ByteSliceToString(s []byte) string {
 	return linux.ByteSliceToString(s)
 }
 
+func ByteSliceFromString(s string) ([]byte, error) {
+	return linux.ByteSliceFromString(s)
+}
+
 func Renameat2(olddirfd int, oldpath string, newdirfd int, newpath string, flags uint) error {
 	return linux.Renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
 }
@@ -187,4 +186,20 @@ func Open(path string, mode int, perm uint32) (int, error) {
 
 func Fstat(fd int, stat *Stat_t) error {
 	return linux.Fstat(fd, stat)
+}
+
+func SetsockoptInt(fd, level, opt, value int) error {
+	return linux.SetsockoptInt(fd, level, opt, value)
+}
+
+func SchedSetaffinity(pid int, set *CPUSet) error {
+	return linux.SchedSetaffinity(pid, set)
+}
+
+func SchedGetaffinity(pid int, set *CPUSet) error {
+	return linux.SchedGetaffinity(pid, set)
+}
+
+func Auxv() ([][2]uintptr, error) {
+	return linux.Auxv()
 }

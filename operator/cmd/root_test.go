@@ -6,8 +6,11 @@ package cmd
 import (
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"go.uber.org/goleak"
+
+	"github.com/cilium/cilium/pkg/hive"
 )
 
 // TestOperatorHive verifies that the Operator hive can be instantiated with
@@ -21,6 +24,6 @@ func TestOperatorHive(t *testing.T) {
 		goleak.IgnoreCurrent(),
 	)
 
-	err := operatorHive.Populate()
+	err := hive.New(Operator).Populate(hivetest.Logger(t))
 	assert.NoError(t, err, "Populate()")
 }

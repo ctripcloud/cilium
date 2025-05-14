@@ -8,93 +8,76 @@ import (
 	"testing"
 
 	"github.com/cilium/ebpf/rlimit"
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
 	datapathTypes "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/loadbalancer"
+	"github.com/cilium/cilium/pkg/maglev"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
-	"github.com/cilium/cilium/pkg/version"
-	"github.com/cilium/cilium/pkg/versioncheck"
 )
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
 type MaglevSuite struct {
-	prevMaglevTableSize int
-	prevNodePortAlg     string
 }
 
-var _ = Suite(&MaglevSuite{})
+func setupMaglevSuite(tb testing.TB) *MaglevSuite {
+	testutils.PrivilegedTest(tb)
 
-func (s *MaglevSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-
-	vsn, err := version.GetKernelVersion()
-	c.Assert(err, IsNil)
-	constraint, err := versioncheck.Compile(">=4.11.0")
-	c.Assert(err, IsNil)
-
-	if !constraint(vsn) {
-		// Currently, we run privileged tests on the 4.9 kernel in CI. That
-		// kernel does not have the support for map-in-map. Thus, this skip.
-		c.Skip("Skipping as >= 4.11 kernel is required for map-in-map support")
-	}
-
-	s.prevMaglevTableSize = option.Config.MaglevTableSize
-	s.prevNodePortAlg = option.Config.NodePortAlg
+	s := &MaglevSuite{}
 
 	// Otherwise opening the map might fail with EPERM
-	err = rlimit.RemoveMemlock()
-	c.Assert(err, IsNil)
-
-	option.Config.LBMapEntries = DefaultMaxEntries
-	option.Config.NodePortAlg = option.NodePortAlgMaglev
+	err := rlimit.RemoveMemlock()
+	require.NoError(tb, err)
 
 	Init(InitParams{
 		IPv4: option.Config.EnableIPv4,
 		IPv6: option.Config.EnableIPv6,
 
-		ServiceMapMaxEntries: option.Config.LBMapEntries,
-		RevNatMapMaxEntries:  option.Config.LBMapEntries,
-		MaglevMapMaxEntries:  option.Config.LBMapEntries,
+		ServiceMapMaxEntries: DefaultMaxEntries,
+		RevNatMapMaxEntries:  DefaultMaxEntries,
+		MaglevMapMaxEntries:  DefaultMaxEntries,
 	})
+
+	return s
 }
 
-func (s *MaglevSuite) TeadDownTest(c *C) {
-	option.Config.MaglevTableSize = s.prevMaglevTableSize
-	option.Config.NodePortAlg = s.prevNodePortAlg
-}
+func TestInitMaps(t *testing.T) {
+	setupMaglevSuite(t)
+	logger := hivetest.Logger(t)
 
-func (s *MaglevSuite) TestInitMaps(c *C) {
-	option.Config.MaglevTableSize = 251
-	err := InitMaglevMaps(true, false, uint32(option.Config.MaglevTableSize))
-	c.Assert(err, IsNil)
+	maglevTableSize := uint(251)
+	err := InitMaglevMaps(logger, true, false, uint32(maglevTableSize))
+	require.NoError(t, err)
 
-	option.Config.MaglevTableSize = 509
+	maglevTableSize = 509
 	// M mismatch, so the map should be removed
-	deleted, err := deleteMapIfMNotMatch(MaglevOuter4MapName, uint32(option.Config.MaglevTableSize))
-	c.Assert(err, IsNil)
-	c.Assert(deleted, Equals, true)
+	deleted, err := deleteMapIfMNotMatch(logger, MaglevOuter4MapName, uint32(maglevTableSize))
+	require.NoError(t, err)
+	require.True(t, deleted)
 
 	// M is the same, but no entries, so the map should be removed too
-	err = InitMaglevMaps(true, false, uint32(option.Config.MaglevTableSize))
-	c.Assert(err, IsNil)
-	deleted, err = deleteMapIfMNotMatch(MaglevOuter4MapName, uint32(option.Config.MaglevTableSize))
-	c.Assert(err, IsNil)
-	c.Assert(deleted, Equals, true)
+	err = InitMaglevMaps(logger, true, false, uint32(maglevTableSize))
+	require.NoError(t, err)
+	deleted, err = deleteMapIfMNotMatch(logger, MaglevOuter4MapName, uint32(maglevTableSize))
+	require.NoError(t, err)
+	require.True(t, deleted)
 
 	// Now insert the entry, so that the map should not be removed
-	err = InitMaglevMaps(true, false, uint32(option.Config.MaglevTableSize))
-	c.Assert(err, IsNil)
-	lbm := New()
+	err = InitMaglevMaps(logger, true, false, uint32(maglevTableSize))
+	require.NoError(t, err)
+	cfg, err := maglev.UserConfig{
+		TableSize: maglevTableSize,
+		HashSeed:  maglev.DefaultHashSeed,
+	}.ToConfig()
+	require.NoError(t, err, "ToConfig")
+	ml := maglev.New(cfg, hivetest.Lifecycle(t))
+	lbm := New(logger, loadbalancer.DefaultConfig, ml)
 	params := &datapathTypes.UpsertServiceParams{
 		ID:   1,
 		IP:   net.ParseIP("1.1.1.1"),
 		Port: 8080,
-		ActiveBackends: map[string]*loadbalancer.Backend{"backend-1": {
+		ActiveBackends: map[string]*loadbalancer.LegacyBackend{"backend-1": {
 			ID:     1,
 			Weight: 1,
 		}},
@@ -102,8 +85,8 @@ func (s *MaglevSuite) TestInitMaps(c *C) {
 		UseMaglev: true,
 	}
 	err = lbm.UpsertService(params)
-	c.Assert(err, IsNil)
-	deleted, err = deleteMapIfMNotMatch(MaglevOuter4MapName, uint32(option.Config.MaglevTableSize))
-	c.Assert(err, IsNil)
-	c.Assert(deleted, Equals, false)
+	require.NoError(t, err)
+	deleted, err = deleteMapIfMNotMatch(logger, MaglevOuter4MapName, uint32(maglevTableSize))
+	require.NoError(t, err)
+	require.False(t, deleted)
 }

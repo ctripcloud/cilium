@@ -40,11 +40,11 @@ func CreateVM(scope string) error {
 	cmd := getCmd(createCMD)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return fmt.Errorf("error getting stdout: %s", err)
+		return fmt.Errorf("error getting stdout: %w", err)
 	}
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
-		return fmt.Errorf("error getting stderr: %s", err)
+		return fmt.Errorf("error getting stderr: %w", err)
 	}
 
 	globalWriter := ginkgoext.NewWriter(ginkgo.GinkgoWriter)
@@ -139,7 +139,7 @@ func Status(key string) map[string]string {
 	if err != nil {
 		return result
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	for line := range strings.SplitSeq(string(data), "\n") {
 		val := strings.Split(line, ",")
 		if len(val) > 2 && val[2] == "state" {
 			result[val[1]] = val[3]

@@ -7,47 +7,53 @@ package cmd
 
 import (
 	"fmt"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/spf13/afero"
+	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
+	"github.com/cilium/cilium/pkg/loadbalancer"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/sysctl"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
 type NodePortSuite struct {
 	prevEphemeralPortRange string
 	prevReservedPortRanges string
+	sysctl                 sysctl.Sysctl
 }
 
-var _ = Suite(&NodePortSuite{})
+func setupNodePortSuite(tb testing.TB) *NodePortSuite {
+	testutils.PrivilegedTest(tb)
 
-func (s *NodePortSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-}
-
-func (s *NodePortSuite) SetUpTest(c *C) {
-	prevEphemeralPortRange, err := sysctl.Read("net.ipv4.ip_local_port_range")
-	c.Assert(err, IsNil)
+	s := &NodePortSuite{}
+	s.sysctl = sysctl.NewDirectSysctl(afero.NewOsFs(), "/proc")
+	prevEphemeralPortRange, err := s.sysctl.Read([]string{"net", "ipv4", "ip_local_port_range"})
+	require.NoError(tb, err)
 	s.prevEphemeralPortRange = prevEphemeralPortRange
-	prevReservedPortRanges, err := sysctl.Read("net.ipv4.ip_local_reserved_ports")
-	c.Assert(err, IsNil)
+	prevReservedPortRanges, err := s.sysctl.Read([]string{"net", "ipv4", "ip_local_reserved_ports"})
+	require.NoError(tb, err)
 	s.prevReservedPortRanges = prevReservedPortRanges
+
+	tb.Cleanup(func() {
+		err = s.sysctl.Write([]string{"net", "ipv4", "ip_local_port_range"}, s.prevEphemeralPortRange)
+		require.NoError(tb, err)
+		err = s.sysctl.Write([]string{"net", "ipv4", "ip_local_reserved_ports"}, s.prevReservedPortRanges)
+		require.NoError(tb, err)
+	})
+
+	return s
 }
 
-func (s *NodePortSuite) TearDownTest(c *C) {
-	err := sysctl.Write("net.ipv4.ip_local_port_range", s.prevEphemeralPortRange)
-	c.Assert(err, IsNil)
-	err = sysctl.Write("net.ipv4.ip_local_reserved_ports", s.prevReservedPortRanges)
-	c.Assert(err, IsNil)
-}
+func TestCheckNodePortAndEphemeralPortRanges(t *testing.T) {
+	s := setupNodePortSuite(t)
 
-func (s *NodePortSuite) TestCheckNodePortAndEphemeralPortRanges(c *C) {
 	cases := []struct {
-		npMin       int
-		npMax       int
-		epMin       int
-		epMax       int
+		npMin       uint16
+		npMax       uint16
+		epMin       uint16
+		epMax       uint16
 		resPorts    string
 		autoProtect bool
 
@@ -65,23 +71,24 @@ func (s *NodePortSuite) TestCheckNodePortAndEphemeralPortRanges(c *C) {
 	}
 
 	for _, test := range cases {
-		option.Config.NodePortMin = test.npMin
-		option.Config.NodePortMax = test.npMax
+		var cfg loadbalancer.Config
+		cfg.NodePortMin = test.npMin
+		cfg.NodePortMax = test.npMax
 		option.Config.EnableAutoProtectNodePortRange = test.autoProtect
-		err := sysctl.Write("net.ipv4.ip_local_port_range",
+		err := s.sysctl.Write([]string{"net", "ipv4", "ip_local_port_range"},
 			fmt.Sprintf("%d %d", test.epMin, test.epMax))
-		c.Assert(err, IsNil)
-		err = sysctl.Write("net.ipv4.ip_local_reserved_ports", test.resPorts)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
+		err = s.sysctl.Write([]string{"net", "ipv4", "ip_local_reserved_ports"}, test.resPorts)
+		require.NoError(t, err)
 
-		err = checkNodePortAndEphemeralPortRanges()
+		err = checkNodePortAndEphemeralPortRanges(cfg, s.sysctl)
 		if test.expErr {
-			c.Assert(err, ErrorMatches, test.expErrMatch)
+			require.Condition(t, errorMatch(err, test.expErrMatch))
 		} else {
-			c.Assert(err, IsNil)
-			resPorts, err := sysctl.Read("net.ipv4.ip_local_reserved_ports")
-			c.Assert(err, IsNil)
-			c.Assert(resPorts, Equals, test.expResPorts)
+			require.NoError(t, err)
+			resPorts, err := s.sysctl.Read([]string{"net", "ipv4", "ip_local_reserved_ports"})
+			require.NoError(t, err)
+			require.Equal(t, test.expResPorts, resPorts)
 		}
 	}
 }

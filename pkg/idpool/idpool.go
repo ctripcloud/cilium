@@ -65,8 +65,8 @@ type IDPool struct {
 }
 
 // NewIDPool returns a new ID pool
-func NewIDPool(minID ID, maxID ID) IDPool {
-	return IDPool{
+func NewIDPool(minID ID, maxID ID) *IDPool {
+	return &IDPool{
 		minID:   minID,
 		maxID:   maxID,
 		idCache: newIDCache(minID, maxID),
@@ -144,10 +144,7 @@ type idCache struct {
 }
 
 func newIDCache(minID ID, maxID ID) *idCache {
-	n := int(maxID - minID + 1)
-	if n < 0 {
-		n = 0
-	}
+	n := max(int(maxID-minID+1), 0)
 
 	c := &idCache{
 		ids:    make(map[ID]struct{}, n),

@@ -6,29 +6,22 @@ package iana
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 )
 
-type IANATestSuite struct{}
-
-var _ = Suite(&IANATestSuite{})
-
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) { TestingT(t) }
-
-func (s *IANATestSuite) TestIsSvcName(c *C) {
-	c.Assert(IsSvcName(""), Equals, false)                 // Too short
-	c.Assert(IsSvcName("1234567890abcdef"), Equals, false) // Too long
-	c.Assert(IsSvcName("1"), Equals, false)                // Missing letter
-	c.Assert(IsSvcName("1a"), Equals, true)
-	c.Assert(IsSvcName("Z"), Equals, true)
-	c.Assert(IsSvcName("a9"), Equals, true)
-	c.Assert(IsSvcName("a-9"), Equals, true)
-	c.Assert(IsSvcName("a--9"), Equals, false) // Two consecutive dashes
-	c.Assert(IsSvcName("-a9"), Equals, false)  // Begins with a dash
-	c.Assert(IsSvcName("a9-"), Equals, false)  // Ends with a dash
-	c.Assert(IsSvcName("a-b9-1"), Equals, true)
-	c.Assert(IsSvcName("1-a-9"), Equals, true)
-	c.Assert(IsSvcName("a-b-c-d-e-f"), Equals, true)
-	c.Assert(IsSvcName("1-2-3-4"), Equals, false) // No letter(s)
+func TestIsSvcName(t *testing.T) {
+	require.False(t, IsSvcName(""))                 // Too short
+	require.False(t, IsSvcName("1234567890abcdef")) // Too long
+	require.False(t, IsSvcName("1"))                // Missing letter
+	require.True(t, IsSvcName("1a"))
+	require.True(t, IsSvcName("Z"))
+	require.True(t, IsSvcName("a9"))
+	require.True(t, IsSvcName("a-9"))
+	require.False(t, IsSvcName("a--9")) // Two consecutive dashes
+	require.False(t, IsSvcName("-a9"))  // Begins with a dash
+	require.False(t, IsSvcName("a9-"))  // Ends with a dash
+	require.True(t, IsSvcName("a-b9-1"))
+	require.True(t, IsSvcName("1-a-9"))
+	require.True(t, IsSvcName("a-b-c-d-e-f"))
+	require.False(t, IsSvcName("1-2-3-4")) // No letter(s)
 }

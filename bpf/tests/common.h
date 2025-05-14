@@ -1,14 +1,15 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef ____BPF_TEST_COMMON____
-#define ____BPF_TEST_COMMON____
+#pragma once
 
 #include <linux/types.h>
 #include <linux/bpf.h>
 #include <bpf/compiler.h>
 #include <bpf/loader.h>
 #include <bpf/section.h>
+
+#define ENABLE_SERVICE_PROTOCOL_DIFFERENTIATION		1
 
 /* We can use this macro inside the actual datapath code
  * to compile-in the code for testing. The primary usecase
@@ -58,11 +59,14 @@
 	___bpf_apply(__bpf_log_arg, ___bpf_narg(args))(ptr, args)
 
 /* These values have to stay in sync with the enum */
-/* values in test/bpf_tests/trf.proto */
+/* values in bpf/tests/bpftest/trf.proto */
 #define TEST_ERROR 0
 #define TEST_PASS 1
 #define TEST_FAIL 2
 #define TEST_SKIP 3
+
+/* Max number of cpus to check when doing percpu hash assertions */
+#define NR_CPUS 128
 
 /* Use an array map with 1 key and a large value size as buffer to write results */
 /* into. */
@@ -102,27 +106,31 @@ struct {
  *      **%li**, **%lu**, **%lx**, **%lld**, **%lli**, **%llu**, **%llx**,
  *      **%p**. No modifier (size of field, padding with zeroes, etc.)
  *      is available
+ * Each log message is automatically prefixed with the source file name and
+ * line number in the format "file:line: " to help with identifying the exact
+ * origin of the log entry in the source code. This information is particularly
+ * useful for debugging and tracing test execution flow.
  */
-#define test_log(fmt, args...)						\
-({									\
-	static const char ____fmt[] = fmt;				\
-	if (test_result_cursor) {					\
-		*(suite_result_cursor++) = MKR_TEST_LOG;		\
-	} else {							\
-		*(suite_result_cursor++) = MKR_SUITE_LOG;		\
-	}								\
-	*(suite_result_cursor++) = 2 + sizeof(____fmt) +		\
-		___bpf_narg(args) +					\
-		(___bpf_narg(args) * sizeof(unsigned long long));	\
-	*(suite_result_cursor++) = MKR_LOG_FMT;			\
-	*(suite_result_cursor++) = sizeof(____fmt);			\
-	memcpy(suite_result_cursor, ____fmt, sizeof(____fmt));		\
-	suite_result_cursor += sizeof(____fmt);			\
-									\
-									\
-	if (___bpf_narg(args) > 0) {					\
-		__bpf_log_arg(suite_result_cursor, args);		\
-	}								\
+#define test_log(fmt, args...)								\
+({											\
+	static const char ____fileline[] = __FILE__ ":" LINE_STRING  ": ";		\
+	static const char ____fmt[] = fmt;						\
+	if (test_result_cursor) {							\
+		*(suite_result_cursor++) = MKR_TEST_LOG;				\
+	} else {									\
+		*(suite_result_cursor++) = MKR_SUITE_LOG;				\
+	}										\
+	*(suite_result_cursor++) = 2 + sizeof(____fileline) - 1 + sizeof(____fmt) +	\
+		___bpf_narg(args) + (___bpf_narg(args) * sizeof(unsigned long long));	\
+	*(suite_result_cursor++) = MKR_LOG_FMT;						\
+	*(suite_result_cursor++) = sizeof(____fileline) - 1 + sizeof(____fmt);		\
+	memcpy(suite_result_cursor, ____fileline, sizeof(____fileline) - 1);		\
+	suite_result_cursor += sizeof(____fileline) - 1;				\
+	memcpy(suite_result_cursor, ____fmt, sizeof(____fmt));				\
+	suite_result_cursor += sizeof(____fmt);						\
+	if (___bpf_narg(args) > 0) {							\
+		__bpf_log_arg(suite_result_cursor, args);				\
+	}										\
 })
 
 /* This is a hack to allow us to convert the integer produced by __LINE__ */
@@ -257,19 +265,19 @@ test_result_cursor = 0;
 #define SETUP(progtype, name) __section(progtype "/test/" name "/setup")
 #define CHECK(progtype, name) __section(progtype "/test/" name "/check")
 
-#define LPM_LOOKUP_FN(NAME, IPTYPE, PREFIXES, MAP, LOOKUP_FN)	\
-static __always_inline int __##NAME(IPTYPE addr)		\
-{								\
-	int prefixes[] = { PREFIXES };				\
-	const int size = ARRAY_SIZE(prefixes);			\
-	int i;							\
-								\
-_Pragma("unroll")						\
-	for (i = 0; i < size; i++)				\
-		if (LOOKUP_FN(&(MAP), addr, prefixes[i]))	\
-			return 1;				\
-								\
-	return 0;						\
-}
-
-#endif /* ____BPF_TEST_COMMON____ */
+/* Asserts that the sum of per-cpu metrics map slots for a key equals count */
+#define assert_metrics_count(key, count) \
+({ \
+	struct metrics_value *__entry = NULL; \
+	__u64 sum = 0; \
+	/* Iterate until lookup encounters null when hitting cpu number */ \
+	/* Assumes at most 128 CPUS */ \
+	for (int i = 0; i < NR_CPUS; i++) { \
+		__entry = map_lookup_percpu_elem(&cilium_metrics, &key, i); \
+		if (!__entry) { \
+			break; \
+		} \
+		sum += __entry->count; \
+	} \
+	assert(sum == count); \
+})

@@ -4,22 +4,20 @@
 package seven
 
 import (
-	"io"
 	"net/http"
 	"net/url"
 	"testing"
 
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/cilium/cilium/pkg/hubble/testutils"
+	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
-
-var log *logrus.Logger
 
 var (
 	fakeTimestamp = "2006-01-02T15:04:05.999999999Z"
@@ -32,7 +30,7 @@ var (
 		IPv4:     "10.16.32.10",
 		IPv6:     "f00d::a10:0:0:abcd",
 		Identity: 9876,
-		Labels:   []string{"k1=v1", "k2=v2"},
+		Labels:   labels.ParseLabelArray("k1=v1", "k2=v2"),
 	}
 	fakeDestinationEndpoint = accesslog.EndpointInfo{
 		ID:       4321,
@@ -40,14 +38,9 @@ var (
 		IPv6:     "f00d::a10:0:0:1234",
 		Port:     80,
 		Identity: 6789,
-		Labels:   []string{"k3=v3", "k4=v4"},
+		Labels:   labels.ParseLabelArray("k3=v3", "k4=v4"),
 	}
 )
-
-func init() {
-	log = logrus.New()
-	log.SetOutput(io.Discard)
-}
 
 func BenchmarkL7Decode(b *testing.B) {
 	requestPath, err := url.Parse("http://myhost/some/path")
@@ -83,13 +76,13 @@ func BenchmarkL7Decode(b *testing.B) {
 	serviceGetter := &testutils.NoopServiceGetter
 	endpointGetter := &testutils.NoopEndpointGetter
 
-	parser, err := New(log, dnsGetter, ipGetter, serviceGetter, endpointGetter)
+	parser, err := New(hivetest.Logger(b), dnsGetter, ipGetter, serviceGetter, endpointGetter)
 	require.NoError(b, err)
 
 	f := &flowpb.Flow{}
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		_ = parser.Decode(lr, f)
 	}
 }
@@ -100,4 +93,36 @@ func Test_decodeVerdict(t *testing.T) {
 	assert.Equal(t, flowpb.Verdict_ERROR, decodeVerdict(accesslog.VerdictError))
 	assert.Equal(t, flowpb.Verdict_REDIRECTED, decodeVerdict(accesslog.VerdictRedirected))
 	assert.Equal(t, flowpb.Verdict_VERDICT_UNKNOWN, decodeVerdict("bad"))
+}
+
+func Test_decodeEndpoint(t *testing.T) {
+	epi := accesslog.EndpointInfo{
+		ID:       1234,
+		Identity: 9876,
+		Labels: labels.ParseLabelArray(
+			"k8s:io.cilium.k8s.policy.cluster=default",
+			"k8s:io.kubernetes.pod.namespace=kube-system",
+			"k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=kube-system",
+			"k8s:k8s-app=hubble-ui",
+			"k8s:app.kubernetes.io/name=hubble-ui",
+			"k8s:app.kubernetes.io/part-of=cilium",
+		),
+	}
+	expected := &flowpb.Endpoint{
+		ID:          1234,
+		Identity:    9876,
+		ClusterName: "default",
+		Namespace:   "kube-system",
+		Labels: []string{
+			"k8s:app.kubernetes.io/name=hubble-ui",
+			"k8s:app.kubernetes.io/part-of=cilium",
+			"k8s:io.cilium.k8s.namespace.labels.kubernetes.io/metadata.name=kube-system",
+			"k8s:io.cilium.k8s.policy.cluster=default",
+			"k8s:io.kubernetes.pod.namespace=kube-system",
+			"k8s:k8s-app=hubble-ui",
+		},
+		PodName: "hubble-ui",
+	}
+	ep := decodeEndpoint(epi, "kube-system", "hubble-ui")
+	assert.Equal(t, expected, ep)
 }

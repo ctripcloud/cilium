@@ -6,6 +6,7 @@ package recorder
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 	"strconv"
@@ -15,21 +16,13 @@ import (
 	"github.com/cilium/cilium/pkg/byteorder"
 	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/common"
-	"github.com/cilium/cilium/pkg/datapath/loader"
-	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/maps/recorder"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
-
-const (
-	subsystem = "recorder"
-)
-
-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, subsystem)
 
 type ID uint16
 
@@ -73,49 +66,53 @@ type recQueue struct {
 
 type Recorder struct {
 	lock.RWMutex
-	recByID map[ID]*RecInfo
-	recMask map[string]*RecMask
-	queue   recQueue
-	ctx     context.Context
-	owner   datapath.BaseProgramOwner
+	logger       *slog.Logger
+	recByID      map[ID]*RecInfo
+	recMask      map[string]*RecMask
+	queue        recQueue
+	ctx          context.Context
+	orchestrator types.Orchestrator
 }
 
-// NewRecorder initializes the main recorder infrastructure once upon agent
-// bootstrap for tracking tuple insertions and masks that need to be pushed
-// down into the BPF datapath. Given we currently do not support restore
-// functionality, it also flushes prior existing recorder objects from the
-// BPF maps.
-func NewRecorder(ctx context.Context, owner datapath.BaseProgramOwner) (*Recorder, error) {
-	rec := &Recorder{
+func newRecorder(ctx context.Context, logger *slog.Logger, orchestrator types.Orchestrator) *Recorder {
+	return &Recorder{
 		recByID: map[ID]*RecInfo{},
 		recMask: map[string]*RecMask{},
 		queue: recQueue{
 			add: []*RecorderTuple{},
 			del: []*RecorderTuple{},
 		},
-		ctx:   ctx,
-		owner: owner,
+		ctx:          ctx,
+		logger:       logger,
+		orchestrator: orchestrator,
 	}
-	if option.Config.EnableRecorder {
-		maps := []*bpf.Map{}
-		if option.Config.EnableIPv4 {
-			t := &recorder.CaptureWcard4{}
-			maps = append(maps, t.Map())
+}
+
+// enableRecorder initializes the main recorder infrastructure once upon agent
+// bootstrap for tracking tuple insertions and masks that need to be pushed
+// down into the BPF datapath. Given we currently do not support restore
+// functionality, it also flushes prior existing recorder objects from the
+// BPF maps.
+func (r *Recorder) enableRecorder() error {
+	maps := []*bpf.Map{}
+	if option.Config.EnableIPv4 {
+		t := &recorder.CaptureWcard4{}
+		maps = append(maps, t.Map())
+	}
+	if option.Config.EnableIPv6 {
+		t := &recorder.CaptureWcard6{}
+		maps = append(maps, t.Map())
+	}
+	for _, m := range maps {
+		if err := m.OpenOrCreate(); err != nil {
+			return err
 		}
-		if option.Config.EnableIPv6 {
-			t := &recorder.CaptureWcard6{}
-			maps = append(maps, t.Map())
-		}
-		for _, m := range maps {
-			if _, err := m.OpenOrCreate(); err != nil {
-				return nil, err
-			}
-			if err := m.DeleteAll(); err != nil {
-				return nil, err
-			}
+		if err := m.DeleteAll(); err != nil {
+			return err
 		}
 	}
-	return rec, nil
+
+	return nil
 }
 
 func convertTupleToMask(t RecorderTuple) RecorderMask {
@@ -218,7 +215,6 @@ func (r *Recorder) orderedMaskSets() ([]*RecMask, []*RecMask) {
 
 func (r *Recorder) triggerDatapathRegenerate() error {
 	var masks4, masks6 string
-	l := &loader.Loader{}
 	extraCArgs := []string{}
 	if len(r.recMask) == 0 {
 		extraCArgs = append(extraCArgs, "-Dcapture_enabled=0")
@@ -248,10 +244,13 @@ func (r *Recorder) triggerDatapathRegenerate() error {
 			extraCArgs = append(extraCArgs, masks6)
 		}
 	}
-	err := l.ReinitializeXDP(r.ctx, r.owner, extraCArgs)
+	err := r.orchestrator.ReinitializeXDP(r.ctx, extraCArgs)
 	if err != nil {
-		log.WithError(err).Warnf("Failed to regenerate datapath with masks: %s / %s",
-			masks4, masks6)
+		r.logger.Warn("Failed to regenerate datapath with masks",
+			logfields.Error, err,
+			logfields.IPMask4, masks4,
+			logfields.IPMask6, masks6,
+		)
 	}
 	return err
 }
@@ -328,7 +327,10 @@ func (r *Recorder) applyDatapath(regen bool) error {
 	r.queue.del = []*RecorderTuple{}
 	r.queue.ri = nil
 	if regen {
-		log.Debugf("Recorder Masks: %v", r.recMask)
+		r.logger.Debug(
+			"Recorder Masks",
+			logfields.IPMask, r.recMask,
+		)
 		// If datapath masks did not change, then there is of course
 		// also no need to trigger a regeneration since map updates
 		// suffice (which is also much faster).

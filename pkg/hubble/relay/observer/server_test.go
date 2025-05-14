@@ -8,13 +8,16 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
-	"github.com/sirupsen/logrus"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/connectivity"
@@ -28,6 +31,7 @@ import (
 	peerTypes "github.com/cilium/cilium/pkg/hubble/peer/types"
 	poolTypes "github.com/cilium/cilium/pkg/hubble/relay/pool/types"
 	"github.com/cilium/cilium/pkg/hubble/testutils"
+	"github.com/cilium/cilium/pkg/logging"
 )
 
 func TestGetFlows(t *testing.T) {
@@ -49,7 +53,7 @@ func TestGetFlows(t *testing.T) {
 	done := make(chan struct{})
 	tests := []struct {
 		name   string
-		plr    PeerListReporter
+		plr    PeerLister
 		ocb    observerClientBuilder
 		req    *observerpb.GetFlowsRequest
 		stream observerpb.Observer_GetFlowsServer
@@ -57,7 +61,7 @@ func TestGetFlows(t *testing.T) {
 	}{
 		{
 			name: "Observe 0 flows from 1 peer without address",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -69,7 +73,6 @@ func TestGetFlows(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(name string) {},
 			},
 			ocb: fakeObserverClientBuilder{},
 			req: &observerpb.GetFlowsRequest{Number: 0},
@@ -105,7 +108,7 @@ func TestGetFlows(t *testing.T) {
 			},
 		}, {
 			name: "Observe 4 flows from 2 online peers",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -199,7 +202,7 @@ func TestGetFlows(t *testing.T) {
 			},
 		}, {
 			name: "Observe 2 flows from 1 online peer and none from 1 unavailable peer",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -231,7 +234,6 @@ func TestGetFlows(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(name string) {},
 			},
 			ocb: fakeObserverClientBuilder{
 				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
@@ -297,7 +299,7 @@ func TestGetFlows(t *testing.T) {
 				},
 				err: io.EOF,
 				log: []string{
-					`level=info msg="No connection to peer two, skipping" address="192.0.2.2:4244"`,
+					`level=info msg="No connection to peer, skipping" address=192.0.2.2:4244 peer=two`,
 				},
 			},
 		},
@@ -309,14 +311,13 @@ func TestGetFlows(t *testing.T) {
 			}
 			done = make(chan struct{})
 			var buf bytes.Buffer
-			formatter := &logrus.TextFormatter{
-				DisableColors:    true,
-				DisableTimestamp: true,
-			}
-			logger := logrus.New()
-			logger.SetOutput(&buf)
-			logger.SetFormatter(formatter)
-			logger.SetLevel(logrus.DebugLevel)
+			logger := slog.New(
+				slog.NewTextHandler(&buf,
+					&slog.HandlerOptions{
+						ReplaceAttr: logging.ReplaceAttrFnWithoutTimestamp,
+					},
+				),
+			)
 
 			srv, err := NewServer(
 				tt.plr,
@@ -341,6 +342,147 @@ func TestGetFlows(t *testing.T) {
 	}
 }
 
+// test that Relay pick up a joining Hubble peer.
+func TestGetFlows_follow(t *testing.T) {
+	plChan := make(chan []poolTypes.Peer, 1)
+	pl := &testutils.FakePeerLister{
+		OnList: func() []poolTypes.Peer {
+			return <-plChan
+		},
+	}
+	type resp struct {
+		resp *observerpb.GetFlowsResponse
+		err  error
+	}
+	oneChan := make(chan resp, 1)
+	one := poolTypes.Peer{
+		Peer: peerTypes.Peer{
+			Name: "one",
+			Address: &net.TCPAddr{
+				IP:   net.ParseIP("192.0.2.1"),
+				Port: defaults.ServerPort,
+			},
+		},
+		Conn: &testutils.FakeClientConn{
+			OnGetState: func() connectivity.State {
+				return connectivity.Ready
+			},
+		},
+	}
+	twoChan := make(chan resp, 1)
+	two := poolTypes.Peer{
+		Peer: peerTypes.Peer{
+			Name: "two",
+			Address: &net.TCPAddr{
+				IP:   net.ParseIP("192.0.2.2"),
+				Port: defaults.ServerPort,
+			},
+		},
+		Conn: &testutils.FakeClientConn{
+			OnGetState: func() connectivity.State {
+				return connectivity.Ready
+			},
+		},
+	}
+
+	ocb := fakeObserverClientBuilder{
+		onObserverClient: func(peer *poolTypes.Peer) observerpb.ObserverClient {
+			return &testutils.FakeObserverClient{
+				OnGetFlows: func(_ context.Context, in *observerpb.GetFlowsRequest, _ ...grpc.CallOption) (observerpb.Observer_GetFlowsClient, error) {
+					return &testutils.FakeGetFlowsClient{
+						OnRecv: func() (*observerpb.GetFlowsResponse, error) {
+							switch peer.Name {
+							case "one":
+								r := <-oneChan
+								return r.resp, r.err
+							case "two":
+								r := <-twoChan
+								return r.resp, r.err
+							}
+							return nil, fmt.Errorf("unexpected peer %q", peer.Name)
+						},
+					}, nil
+				},
+			}
+		},
+	}
+	fss := &testutils.FakeGRPCServerStream{
+		OnContext: context.TODO,
+	}
+	seenOneFlows := atomic.Int64{}
+	seenTwoFlows := atomic.Int64{}
+	stream := &testutils.FakeGetFlowsServer{
+		FakeGRPCServerStream: fss,
+		OnSend: func(resp *observerpb.GetFlowsResponse) error {
+			if resp == nil {
+				return nil
+			}
+			switch resp.GetResponseTypes().(type) {
+			case *observerpb.GetFlowsResponse_Flow:
+				switch resp.NodeName {
+				case "one":
+					seenOneFlows.Add(1)
+				case "two":
+					seenTwoFlows.Add(1)
+				}
+			case *observerpb.GetFlowsResponse_NodeStatus:
+			}
+			return nil
+		},
+	}
+	srv, err := NewServer(
+		pl,
+		withObserverClientBuilder(ocb),
+	)
+	srv.opts.peerUpdateInterval = 10 * time.Millisecond
+	require.NoError(t, err)
+
+	plChan <- []poolTypes.Peer{one}
+	oneChan <- resp{
+		resp: &observerpb.GetFlowsResponse{
+			NodeName: "one",
+			ResponseTypes: &observerpb.GetFlowsResponse_Flow{
+				Flow: &flowpb.Flow{
+					NodeName: "one",
+				},
+			},
+		},
+	}
+	go func() {
+		err = srv.GetFlows(&observerpb.GetFlowsRequest{Follow: true}, stream)
+		assert.NoError(t, err)
+	}()
+	assert.Eventually(t, func() bool {
+		return seenOneFlows.Load() == 1
+	}, 10*time.Second, 10*time.Millisecond)
+
+	plChan <- []poolTypes.Peer{one, two}
+	oneChan <- resp{
+		resp: &observerpb.GetFlowsResponse{
+			NodeName: "one",
+			ResponseTypes: &observerpb.GetFlowsResponse_Flow{
+				Flow: &flowpb.Flow{
+					NodeName: "one",
+				},
+			},
+		},
+	}
+	twoChan <- resp{
+		resp: &observerpb.GetFlowsResponse{
+			NodeName: "two",
+			ResponseTypes: &observerpb.GetFlowsResponse_Flow{
+				Flow: &flowpb.Flow{
+					NodeName: "two",
+				},
+			},
+		},
+	}
+	assert.Eventually(t, func() bool {
+		return seenOneFlows.Load() == 2 && seenTwoFlows.Load() == 1
+	}, 10*time.Second, 10*time.Millisecond)
+
+}
+
 func TestGetNodes(t *testing.T) {
 	type want struct {
 		resp *observerpb.GetNodesResponse
@@ -349,14 +491,14 @@ func TestGetNodes(t *testing.T) {
 	}
 	tests := []struct {
 		name string
-		plr  PeerListReporter
+		plr  PeerLister
 		ocb  observerClientBuilder
 		req  *observerpb.GetNodesRequest
 		want want
 	}{
 		{
 			name: "1 peer without address",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -368,7 +510,6 @@ func TestGetNodes(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(_ string) {},
 			},
 			ocb: fakeObserverClientBuilder{},
 			want: want{
@@ -387,12 +528,12 @@ func TestGetNodes(t *testing.T) {
 					},
 				},
 				log: []string{
-					`level=info msg="No connection to peer noip, skipping" address="<nil>"`,
+					`level=info msg="No connection to peer, skipping" address=<nil> peer=noip`,
 				},
 			},
 		}, {
 			name: "2 connected peers",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -488,7 +629,7 @@ func TestGetNodes(t *testing.T) {
 			},
 		}, {
 			name: "2 connected peers with TLS",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -588,7 +729,7 @@ func TestGetNodes(t *testing.T) {
 			},
 		}, {
 			name: "1 connected peer, 1 unreachable peer",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -620,7 +761,6 @@ func TestGetNodes(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(_ string) {},
 			},
 			ocb: fakeObserverClientBuilder{
 				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
@@ -672,12 +812,12 @@ func TestGetNodes(t *testing.T) {
 					},
 				},
 				log: []string{
-					`level=info msg="No connection to peer two, skipping" address="192.0.2.2:4244"`,
+					`level=info msg="No connection to peer, skipping" address=192.0.2.2:4244 peer=two`,
 				},
 			},
 		}, {
 			name: "1 connected peer, 1 unreachable peer, 1 peer with error",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -722,7 +862,6 @@ func TestGetNodes(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(_ string) {},
 			},
 			ocb: fakeObserverClientBuilder{
 				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
@@ -784,8 +923,8 @@ func TestGetNodes(t *testing.T) {
 					},
 				},
 				log: []string{
-					`level=info msg="No connection to peer two, skipping" address="192.0.2.2:4244"`,
-					`level=warning msg="Failed to retrieve server status" error="rpc error: code = Unimplemented desc = ServerStatus not implemented" peer=three`,
+					`level=info msg="No connection to peer, skipping" address=192.0.2.2:4244 peer=two`,
+					`level=warn msg="Failed to retrieve server status" error="rpc error: code = Unimplemented desc = ServerStatus not implemented" peer=three`,
 				},
 			},
 		},
@@ -794,14 +933,14 @@ func TestGetNodes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			formatter := &logrus.TextFormatter{
-				DisableColors:    true,
-				DisableTimestamp: true,
-			}
-			logger := logrus.New()
-			logger.SetOutput(&buf)
-			logger.SetFormatter(formatter)
-			logger.SetLevel(logrus.DebugLevel)
+
+			logger := slog.New(
+				slog.NewTextHandler(&buf,
+					&slog.HandlerOptions{
+						ReplaceAttr: logging.ReplaceAttrFnWithoutTimestamp,
+					},
+				),
+			)
 
 			srv, err := NewServer(
 				tt.plr,
@@ -820,22 +959,22 @@ func TestGetNodes(t *testing.T) {
 	}
 }
 
-func TestServerStatus(t *testing.T) {
+func TestGetNamespaces(t *testing.T) {
 	type want struct {
-		resp *observerpb.ServerStatusResponse
+		resp *observerpb.GetNamespacesResponse
 		err  error
 		log  []string
 	}
 	tests := []struct {
 		name string
-		plr  PeerListReporter
+		plr  PeerLister
 		ocb  observerClientBuilder
-		req  *observerpb.ServerStatusRequest
+		req  *observerpb.GetNamespacesRequest
 		want want
 	}{
 		{
-			name: "1 peer without address",
-			plr: &testutils.FakePeerListReporter{
+			name: "get no namespaces from 1 peer without address",
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -847,7 +986,207 @@ func TestServerStatus(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(_ string) {},
+			},
+			ocb: fakeObserverClientBuilder{
+				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
+					return &testutils.FakeObserverClient{
+						OnGetNamespaces: func(_ context.Context, in *observerpb.GetNamespacesRequest, _ ...grpc.CallOption) (*observerpb.GetNamespacesResponse, error) {
+							return nil, io.EOF
+						},
+					}
+				},
+			},
+			want: want{
+				resp: &observerpb.GetNamespacesResponse{
+					Namespaces: []*observerpb.Namespace{},
+				},
+				log: []string{
+					`level=info msg="No connection to peer, skipping" address=<nil> peer=noip`,
+				},
+			},
+		},
+		{
+			name: "2 connected peer, 1 unreachable peer",
+			plr: &testutils.FakePeerLister{
+				OnList: func() []poolTypes.Peer {
+					return []poolTypes.Peer{
+						{
+							Peer: peerTypes.Peer{
+								Name: "one",
+								Address: &net.TCPAddr{
+									IP:   net.ParseIP("192.0.2.1"),
+									Port: defaults.ServerPort,
+								},
+							},
+							Conn: &testutils.FakeClientConn{
+								OnGetState: func() connectivity.State {
+									return connectivity.Ready
+								},
+							},
+						},
+						{
+							Peer: peerTypes.Peer{
+								Name: "two",
+								Address: &net.TCPAddr{
+									IP:   net.ParseIP("192.0.2.2"),
+									Port: defaults.ServerPort,
+								},
+							},
+							Conn: &testutils.FakeClientConn{
+								OnGetState: func() connectivity.State {
+									return connectivity.TransientFailure
+								},
+							},
+						},
+						{
+							Peer: peerTypes.Peer{
+								Name: "three",
+								Address: &net.TCPAddr{
+									IP:   net.ParseIP("192.0.2.3"),
+									Port: defaults.ServerPort,
+								},
+							},
+							Conn: &testutils.FakeClientConn{
+								OnGetState: func() connectivity.State {
+									return connectivity.Ready
+								},
+							},
+						},
+					}
+				},
+			},
+			ocb: fakeObserverClientBuilder{
+				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
+					return &testutils.FakeObserverClient{
+						OnGetNamespaces: func(_ context.Context, in *observerpb.GetNamespacesRequest, _ ...grpc.CallOption) (*observerpb.GetNamespacesResponse, error) {
+							switch p.Name {
+							case "one":
+								return &observerpb.GetNamespacesResponse{
+									Namespaces: []*observerpb.Namespace{
+										{
+											Namespace: "zzz",
+											Cluster:   "some-cluster",
+										},
+										{
+											Namespace: "aaa",
+											Cluster:   "some-cluster",
+										},
+										{
+											Namespace: "bbb",
+											Cluster:   "some-cluster",
+										},
+									},
+								}, nil
+							case "three":
+								return &observerpb.GetNamespacesResponse{
+									Namespaces: []*observerpb.Namespace{
+										{
+											Namespace: "zzz",
+											Cluster:   "some-cluster",
+										},
+										{
+											Namespace: "ccc",
+											Cluster:   "some-cluster",
+										},
+										{
+											Namespace: "ddd",
+											Cluster:   "some-cluster",
+										},
+									},
+								}, nil
+							default:
+								return nil, io.EOF
+							}
+						},
+					}
+				},
+			},
+			want: want{
+				resp: &observerpb.GetNamespacesResponse{
+					Namespaces: []*observerpb.Namespace{
+						{
+							Namespace: "aaa",
+							Cluster:   "some-cluster",
+						},
+						{
+							Namespace: "bbb",
+							Cluster:   "some-cluster",
+						},
+						{
+							Namespace: "ccc",
+							Cluster:   "some-cluster",
+						},
+						{
+							Namespace: "ddd",
+							Cluster:   "some-cluster",
+						},
+						{
+							Namespace: "zzz",
+							Cluster:   "some-cluster",
+						},
+					},
+				},
+				log: []string{
+					`level=info msg="No connection to peer, skipping" address=192.0.2.2:4244 peer=two`,
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			logger := slog.New(
+				slog.NewTextHandler(&buf,
+					&slog.HandlerOptions{
+						ReplaceAttr: logging.ReplaceAttrFnWithoutTimestamp,
+					},
+				),
+			)
+			srv, err := NewServer(
+				tt.plr,
+				WithLogger(logger),
+				withObserverClientBuilder(tt.ocb),
+			)
+			assert.NoError(t, err)
+			got, err := srv.GetNamespaces(context.Background(), tt.req)
+			assert.Equal(t, tt.want.err, err)
+			assert.Equal(t, tt.want.resp, got)
+			out := buf.String()
+			for _, msg := range tt.want.log {
+				assert.Contains(t, out, msg)
+			}
+		})
+	}
+}
+
+func TestServerStatus(t *testing.T) {
+	type want struct {
+		resp *observerpb.ServerStatusResponse
+		err  error
+		log  []string
+	}
+	tests := []struct {
+		name string
+		plr  PeerLister
+		ocb  observerClientBuilder
+		req  *observerpb.ServerStatusRequest
+		want want
+	}{
+		{
+			name: "1 peer without address",
+			plr: &testutils.FakePeerLister{
+				OnList: func() []poolTypes.Peer {
+					return []poolTypes.Peer{
+						{
+							Peer: peerTypes.Peer{
+								Name:    "noip",
+								Address: nil,
+							},
+							Conn: nil,
+						},
+					}
+				},
 			},
 			ocb: fakeObserverClientBuilder{},
 			want: want{
@@ -857,17 +1196,18 @@ func TestServerStatus(t *testing.T) {
 					MaxFlows:            0,
 					SeenFlows:           0,
 					UptimeNs:            0,
+					FlowsRate:           0,
 					NumConnectedNodes:   &wrapperspb.UInt32Value{Value: 0},
 					NumUnavailableNodes: &wrapperspb.UInt32Value{Value: 1},
 					UnavailableNodes:    []string{"noip"},
 				},
 				log: []string{
-					`level=info msg="No connection to peer noip, skipping" address="<nil>"`,
+					`level=info msg="No connection to peer, skipping" address=<nil> peer=noip`,
 				},
 			},
 		}, {
 			name: "2 connected peers",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -910,6 +1250,7 @@ func TestServerStatus(t *testing.T) {
 									NumFlows:  1111,
 									MaxFlows:  1111,
 									SeenFlows: 1111,
+									FlowsRate: 1,
 									UptimeNs:  111111111,
 								}, nil
 							case "two":
@@ -917,6 +1258,7 @@ func TestServerStatus(t *testing.T) {
 									NumFlows:  2222,
 									MaxFlows:  2222,
 									SeenFlows: 2222,
+									FlowsRate: 2,
 									UptimeNs:  222222222,
 								}, nil
 							default:
@@ -932,6 +1274,7 @@ func TestServerStatus(t *testing.T) {
 					NumFlows:            3333,
 					MaxFlows:            3333,
 					SeenFlows:           3333,
+					FlowsRate:           3,
 					UptimeNs:            222222222,
 					NumConnectedNodes:   &wrapperspb.UInt32Value{Value: 2},
 					NumUnavailableNodes: &wrapperspb.UInt32Value{Value: 0},
@@ -939,7 +1282,7 @@ func TestServerStatus(t *testing.T) {
 			},
 		}, {
 			name: "1 connected peer, 1 unreachable peer",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -971,7 +1314,6 @@ func TestServerStatus(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(_ string) {},
 			},
 			ocb: fakeObserverClientBuilder{
 				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
@@ -983,6 +1325,7 @@ func TestServerStatus(t *testing.T) {
 									NumFlows:  1111,
 									MaxFlows:  1111,
 									SeenFlows: 1111,
+									FlowsRate: 1,
 									UptimeNs:  111111111,
 								}, nil
 							default:
@@ -998,18 +1341,19 @@ func TestServerStatus(t *testing.T) {
 					NumFlows:            1111,
 					MaxFlows:            1111,
 					SeenFlows:           1111,
+					FlowsRate:           1,
 					UptimeNs:            111111111,
 					NumConnectedNodes:   &wrapperspb.UInt32Value{Value: 1},
 					NumUnavailableNodes: &wrapperspb.UInt32Value{Value: 1},
 					UnavailableNodes:    []string{"two"},
 				},
 				log: []string{
-					`level=info msg="No connection to peer two, skipping" address="192.0.2.2:4244"`,
+					`level=info msg="No connection to peer, skipping" address=192.0.2.2:4244 peer=two`,
 				},
 			},
 		}, {
 			name: "2 unreachable peers",
-			plr: &testutils.FakePeerListReporter{
+			plr: &testutils.FakePeerLister{
 				OnList: func() []poolTypes.Peer {
 					return []poolTypes.Peer{
 						{
@@ -1041,7 +1385,6 @@ func TestServerStatus(t *testing.T) {
 						},
 					}
 				},
-				OnReportOffline: func(_ string) {},
 			},
 			ocb: fakeObserverClientBuilder{
 				onObserverClient: func(p *poolTypes.Peer) observerpb.ObserverClient {
@@ -1064,8 +1407,8 @@ func TestServerStatus(t *testing.T) {
 					UnavailableNodes:    []string{"one", "two"},
 				},
 				log: []string{
-					`level=info msg="No connection to peer one, skipping" address="192.0.2.1:4244"`,
-					`level=info msg="No connection to peer two, skipping" address="192.0.2.2:4244"`,
+					`level=info msg="No connection to peer, skipping" address=192.0.2.1:4244 peer=one`,
+					`level=info msg="No connection to peer, skipping" address=192.0.2.2:4244 peer=two`,
 				},
 			},
 		},
@@ -1074,15 +1417,13 @@ func TestServerStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			formatter := &logrus.TextFormatter{
-				DisableColors:    true,
-				DisableTimestamp: true,
-			}
-			logger := logrus.New()
-			logger.SetOutput(&buf)
-			logger.SetFormatter(formatter)
-			logger.SetLevel(logrus.DebugLevel)
-
+			logger := slog.New(
+				slog.NewTextHandler(&buf,
+					&slog.HandlerOptions{
+						ReplaceAttr: logging.ReplaceAttrFnWithoutTimestamp,
+					},
+				),
+			)
 			srv, err := NewServer(
 				tt.plr,
 				WithLogger(logger),

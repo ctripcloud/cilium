@@ -4,9 +4,8 @@
 package api
 
 import (
+	"github.com/cilium/hive/cell"
 	"github.com/spf13/pflag"
-
-	"github.com/cilium/cilium/pkg/hive/cell"
 )
 
 const (
@@ -27,7 +26,7 @@ var ServerCell = cell.Module(
 	"cilium-operator-api",
 	"Cilium Operator API Server",
 
-	cell.Config(Config{}),
+	cell.Config(defaultConfig),
 	cell.Provide(newServer),
 	cell.Invoke(func(Server) {}),
 )
@@ -37,5 +36,9 @@ type Config struct {
 }
 
 func (def Config) Flags(flags *pflag.FlagSet) {
-	flags.String(OperatorAPIServeAddr, OperatorAPIServeAddrDefault, "Address to serve API requests")
+	flags.String(OperatorAPIServeAddr, def.OperatorAPIServeAddr, "Address to serve API requests")
+}
+
+var defaultConfig = Config{
+	OperatorAPIServeAddr: OperatorAPIServeAddrDefault,
 }

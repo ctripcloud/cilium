@@ -8,15 +8,14 @@ import (
 	"time"
 
 	ciliumDefaults "github.com/cilium/cilium/pkg/defaults"
-	hubbledefaults "github.com/cilium/cilium/pkg/hubble/defaults"
+	hubbleDefaults "github.com/cilium/cilium/pkg/hubble/defaults"
 )
 
 const (
 	// ClusterName is the default cluster name
 	ClusterName = ciliumDefaults.ClusterName
-	// DialTimeout is the timeout that is used when establishing a new
-	// connection.
-	DialTimeout = 5 * time.Second
+	// HealthCheckInterval is the time interval between health checks.
+	HealthCheckInterval = 5 * time.Second
 	// GopsPort is the default port for gops to listen on.
 	GopsPort = 9893
 	// PprofAddress is the default port for pprof to listen on.
@@ -26,7 +25,7 @@ const (
 	// RetryTimeout is the duration to wait between reconnection attempts.
 	RetryTimeout = 30 * time.Second
 	// PeerTarget is the address of the peer service.
-	PeerTarget = "unix://" + ciliumDefaults.HubbleSockPath
+	PeerTarget = "unix://" + hubbleDefaults.SocketPath
 	// PeerServiceName is the name of the peer service, should it exist.
 	PeerServiceName = "hubble-peer"
 
@@ -39,10 +38,20 @@ const (
 	// ErrorAggregationWindow is the time window during which errors with the
 	// same message are coalesced.
 	ErrorAggregationWindow = 10 * time.Second
+	// PeerUpdateInterval is the time interval in which relay is checking for
+	// newly joined peers for long running requests
+	PeerUpdateInterval = 2 * time.Second
+
+	// GRPCMetadataRelayVersionKey is the grpc metadata key for the Hubble relay server version.
+	GRPCMetadataRelayVersionKey = "hubble-relay-version"
 )
 
 var (
 	// ListenAddress is the address on which the Hubble Relay server listens
 	// for incoming gRPC requests.
-	ListenAddress = fmt.Sprintf(":%d", hubbledefaults.RelayPort)
+	ListenAddress = fmt.Sprintf(":%d", hubbleDefaults.RelayPort)
+
+	// HealthListenAddress is the address on which the Hubble Relay gRPC health
+	// server listens on
+	HealthListenAddress = fmt.Sprintf(":%d", 4222)
 )

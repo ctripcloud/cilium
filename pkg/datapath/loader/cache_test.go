@@ -5,142 +5,94 @@ package loader
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"time"
+	"runtime"
+	"sync"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	"github.com/cilium/cilium/pkg/datapath/linux/config"
+	"github.com/cilium/cilium/pkg/datapath/types"
+	fakeNodeMap "github.com/cilium/cilium/pkg/maps/nodemap/fake"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-func (s *LoaderTestSuite) TestobjectCache(c *C) {
-	tmpDir, err := os.MkdirTemp("", "cilium_test")
-	c.Assert(err, IsNil)
-	defer os.RemoveAll(tmpDir)
+func TestObjectCache(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	setupCompilationDirectories(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
-	cache := newObjectCache(&config.HeaderfileWriter{}, nil, tmpDir)
-	realEP := testutils.NewTestEndpoint()
+	cache := newObjectCache(hivetest.Logger(t), configWriterForTest(t), tmpDir)
+	realEP := testutils.NewTestEndpoint(t)
+
+	dir := getDirs(t)
 
 	// First run should compile and generate the object.
-	_, isNew, err := cache.fetchOrCompile(ctx, &realEP, nil)
-	c.Assert(err, IsNil)
-	c.Assert(isNew, Equals, true)
+	first, hash, err := cache.fetchOrCompile(ctx, &localNodeConfig, &realEP, dir, nil)
+	require.NoError(t, err)
+	require.NotEmpty(t, hash)
 
 	// Same EP should not be compiled twice.
-	_, isNew, err = cache.fetchOrCompile(ctx, &realEP, nil)
-	c.Assert(err, IsNil)
-	c.Assert(isNew, Equals, false)
+	second, hash2, err := cache.fetchOrCompile(ctx, &localNodeConfig, &realEP, dir, nil)
+	require.NoError(t, err)
+	require.Equal(t, hash, hash2)
+	require.NotSame(t, second, first)
 
 	// Changing the ID should not generate a new object.
 	realEP.Id++
-	_, isNew, err = cache.fetchOrCompile(ctx, &realEP, nil)
-	c.Assert(err, IsNil)
-	c.Assert(isNew, Equals, false)
+	third, hash3, err := cache.fetchOrCompile(ctx, &localNodeConfig, &realEP, dir, nil)
+	require.NoError(t, err)
+	require.Equal(t, hash, hash3)
+	require.NotSame(t, third, first)
 
 	// Changing a setting on the EP should generate a new object.
 	realEP.Opts.SetBool("foo", true)
-	_, isNew, err = cache.fetchOrCompile(ctx, &realEP, nil)
-	c.Assert(err, IsNil)
-	c.Assert(isNew, Equals, true)
+	fourth, hash4, err := cache.fetchOrCompile(ctx, &localNodeConfig, &realEP, dir, nil)
+	require.NoError(t, err)
+	require.NotEqual(t, hash, hash4)
+	require.NotSame(t, fourth, first)
 }
 
-type buildResult struct {
-	goroutine int
-	path      string
-	compiled  bool
-	err       error
-}
+func TestObjectCacheParallel(t *testing.T) {
+	tmpDir := t.TempDir()
 
-func receiveResult(c *C, results chan buildResult) (*buildResult, error) {
-	select {
-	case result := <-results:
-		if result.err != nil {
-			return nil, result.err
-		}
-		return &result, nil
-	case <-time.After(contextTimeout):
-		return nil, fmt.Errorf("Timed out waiting for goroutines to return")
-	}
-}
-
-func (s *LoaderTestSuite) TestobjectCacheParallel(c *C) {
-	tmpDir, err := os.MkdirTemp("", "cilium_test")
-	c.Assert(err, IsNil)
-	defer os.RemoveAll(tmpDir)
+	setupCompilationDirectories(t)
 
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
-	tests := []struct {
-		description string
-		builds      int
-		divisor     int
-	}{
-		{
-			description: "One build, multiple blocking goroutines",
-			builds:      8,
-			divisor:     8,
-		},
-		{
-			description: "Eight builds, half compile, half block",
-			builds:      8,
-			divisor:     2,
-		},
-		{
-			description: "Eight unique builds",
-			builds:      8,
-			divisor:     1,
-		},
+	cache := newObjectCache(hivetest.Logger(t), configWriterForTest(t), tmpDir)
+	ep := testutils.NewTestEndpoint(t)
+
+	var wg sync.WaitGroup
+	for range runtime.GOMAXPROCS(0) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _, err := cache.fetchOrCompile(ctx, &localNodeConfig, &ep, getDirs(t), nil)
+			assert.NoError(t, err)
+		}()
 	}
 
-	for _, t := range tests {
-		c.Logf("  %s", t.description)
+	wg.Wait()
+}
 
-		results := make(chan buildResult, t.builds)
-		cache := newObjectCache(&config.HeaderfileWriter{}, nil, tmpDir)
-		for i := 0; i < t.builds; i++ {
-			go func(i int) {
-				ep := testutils.NewTestEndpoint()
-				opt := fmt.Sprintf("OPT%d", i/t.divisor)
-				ep.Opts.SetBool(opt, true)
-				path, isNew, err := cache.fetchOrCompile(ctx, &ep, nil)
-				results <- buildResult{
-					goroutine: i,
-					path:      path,
-					compiled:  isNew,
-					err:       err,
-				}
-			}(i)
-		}
+func configWriterForTest(t testing.TB) types.ConfigWriter {
+	t.Helper()
 
-		// First result will always be a compilation for the new set of options
-		compiled := make(map[string]int, t.builds)
-		used := make(map[string]int, t.builds)
-		for i := 0; i < t.builds; i++ {
-			result, err := receiveResult(c, results)
-			c.Assert(err, IsNil)
-
-			used[result.path] = used[result.path] + 1
-			if result.compiled {
-				compiled[result.path] = compiled[result.path] + 1
-			}
-		}
-
-		c.Assert(len(compiled), Equals, t.builds/t.divisor)
-		c.Assert(len(used), Equals, t.builds/t.divisor)
-		for _, templateCompileCount := range compiled {
-			// Only one goroutine compiles each template
-			c.Assert(templateCompileCount, Equals, 1)
-		}
-		for _, templateUseCount := range used {
-			// Based on the test parameters, a number of goroutines
-			// may share the same template.
-			c.Assert(templateUseCount, Equals, t.divisor)
-		}
+	cfg, err := config.NewHeaderfileWriter(config.WriterParams{
+		NodeMap:        fakeNodeMap.NewFakeNodeMapV2(),
+		NodeAddressing: fakeTypes.NewNodeAddressing(),
+		Sysctl:         nil,
+	})
+	if err != nil {
+		t.Fatalf("failed to create header file writer: %v", err)
 	}
+	return cfg
 }

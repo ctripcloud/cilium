@@ -88,10 +88,7 @@ func ProcessMessage(m *bgp.BGPMessage, peerInfo *PeerInfo, timestamp time.Time) 
 		pathList = append(pathList, p)
 	}
 	if reach != nil {
-		reachAttrs := make([]bgp.PathAttributeInterface, len(attrs)+1)
-		copy(reachAttrs, attrs)
-		// we sort attributes when creating a bgp message from paths
-		reachAttrs[len(reachAttrs)-1] = reach
+		nexthop := reach.Nexthop.String()
 
 		for _, nlri := range reach.Value {
 			// when build path from reach
@@ -99,6 +96,11 @@ func ProcessMessage(m *bgp.BGPMessage, peerInfo *PeerInfo, timestamp time.Time) 
 			// this happens when a MP peer send update to gobgp
 			// However nlri is always populated because how we build the path
 			// path.info{nlri: nlri}
+			// Compute a new attribute array for each path with one NLRI to make serialization
+			// of path attrs faster
+			nlriAttr := bgp.NewPathAttributeMpReachNLRI(nexthop, []bgp.AddrPrefixInterface{nlri})
+			reachAttrs := makeAttributeList(attrs, nlriAttr)
+
 			p := NewPath(peerInfo, nlri, false, reachAttrs, timestamp, false)
 			p.SetHash(hash)
 			pathList = append(pathList, p)
@@ -109,6 +111,17 @@ func ProcessMessage(m *bgp.BGPMessage, peerInfo *PeerInfo, timestamp time.Time) 
 		pathList = append(pathList, p)
 	}
 	return pathList
+}
+
+func makeAttributeList(
+	attrs []bgp.PathAttributeInterface, reach *bgp.PathAttributeMpReachNLRI,
+) []bgp.PathAttributeInterface {
+	reachAttrs := make([]bgp.PathAttributeInterface, len(attrs)+1)
+	copy(reachAttrs, attrs)
+	// we sort attributes when creating a bgp message from paths
+	reachAttrs[len(reachAttrs)-1] = reach
+
+	return reachAttrs
 }
 
 type TableManager struct {
@@ -188,17 +201,6 @@ func (manager *TableManager) DeleteVrf(name string) ([]*Path, error) {
 	return msgs, nil
 }
 
-func (manager *TableManager) update(newPath *Path) *Update {
-	t := manager.Tables[newPath.GetRouteFamily()]
-	t.validatePath(newPath)
-	dst := t.getOrCreateDest(newPath.GetNlri(), 64)
-	u := dst.Calculate(manager.logger, newPath)
-	if len(dst.knownPathList) == 0 {
-		t.deleteDest(dst)
-	}
-	return u
-}
-
 func (manager *TableManager) Update(newPath *Path) []*Update {
 	if newPath == nil || newPath.IsEOR() {
 		return nil
@@ -207,12 +209,12 @@ func (manager *TableManager) Update(newPath *Path) []*Update {
 	// Except for a special case with EVPN, we'll have one destination.
 	updates := make([]*Update, 0, 1)
 	family := newPath.GetRouteFamily()
-	if _, ok := manager.Tables[family]; ok {
-		updates = append(updates, manager.update(newPath))
+	if table, ok := manager.Tables[family]; ok {
+		updates = append(updates, table.update(newPath))
 
 		if family == bgp.RF_EVPN {
 			for _, p := range manager.handleMacMobility(newPath) {
-				updates = append(updates, manager.update(p))
+				updates = append(updates, table.update(p))
 			}
 		}
 	}
@@ -239,24 +241,36 @@ func (manager *TableManager) handleMacMobility(path *Path) []*Path {
 	if path.IsWithdraw || path.IsLocal() || nlri.RouteType != bgp.EVPN_ROUTE_TYPE_MAC_IP_ADVERTISEMENT {
 		return nil
 	}
-	for _, path2 := range manager.GetPathList(GLOBAL_RIB_NAME, 0, []bgp.RouteFamily{bgp.RF_EVPN}) {
+
+	f := func(p *Path) (bgp.EthernetSegmentIdentifier, uint32, net.HardwareAddr, int, net.IP) {
+		nlri := p.GetNlri().(*bgp.EVPNNLRI)
+		d := nlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute)
+		ecs := p.GetExtCommunities()
+		seq := -1
+		for _, ec := range ecs {
+			if t, st := ec.GetTypes(); t == bgp.EC_TYPE_EVPN && st == bgp.EC_SUBTYPE_MAC_MOBILITY {
+				seq = int(ec.(*bgp.MacMobilityExtended).Sequence)
+				break
+			}
+		}
+		return d.ESI, d.ETag, d.MacAddress, seq, p.GetSource().Address
+	}
+	e1, et1, m1, s1, i1 := f(path)
+
+	// Extract the route targets to scope the lookup to the MAC-VRF with the MAC address.
+	// This will help large EVPN instances where a single MAC is present in a lot of MAC-VRFs (e.g.
+	// an anycast router).
+	// A route may have multiple route targets, to target multiple MAC-VRFs (e.g. in both an L2VNI
+	// and L3VNI in the VXLAN case).
+	var paths []*Path
+	for _, ec := range path.GetRouteTargets() {
+		paths = append(paths, manager.GetPathListWithMac(GLOBAL_RIB_NAME, 0, []bgp.RouteFamily{bgp.RF_EVPN}, ec, m1)...)
+	}
+
+	for _, path2 := range paths {
 		if !path2.IsLocal() || path2.GetNlri().(*bgp.EVPNNLRI).RouteType != bgp.EVPN_ROUTE_TYPE_MAC_IP_ADVERTISEMENT {
 			continue
 		}
-		f := func(p *Path) (bgp.EthernetSegmentIdentifier, uint32, net.HardwareAddr, int, net.IP) {
-			nlri := p.GetNlri().(*bgp.EVPNNLRI)
-			d := nlri.RouteTypeData.(*bgp.EVPNMacIPAdvertisementRoute)
-			ecs := p.GetExtCommunities()
-			seq := -1
-			for _, ec := range ecs {
-				if t, st := ec.GetTypes(); t == bgp.EC_TYPE_EVPN && st == bgp.EC_SUBTYPE_MAC_MOBILITY {
-					seq = int(ec.(*bgp.MacMobilityExtended).Sequence)
-					break
-				}
-			}
-			return d.ESI, d.ETag, d.MacAddress, seq, p.GetSource().Address
-		}
-		e1, et1, m1, s1, i1 := f(path)
 		e2, et2, m2, s2, i2 := f(path2)
 		if et1 == et2 && bytes.Equal(m1, m2) && !bytes.Equal(e1.Value, e2.Value) {
 			if s1 > s2 || s1 == s2 && bytes.Compare(i1, i2) < 0 {
@@ -320,6 +334,14 @@ func (manager *TableManager) GetPathList(id string, as uint32, rfList []bgp.Rout
 	paths := make([]*Path, 0, manager.getDestinationCount(rfList))
 	for _, t := range manager.tables(rfList...) {
 		paths = append(paths, t.GetKnownPathList(id, as)...)
+	}
+	return paths
+}
+
+func (manager *TableManager) GetPathListWithMac(id string, as uint32, rfList []bgp.RouteFamily, rt bgp.ExtendedCommunityInterface, mac net.HardwareAddr) []*Path {
+	var paths []*Path
+	for _, t := range manager.tables(rfList...) {
+		paths = append(paths, t.GetKnownPathListWithMac(id, as, rt, mac, false)...)
 	}
 	return paths
 }

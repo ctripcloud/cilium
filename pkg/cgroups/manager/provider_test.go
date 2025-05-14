@@ -5,17 +5,15 @@ package manager
 
 import (
 	"errors"
+	"fmt"
 	"os"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/checker"
+	"github.com/cilium/cilium/pkg/cgroups"
 	v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 )
-
-type ProviderSuite struct{}
-
-var _ = Suite(&ProviderSuite{})
 
 var (
 	fsMockDefault = fsMock{
@@ -30,6 +28,7 @@ var (
 	fsMockSystemdNested = fsMock{
 		getFullPath(nestedSystemdCgroupBasePath): struct{}{},
 	}
+	cgroupRoot             = cgroups.GetCgroupRoot()
 	cDefaultPath           = cgroupRoot + "/kubepods/burstable/pod1858680e-b044-4fd5-9dd4-f137e30e2180/" + c1Id
 	cDefaultGuaranteedPath = cgroupRoot + "/kubepods/pod1858680e-b044-4fd5-9dd4-f137e30e2180/" + c1Id
 	cSystemdPath           = cgroupRoot + "/kubepods.slice/kubepods-burstable.slice/kubepods-burstable-pod1858680e_b044_4fd5_9dd4_f137e30e2180.slice/" + "cri-containerd-" + c1Id + ".scope"
@@ -48,7 +47,7 @@ func (fs fsMock) Stat(file string) (info os.FileInfo, err error) {
 	return nil, errors.New("")
 }
 
-func (p *ProviderSuite) TestGetBasePath(c *C) {
+func TestGetBasePath(t *testing.T) {
 	type test struct {
 		input fs
 		want  string
@@ -60,15 +59,17 @@ func (p *ProviderSuite) TestGetBasePath(c *C) {
 		{input: fsMockSystemdNested, want: getFullPath(nestedSystemdCgroupBasePath)},
 	}
 
-	for _, t := range tests {
-		initProviderTest(t.input)
-		got, err := getCgroupPathProvider()
+	for i, tt := range tests {
+		t.Run(fmt.Sprintf("Test index %d", i), func(t *testing.T) {
+			initProviderTest(tt.input)
+			got, err := getCgroupPathProvider()
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			path, err := got.getBasePath()
+			require.NoError(t, err)
+			require.Equal(t, tt.want, path)
+		})
 
-		c.Assert(err, IsNil)
-		c.Assert(got, Not(IsNil))
-		path, err := got.getBasePath()
-		c.Assert(path, checker.Equals, t.want)
-		c.Assert(err, IsNil)
 	}
 }
 
@@ -93,7 +94,7 @@ func getTestInput() *inputParams {
 	}
 }
 
-func (p *ProviderSuite) TestGetContainerPath(c *C) {
+func TestGetContainerPath(t *testing.T) {
 	tests := []struct {
 		name    string
 		input   func(input *inputParams)
@@ -197,20 +198,22 @@ func (p *ProviderSuite) TestGetContainerPath(c *C) {
 		},
 	}
 
-	for _, t := range tests {
-		ti := getTestInput()
-		if t.input != nil {
-			t.input(ti)
-		}
-		initProviderTest(ti.fsMock)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ti := getTestInput()
+			if tt.input != nil {
+				tt.input(ti)
+			}
+			initProviderTest(ti.fsMock)
 
-		got, err := ti.provider.getContainerPath(ti.podId, ti.containerId, ti.qos)
+			got, err := ti.provider.getContainerPath(ti.podId, ti.containerId, ti.qos)
 
-		if !t.wantErr {
-			c.Assert(err, IsNil, Commentf("Test Name: %s", t.name))
-			c.Assert(got, Equals, t.want, Commentf("Test Name: %s", t.name))
-		} else {
-			c.Assert(err, NotNil, Commentf("Test Name: %s", t.name))
-		}
+			if !tt.wantErr {
+				require.NoError(t, err)
+				require.Equal(t, tt.want, got)
+			} else {
+				require.Error(t, err)
+			}
+		})
 	}
 }

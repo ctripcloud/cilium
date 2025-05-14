@@ -4,30 +4,29 @@
 package debug
 
 import (
-	"bytes"
-	"encoding/binary"
 	"fmt"
+	"log/slog"
 
-	"github.com/sirupsen/logrus"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
-	"github.com/cilium/cilium/pkg/byteorder"
+	"github.com/cilium/cilium/pkg/hubble/parser/common"
 	"github.com/cilium/cilium/pkg/hubble/parser/errors"
 	"github.com/cilium/cilium/pkg/hubble/parser/getters"
+	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/monitor"
 	"github.com/cilium/cilium/pkg/monitor/api"
 )
 
 // Parser is a parser for debug payloads
 type Parser struct {
-	log            logrus.FieldLogger
+	log            *slog.Logger
 	endpointGetter getters.EndpointGetter
 	linkMonitor    getters.LinkGetter
 }
 
 // New creates a new parser
-func New(log logrus.FieldLogger, endpointGetter getters.EndpointGetter) (*Parser, error) {
+func New(log *slog.Logger, endpointGetter getters.EndpointGetter) (*Parser, error) {
 	return &Parser{
 		log:            log,
 		endpointGetter: endpointGetter,
@@ -47,7 +46,7 @@ func (p *Parser) Decode(data []byte, cpu int) (*flowpb.DebugEvent, error) {
 	}
 
 	dbg := &monitor.DebugMsg{}
-	if err := binary.Read(bytes.NewReader(data), byteorder.Native, dbg); err != nil {
+	if err := monitor.DecodeDebugMsg(data, dbg); err != nil {
 		return nil, fmt.Errorf("failed to parse debug event: %w", err)
 	}
 
@@ -73,12 +72,14 @@ func (p *Parser) decodeEndpoint(id uint16) *flowpb.Endpoint {
 	epId := uint32(id)
 	if p.endpointGetter != nil {
 		if ep, ok := p.endpointGetter.GetEndpointInfoByID(id); ok {
+			labels := ep.GetLabels()
 			return &flowpb.Endpoint{
-				ID:        epId,
-				Identity:  uint32(ep.GetIdentity()),
-				Namespace: ep.GetK8sNamespace(),
-				Labels:    ep.GetLabels(),
-				PodName:   ep.GetK8sPodName(),
+				ID:          epId,
+				Identity:    uint32(ep.GetIdentity()),
+				ClusterName: (labels[k8sConst.PolicyLabelCluster]).Value,
+				Namespace:   ep.GetK8sNamespace(),
+				Labels:      common.SortAndFilterLabels(p.log, labels.GetModel(), ep.GetIdentity()),
+				PodName:     ep.GetK8sPodName(),
 			}
 		}
 	}

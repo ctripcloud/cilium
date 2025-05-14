@@ -4,11 +4,10 @@
 package metrics
 
 import (
-	"time"
-
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/cilium/cilium/operator/metrics"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
 
@@ -29,15 +28,16 @@ type prometheusMetrics struct {
 	IPsAllocated *prometheus.GaugeVec
 	// Deprecated, will be removed in version 1.14:
 	// Use InterfaceCandidates and EmptyInterfaceSlots instead
-	AvailableInterfaces   prometheus.Gauge
-	InterfaceCandidates   prometheus.Gauge
-	EmptyInterfaceSlots   prometheus.Gauge
-	AvailableIPsPerSubnet *prometheus.GaugeVec
-	Nodes                 *prometheus.GaugeVec
-	Resync                prometheus.Counter
-	poolMaintainer        *triggerMetrics
-	k8sSync               *triggerMetrics
-	resync                *triggerMetrics
+	AvailableInterfaces    prometheus.Gauge
+	InterfaceCandidates    prometheus.Gauge
+	EmptyInterfaceSlots    prometheus.Gauge
+	AvailableIPsPerSubnet  *prometheus.GaugeVec
+	Nodes                  *prometheus.GaugeVec
+	Resync                 prometheus.Counter
+	BackgroundSyncDuration *prometheus.HistogramVec
+	poolMaintainer         *triggerMetrics
+	k8sSync                *triggerMetrics
+	resync                 *triggerMetrics
 }
 
 const LabelTargetNodeName = "target_node"
@@ -162,6 +162,17 @@ func NewPrometheusMetrics(namespace string, registry metrics.RegisterGatherer) *
 		),
 	}, []string{"type", "status", "subnet_id"})
 
+	m.BackgroundSyncDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: namespace,
+		Subsystem: ipamSubsystem,
+		Name:      "background_sync_duration_seconds",
+		Help:      "Duration in seconds of the background API resync",
+		Buckets: merge(
+			prometheus.LinearBuckets(0.25, 0.25, 2), // 0.25s, 0.50s
+			prometheus.LinearBuckets(1, 1, 60),      // 1s, 2s, 3s, ... 60s,
+		),
+	}, []string{"status"})
+
 	// pool_maintainer is a more generic name, but for backward compatibility
 	// of dashboard, keep the metric name deficit_resolver unchanged
 	m.poolMaintainer = NewTriggerMetrics(namespace, "deficit_resolver")
@@ -184,6 +195,7 @@ func NewPrometheusMetrics(namespace string, registry metrics.RegisterGatherer) *
 	registry.MustRegister(m.Resync)
 	registry.MustRegister(m.Allocation)
 	registry.MustRegister(m.Release)
+	registry.MustRegister(m.BackgroundSyncDuration)
 	m.poolMaintainer.Register(registry)
 	m.k8sSync.Register(registry)
 	m.resync.Register(registry)
@@ -264,6 +276,19 @@ func (p *prometheusMetrics) SetIPNeeded(node string, usage int) {
 	p.NeededIPs.WithLabelValues(node).Set(float64(usage))
 }
 
+// DeleteNode removes all per-node metrics for a particular node (i.e. those labeled with "target_node").
+// This is to ensure that when a Node/CiliumNode delete event happens that the operator will no longer report
+// metrics for that node.
+func (p *prometheusMetrics) DeleteNode(node string) {
+	p.AvailableIPs.DeleteLabelValues(node)
+	p.UsedIPs.DeleteLabelValues(node)
+	p.NeededIPs.DeleteLabelValues(node)
+}
+
+func (p *prometheusMetrics) ObserveBackgroundSync(status string, duration time.Duration) {
+	p.BackgroundSyncDuration.WithLabelValues(status).Observe(duration.Seconds())
+}
+
 type triggerMetrics struct {
 	total        prometheus.Counter
 	folds        prometheus.Gauge
@@ -290,12 +315,16 @@ func NewTriggerMetrics(namespace, name string) *triggerMetrics {
 			Subsystem: ipamSubsystem,
 			Name:      name + "_duration_seconds",
 			Help:      "Duration of trigger runs",
+			Buckets: []float64{0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3,
+				4, 5, 6, 8, 10, 15, 20, 30, 45, 60},
 		}),
 		latency: prometheus.NewHistogram(prometheus.HistogramOpts{
 			Namespace: namespace,
 			Subsystem: ipamSubsystem,
 			Name:      name + "_latency_seconds",
 			Help:      "Latency between queue and trigger run",
+			Buckets: []float64{0.005, 0.025, 0.05, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.25, 1.5, 2, 3,
+				4, 5, 6, 8, 10, 15, 20, 30, 45, 60},
 		}),
 	}
 }
@@ -342,9 +371,11 @@ func (m *NoOpMetrics) IncResyncCount()                                          
 func (m *NoOpMetrics) SetIPAvailable(node string, n int)                                         {}
 func (m *NoOpMetrics) SetIPUsed(node string, n int)                                              {}
 func (m *NoOpMetrics) SetIPNeeded(node string, n int)                                            {}
+func (m *NoOpMetrics) ObserveBackgroundSync(status string, duration time.Duration)               {}
 func (m *NoOpMetrics) PoolMaintainerTrigger() trigger.MetricsObserver                            { return &NoOpMetricsObserver{} }
 func (m *NoOpMetrics) K8sSyncTrigger() trigger.MetricsObserver                                   { return &NoOpMetricsObserver{} }
 func (m *NoOpMetrics) ResyncTrigger() trigger.MetricsObserver                                    { return &NoOpMetricsObserver{} }
+func (m *NoOpMetrics) DeleteNode(n string)                                                       {}
 
 func merge(slices ...[]float64) []float64 {
 	result := make([]float64, 1)

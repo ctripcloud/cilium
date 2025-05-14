@@ -73,12 +73,14 @@ type AssociateVpcCidrBlockRequest struct {
 	*requests.RpcRequest
 	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
 	IPv6CidrType         string           `position:"Query" name:"IPv6CidrType"`
+	IpamPoolId           string           `position:"Query" name:"IpamPoolId"`
 	Ipv6Isp              string           `position:"Query" name:"Ipv6Isp"`
 	IpVersion            string           `position:"Query" name:"IpVersion"`
 	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
 	OwnerAccount         string           `position:"Query" name:"OwnerAccount"`
 	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
 	IPv6CidrBlock        string           `position:"Query" name:"IPv6CidrBlock"`
+	SecondaryCidrMask    requests.Integer `position:"Query" name:"SecondaryCidrMask"`
 	SecondaryCidrBlock   string           `position:"Query" name:"SecondaryCidrBlock"`
 	VpcId                string           `position:"Query" name:"VpcId"`
 }

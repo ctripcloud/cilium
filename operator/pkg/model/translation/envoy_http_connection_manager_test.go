@@ -11,22 +11,25 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-func TestNewHTTPConnectionManager(t *testing.T) {
-	res, err := NewHTTPConnectionManager("dummy-name", "dummy-route-name")
-	require.Nil(t, err)
+func Test_desiredHTTPConnectionManager(t *testing.T) {
+	i := &cecTranslator{}
+	res, err := i.desiredHTTPConnectionManager("dummy-name", "dummy-route-name")
+	require.NoError(t, err)
 
 	httpConnectionManager := &httpConnectionManagerv3.HttpConnectionManager{}
 	err = proto.Unmarshal(res.Value, httpConnectionManager)
 
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	require.Equal(t, "dummy-name", httpConnectionManager.StatPrefix)
 	require.Equal(t, &httpConnectionManagerv3.HttpConnectionManager_Rds{
 		Rds: &httpConnectionManagerv3.Rds{RouteConfigName: "dummy-route-name"},
 	}, httpConnectionManager.GetRouteSpecifier())
 
-	require.Len(t, httpConnectionManager.GetHttpFilters(), 1)
-	require.Equal(t, "envoy.filters.http.router", httpConnectionManager.GetHttpFilters()[0].Name)
+	require.Len(t, httpConnectionManager.GetHttpFilters(), 3)
+	require.Equal(t, "envoy.filters.http.grpc_web", httpConnectionManager.GetHttpFilters()[0].Name)
+	require.Equal(t, "envoy.filters.http.grpc_stats", httpConnectionManager.GetHttpFilters()[1].Name)
+	require.Equal(t, "envoy.filters.http.router", httpConnectionManager.GetHttpFilters()[2].Name)
 
 	require.Len(t, httpConnectionManager.GetUpgradeConfigs(), 1)
 	require.Equal(t, "websocket", httpConnectionManager.GetUpgradeConfigs()[0].UpgradeType)

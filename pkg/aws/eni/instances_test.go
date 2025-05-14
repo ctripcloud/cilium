@@ -4,14 +4,14 @@
 package eni
 
 import (
-	"context"
+	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
 	ec2mock "github.com/cilium/cilium/pkg/aws/ec2/mock"
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	"github.com/cilium/cilium/pkg/aws/types"
-	"github.com/cilium/cilium/pkg/checker"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 )
 
@@ -75,6 +75,24 @@ var (
 		{
 			ID:          "vpc-1",
 			PrimaryCIDR: "2.2.0.0/16",
+		},
+	}
+	routeTables = []*ipamTypes.RouteTable{
+		{
+			ID:               "rt-1",
+			VirtualNetworkID: "vpc-1",
+			Subnets: map[string]struct{}{
+				"subnet-1": {},
+				"subnet-2": {},
+			},
+		},
+		{
+			ID:               "rt-2",
+			VirtualNetworkID: "vpc-1",
+			Subnets: map[string]struct{}{
+				"subnet-3": {},
+				"subnet-4": {},
+			},
 		},
 	}
 
@@ -174,166 +192,170 @@ var (
 	}
 )
 
-func iteration1(api *ec2mock.API, mngr *InstancesManager) {
+func iteration1(t *testing.T, api *ec2mock.API, mngr *InstancesManager) {
 	api.UpdateENIs(enis)
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 }
 
-func iteration2(api *ec2mock.API, mngr *InstancesManager) {
+func iteration2(t *testing.T, api *ec2mock.API, mngr *InstancesManager) {
 	api.UpdateSubnets(subnets2)
 	api.UpdateSecurityGroups(securityGroups2)
 	api.UpdateENIs(enis2)
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 }
 
-func (e *ENISuite) TestGetSubnet(c *check.C) {
-	api := ec2mock.NewAPI(subnets, vpcs, securityGroups)
-	c.Assert(api, check.Not(check.IsNil))
+func TestGetSubnet(t *testing.T) {
+	api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
+	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(api)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
+	require.NotNil(t, mngr)
 
-	c.Assert(mngr.GetSubnet("subnet-1"), check.IsNil)
-	c.Assert(mngr.GetSubnet("subnet-2"), check.IsNil)
-	c.Assert(mngr.GetSubnet("subnet-3"), check.IsNil)
+	require.Nil(t, mngr.GetSubnet("subnet-1"))
+	require.Nil(t, mngr.GetSubnet("subnet-2"))
+	require.Nil(t, mngr.GetSubnet("subnet-3"))
 
-	iteration1(api, mngr)
+	iteration1(t, api, mngr)
 
 	subnet1 := mngr.GetSubnet("subnet-1")
-	c.Assert(subnet1, check.Not(check.IsNil))
-	c.Assert(subnet1.ID, check.Equals, "subnet-1")
+	require.NotNil(t, subnet1)
+	require.Equal(t, "subnet-1", subnet1.ID)
 
 	subnet2 := mngr.GetSubnet("subnet-2")
-	c.Assert(subnet2, check.Not(check.IsNil))
-	c.Assert(subnet2.ID, check.Equals, "subnet-2")
+	require.NotNil(t, subnet2)
+	require.Equal(t, "subnet-2", subnet2.ID)
 
-	c.Assert(mngr.GetSubnet("subnet-3"), check.IsNil)
+	require.Nil(t, mngr.GetSubnet("subnet-3"))
 
-	iteration2(api, mngr)
+	iteration2(t, api, mngr)
 
 	subnet1 = mngr.GetSubnet("subnet-1")
-	c.Assert(subnet1, check.Not(check.IsNil))
-	c.Assert(subnet1.ID, check.Equals, "subnet-1")
+	require.NotNil(t, subnet1)
+	require.Equal(t, "subnet-1", subnet1.ID)
 
 	subnet2 = mngr.GetSubnet("subnet-2")
-	c.Assert(subnet2, check.Not(check.IsNil))
-	c.Assert(subnet2.ID, check.Equals, "subnet-2")
+	require.NotNil(t, subnet2)
+	require.Equal(t, "subnet-2", subnet2.ID)
 
 	subnet3 := mngr.GetSubnet("subnet-3")
-	c.Assert(subnet3, check.Not(check.IsNil))
-	c.Assert(subnet3.ID, check.Equals, "subnet-3")
+	require.NotNil(t, subnet3)
+	require.Equal(t, "subnet-3", subnet3.ID)
 }
 
-func (e *ENISuite) TestFindSubnetByIDs(c *check.C) {
-	api := ec2mock.NewAPI(subnets2, vpcs, securityGroups)
-	c.Assert(api, check.Not(check.IsNil))
+func TestFindSubnetByIDs(t *testing.T) {
+	api := ec2mock.NewAPI(subnets2, vpcs, securityGroups, routeTables)
+	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(api)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
+	require.NotNil(t, mngr)
 
-	iteration1(api, mngr)
-	iteration2(api, mngr)
+	iteration1(t, api, mngr)
+	iteration2(t, api, mngr)
 
 	// exact match subnet-1
 	s := mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{"subnet-1"})
-	c.Assert(s.ID, check.Equals, "subnet-1")
+	require.Equal(t, "subnet-1", s.ID)
 
 	// exact match subnet-2
 	s = mngr.FindSubnetByIDs("vpc-2", "us-east-1", []string{"subnet-2"})
-	c.Assert(s.ID, check.Equals, "subnet-2")
+	require.Equal(t, "subnet-2", s.ID)
 
 	// exact match subnet-3
 	s = mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{"subnet-3"})
-	c.Assert(s.ID, check.Equals, "subnet-3")
+	require.Equal(t, "subnet-3", s.ID)
 
 	// empty list shall return nil
-	c.Assert(mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{}))
 
 	// all subnet match, subnet-1 has more addresses
 	s = mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{"subnet-1", "subnet-3"})
-	c.Assert(s.ID, check.Equals, "subnet-1")
+	require.Equal(t, "subnet-1", s.ID)
 
 	// invalid vpc, no match
-	c.Assert(mngr.FindSubnetByIDs("vpc-unknown", "us-west-1", []string{"subnet-1"}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByIDs("vpc-unknown", "us-west-1", []string{"subnet-1"}))
 
 	// invalid AZ, no match
-	c.Assert(mngr.FindSubnetByIDs("vpc-1", "us-west-unknown", []string{"subnet-1"}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByIDs("vpc-1", "us-west-unknown", []string{"subnet-1"}))
 
 	// invalid ids, no match
-	c.Assert(mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{"subnet-unknown"}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByIDs("vpc-1", "us-west-1", []string{"subnet-unknown"}))
 }
 
-func (e *ENISuite) TestFindSubnetByTags(c *check.C) {
-	api := ec2mock.NewAPI(subnets, vpcs, securityGroups)
-	c.Assert(api, check.Not(check.IsNil))
+func TestFindSubnetByTags(t *testing.T) {
+	api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
+	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(api)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
+	require.NotNil(t, mngr)
 
-	iteration1(api, mngr)
-	iteration2(api, mngr)
+	iteration1(t, api, mngr)
+	iteration2(t, api, mngr)
 
 	// exact match subnet-1
 	s := mngr.FindSubnetByTags("vpc-1", "us-west-1", ipamTypes.Tags{"tag1": "tag1"})
-	c.Assert(s.ID, check.Equals, "subnet-1")
+	require.Equal(t, "subnet-1", s.ID)
 
 	// exact match subnet-2
 	s = mngr.FindSubnetByTags("vpc-2", "us-east-1", ipamTypes.Tags{"tag1": "tag1"})
-	c.Assert(s.ID, check.Equals, "subnet-2")
+	require.Equal(t, "subnet-2", s.ID)
 
 	// exact match subnet-3
 	s = mngr.FindSubnetByTags("vpc-1", "us-west-1", ipamTypes.Tags{"tag2": "tag2"})
-	c.Assert(s.ID, check.Equals, "subnet-3")
+	require.Equal(t, "subnet-3", s.ID)
 
 	// both subnet-1 and subnet-3 match, subnet-1 has more addresses
 	s = mngr.FindSubnetByTags("vpc-1", "us-west-1", ipamTypes.Tags{})
-	c.Assert(s.ID, check.Equals, "subnet-1")
+	require.Equal(t, "subnet-1", s.ID)
 
 	// invalid vpc, no match
-	c.Assert(mngr.FindSubnetByTags("vpc-unknown", "us-west-1", ipamTypes.Tags{"tag1": "tag1"}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByTags("vpc-unknown", "us-west-1", ipamTypes.Tags{"tag1": "tag1"}))
 
 	// invalid AZ, no match
-	c.Assert(mngr.FindSubnetByTags("vpc-1", "us-west-unknown", ipamTypes.Tags{"tag1": "tag1"}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByTags("vpc-1", "us-west-unknown", ipamTypes.Tags{"tag1": "tag1"}))
 
 	// invalid tags, no match
-	c.Assert(mngr.FindSubnetByTags("vpc-1", "us-west-1", ipamTypes.Tags{"tag1": "unknown value"}), check.IsNil)
+	require.Nil(t, mngr.FindSubnetByTags("vpc-1", "us-west-1", ipamTypes.Tags{"tag1": "tag1", "tag2": "tag2"}))
 }
 
-func (e *ENISuite) TestGetSecurityGroupByTags(c *check.C) {
-	api := ec2mock.NewAPI(subnets, vpcs, securityGroups)
-	c.Assert(api, check.Not(check.IsNil))
+func TestGetSecurityGroupByTags(t *testing.T) {
+	api := ec2mock.NewAPI(subnets, vpcs, securityGroups, routeTables)
+	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(api)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := NewInstancesManager(hivetest.Logger(t), api)
+	require.NoError(t, err)
+	require.NotNil(t, mngr)
 
 	sgGroups := mngr.FindSecurityGroupByTags("vpc-1", map[string]string{
 		"k1": "v1",
 	})
-	c.Assert(sgGroups, check.HasLen, 0)
+	require.Empty(t, sgGroups)
 
-	iteration1(api, mngr)
+	iteration1(t, api, mngr)
 	reqTags := ipamTypes.Tags{
 		"k1": "v1",
 	}
 	sgGroups = mngr.FindSecurityGroupByTags("vpc-1", reqTags)
-	c.Assert(sgGroups, check.HasLen, 1)
-	c.Assert(sgGroups[0].Tags, checker.DeepEquals, reqTags)
+	require.Len(t, sgGroups, 1)
+	require.Equal(t, reqTags, sgGroups[0].Tags)
 
-	iteration2(api, mngr)
+	iteration2(t, api, mngr)
 	reqTags = ipamTypes.Tags{
 		"k2": "v2",
 	}
 	sgGroups = mngr.FindSecurityGroupByTags("vpc-1", reqTags)
-	c.Assert(sgGroups, check.HasLen, 1)
-	c.Assert(sgGroups[0].Tags, checker.DeepEquals, reqTags)
+	require.Len(t, sgGroups, 1)
+	require.Equal(t, reqTags, sgGroups[0].Tags)
 
 	// iteration 3
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 	reqTags = ipamTypes.Tags{
 		"k3": "v3",
 	}
 	sgGroups = mngr.FindSecurityGroupByTags("vpc-1", reqTags)
-	c.Assert(sgGroups, check.HasLen, 2)
-	c.Assert(sgGroups[0].Tags, checker.DeepEquals, reqTags)
-	c.Assert(sgGroups[1].Tags, checker.DeepEquals, reqTags)
+	require.Len(t, sgGroups, 2)
+	require.Equal(t, reqTags, sgGroups[0].Tags)
+	require.Equal(t, reqTags, sgGroups[1].Tags)
 }

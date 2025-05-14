@@ -29,8 +29,8 @@ func BenchmarkRingWrite(b *testing.B) {
 	entry := &v1.Event{}
 	s := NewRing(capacity(b.N))
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		s.Write(entry)
 	}
 }
@@ -38,14 +38,14 @@ func BenchmarkRingWrite(b *testing.B) {
 func BenchmarkRingRead(b *testing.B) {
 	entry := &v1.Event{}
 	s := NewRing(capacity(b.N))
-	a := make([]*v1.Event, b.N, b.N)
+	a := make([]*v1.Event, b.N)
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		s.Write(entry)
 	}
-	b.ResetTimer()
+
 	lastWriteIdx := s.LastWriteParallel()
-	for i := 0; i < b.N; i++ {
+	for i := 0; b.Loop(); i++ {
 		a[i], _ = s.read(lastWriteIdx)
 		lastWriteIdx--
 	}
@@ -54,10 +54,10 @@ func BenchmarkRingRead(b *testing.B) {
 func BenchmarkTimeLibListRead(b *testing.B) {
 	entry := &v1.Event{}
 	s := list.New()
-	a := make([]*v1.Event, b.N, b.N)
+	a := make([]*v1.Event, b.N)
 	i := 0
 	b.ReportAllocs()
-	for i := 0; i < b.N; i++ {
+	for b.Loop() {
 		s.PushFront(entry)
 	}
 	b.ResetTimer()
@@ -69,15 +69,15 @@ func BenchmarkTimeLibListRead(b *testing.B) {
 func BenchmarkTimeLibRingRead(b *testing.B) {
 	entry := &v1.Event{}
 	s := ring.New(b.N)
-	a := make([]*v1.Event, b.N, b.N)
+	a := make([]*v1.Event, b.N)
 	i := 0
 	b.ReportAllocs()
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
+
+	for b.Loop() {
 		s.Value = entry
 		s.Next()
 	}
-	s.Do(func(e interface{}) {
+	s.Do(func(e any) {
 		a[i], _ = e.(*v1.Event)
 		i++
 	})
@@ -126,7 +126,7 @@ func TestNewCapacity(t *testing.T) {
 		t.Run(fmt.Sprintf("n=%d", n), func(t *testing.T) {
 			c, err := NewCapacity(n)
 			assert.Nil(t, c)
-			assert.NotNil(t, err)
+			assert.Error(t, err)
 		})
 	}
 }
@@ -140,7 +140,7 @@ func TestNewRing(t *testing.T) {
 			assert.Equal(t, uint64(0), r.Len())
 			assert.Equal(t, uint64(n), r.Cap())
 			// fill half the buffer
-			for j := 0; j < n/2; j++ {
+			for range n / 2 {
 				r.Write(&v1.Event{})
 			}
 			assert.Equal(t, uint64(n/2), r.Len())
@@ -152,7 +152,7 @@ func TestNewRing(t *testing.T) {
 			assert.Equal(t, uint64(n), r.Len())
 			assert.Equal(t, uint64(n), r.Cap())
 			// write more events
-			for j := 0; j < n; j++ {
+			for range n {
 				r.Write(&v1.Event{})
 			}
 			assert.Equal(t, uint64(n), r.Len())
@@ -384,11 +384,11 @@ func TestRing_Read(t *testing.T) {
 			r := &Ring{
 				mask:      tt.fields.mask,
 				data:      tt.fields.data,
-				write:     tt.fields.write,
 				dataLen:   uint64(len(tt.fields.data)),
 				cycleExp:  tt.fields.cycleExp,
 				cycleMask: ^uint64(0) >> tt.fields.cycleExp,
 			}
+			r.write.Store(tt.fields.write)
 			got, got1 := r.read(tt.args.read)
 			if tt.want.GetLostEvent() != nil {
 				assert.NotNil(t, got)
@@ -479,16 +479,16 @@ func TestRing_Write(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &Ring{
-				mask:  tt.fields.len,
-				data:  tt.fields.data,
-				write: tt.fields.write,
+				mask: tt.fields.len,
+				data: tt.fields.data,
 			}
+			r.write.Store(tt.fields.write)
 			r.Write(tt.args.event)
 			want := &Ring{
-				mask:  tt.want.len,
-				data:  tt.want.data,
-				write: tt.want.write,
+				mask: tt.want.len,
+				data: tt.want.data,
 			}
+			want.write.Store(tt.want.write)
 			reflect.DeepEqual(want, r)
 		})
 	}
@@ -525,10 +525,10 @@ func TestRing_LastWriteParallel(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &Ring{
-				mask:  tt.fields.len,
-				data:  tt.fields.data,
-				write: tt.fields.write,
+				mask: tt.fields.len,
+				data: tt.fields.data,
 			}
+			r.write.Store(tt.fields.write)
 			if got := r.LastWriteParallel(); got != tt.want {
 				t.Errorf("Ring.LastWriteParallel() = %v, want %v", got, tt.want)
 			}
@@ -567,10 +567,10 @@ func TestRing_LastWrite(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			r := &Ring{
-				mask:  tt.fields.len,
-				data:  tt.fields.data,
-				write: tt.fields.write,
+				mask: tt.fields.len,
+				data: tt.fields.data,
 			}
+			r.write.Store(tt.fields.write)
 			if got := r.LastWrite(); got != tt.want {
 				t.Errorf("Ring.LastWrite() = %v, want %v", got, tt.want)
 			}
@@ -697,7 +697,7 @@ func TestRingFunctionalitySerialized(t *testing.T) {
 	}
 
 	_, err := r.read(lastWrite)
-	if err != io.EOF {
+	if !errors.Is(err, io.EOF) {
 		t.Errorf("Should not be able to read position %x, got %v", lastWrite, err)
 	}
 	lastWrite--

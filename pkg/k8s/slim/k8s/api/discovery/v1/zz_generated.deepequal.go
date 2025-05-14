@@ -36,6 +36,14 @@ func (in *Endpoint) DeepEqual(other *Endpoint) bool {
 		return false
 	}
 
+	if (in.Hostname == nil) != (other.Hostname == nil) {
+		return false
+	} else if in.Hostname != nil {
+		if *in.Hostname != *other.Hostname {
+			return false
+		}
+	}
+
 	if ((in.DeprecatedTopology != nil) && (other.DeprecatedTopology != nil)) || ((in.DeprecatedTopology == nil) != (other.DeprecatedTopology == nil)) {
 		in, other := &in.DeprecatedTopology, &other.DeprecatedTopology
 		if other == nil {
@@ -172,6 +180,14 @@ func (in *EndpointPort) DeepEqual(other *EndpointPort) bool {
 		return false
 	} else if in.Port != nil {
 		if *in.Port != *other.Port {
+			return false
+		}
+	}
+
+	if (in.AppProtocol == nil) != (other.AppProtocol == nil) {
+		return false
+	} else if in.AppProtocol != nil {
+		if *in.AppProtocol != *other.AppProtocol {
 			return false
 		}
 	}

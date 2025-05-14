@@ -4,14 +4,14 @@
 package multicast
 
 import (
+	"log/slog"
 	"net"
 	"net/netip"
 
-	"github.com/vishvananda/netlink"
 	"golang.org/x/net/ipv6"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
@@ -20,8 +20,6 @@ var (
 	v6Socket net.PacketConn
 
 	mutex lock.Mutex
-
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "multicast")
 )
 
 // Pre-Defined Multicast Addresses
@@ -53,7 +51,7 @@ var (
 	SolicitedNodeMaddrPrefix net.IP = net.ParseIP("ff02::1:ff00:0")
 )
 
-func initSocket() error {
+func initSocket(logger *slog.Logger) error {
 	mutex.Lock()
 	defer mutex.Unlock()
 
@@ -63,7 +61,7 @@ func initSocket() error {
 
 	c, err := net.ListenPacket("udp6", "[::]:0")
 	if err != nil {
-		log.WithError(err).Warn("Failed to listen on socket for multicast")
+		logger.Warn("Failed to listen on socket for multicast", logfields.Error, err)
 		return err
 	}
 
@@ -72,8 +70,8 @@ func initSocket() error {
 }
 
 // JoinGroup joins the group address group on the interface ifc
-func JoinGroup(ifc string, ip netip.Addr) error {
-	if err := initSocket(); err != nil {
+func JoinGroup(logger *slog.Logger, ifc string, ip netip.Addr) error {
+	if err := initSocket(logger); err != nil {
 		return err
 	}
 
@@ -86,8 +84,8 @@ func JoinGroup(ifc string, ip netip.Addr) error {
 }
 
 // LeaveGroup leaves the group address group on the interface ifc
-func LeaveGroup(ifc string, ip netip.Addr) error {
-	if err := initSocket(); err != nil {
+func LeaveGroup(logger *slog.Logger, ifc string, ip netip.Addr) error {
+	if err := initSocket(logger); err != nil {
 		return err
 	}
 
@@ -168,7 +166,7 @@ func (a Address) SolicitedNodeMaddr() netip.Addr {
 // The reason not to use net.InterfaceByName directly is to avoid potential
 // deadlocks (#15051).
 func interfaceByName(name string) (*net.Interface, error) {
-	link, err := netlink.LinkByName(name)
+	link, err := safenetlink.LinkByName(name)
 	if err != nil {
 		return nil, err
 	}

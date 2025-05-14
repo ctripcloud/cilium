@@ -4,18 +4,16 @@
 package metrics
 
 import (
-	"context"
-	"fmt"
+	"crypto/tls"
+	"log/slog"
 	"net/http"
-	"time"
 
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/util/workqueue"
 
-	pb "github.com/cilium/cilium/api/v1/flow"
+	"github.com/cilium/cilium/pkg/crypto/certloader"
 	"github.com/cilium/cilium/pkg/hubble/metrics/api"
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/dns"               // invoke init
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/drop"              // invoke init
@@ -27,18 +25,21 @@ import (
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/policy"            // invoke init
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/port-distribution" // invoke init
 	_ "github.com/cilium/cilium/pkg/hubble/metrics/tcp"               // invoke init
-	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	"github.com/cilium/cilium/pkg/hubble/server/serveroption"
+	"github.com/cilium/cilium/pkg/k8s/types"
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-type PodDeletionHandler struct {
+type CiliumEndpointDeletionHandler struct {
 	gracefulPeriod time.Duration
-	queue          workqueue.DelayingInterface
+	queue          workqueue.TypedDelayingInterface[*types.CiliumEndpoint]
 }
 
 var (
-	enabledMetrics     *api.Handlers
-	registry           = prometheus.NewPedanticRegistry()
-	podDeletionHandler *PodDeletionHandler
+	EnabledMetrics          []api.NamedHandler
+	Registry                = prometheus.NewPedanticRegistry()
+	endpointDeletionHandler *CiliumEndpointDeletionHandler
 )
 
 // Additional metrics - they're not counting flows, so are not served via
@@ -52,88 +53,96 @@ var (
 	}, []string{labelSource})
 )
 
-// ProcessFlow processes a flow and updates metrics
-func ProcessFlow(ctx context.Context, flow *pb.Flow) error {
-	if enabledMetrics != nil {
-		return enabledMetrics.ProcessFlow(ctx, flow)
+// Metrics related to Hubble metrics HTTP requests handling
+var (
+	RequestsTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Namespace: api.DefaultPrometheusNamespace,
+		Name:      "metrics_http_handler_requests_total",
+		Help:      "A counter for requests to Hubble metrics handler.",
+	}, []string{"code"})
+	RequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Namespace: api.DefaultPrometheusNamespace,
+		Name:      "metrics_http_handler_request_duration_seconds",
+		Help:      "A histogram of latencies of Hubble metrics handler.",
+	}, []string{"code"})
+)
+
+func ProcessCiliumEndpointDeletion(pod *types.CiliumEndpoint) error {
+	if endpointDeletionHandler != nil && EnabledMetrics != nil {
+		endpointDeletionHandler.queue.AddAfter(pod, endpointDeletionHandler.gracefulPeriod)
 	}
 	return nil
 }
 
-func ProcessPodDeletion(pod *slim_corev1.Pod) error {
-	if podDeletionHandler != nil && enabledMetrics != nil {
-		podDeletionHandler.queue.AddAfter(pod, podDeletionHandler.gracefulPeriod)
-	}
-	return nil
-}
-
-func initMetricHandlers(enabled api.Map) (*api.Handlers, error) {
-	return api.DefaultRegistry().ConfigureHandlers(registry, enabled)
-}
-
-func initMetricsServer(address string, enableOpenMetrics bool, errChan chan error) {
-	go func() {
-		mux := http.NewServeMux()
-		mux.Handle("/metrics", promhttp.HandlerFor(registry, promhttp.HandlerOpts{
-			EnableOpenMetrics: enableOpenMetrics,
-		}))
-		srv := http.Server{
-			Addr:    address,
-			Handler: mux,
-		}
-		errChan <- srv.ListenAndServe()
-	}()
-
-}
-
-func initPodDeletionHandler() {
-	podDeletionHandler = &PodDeletionHandler{
+func initEndpointDeletionHandler() {
+	endpointDeletionHandler = &CiliumEndpointDeletionHandler{
 		gracefulPeriod: time.Minute,
-		queue:          workqueue.NewDelayingQueue(),
+		queue:          workqueue.NewTypedDelayingQueue[*types.CiliumEndpoint](),
 	}
 
 	go func() {
 		for {
-			pod, quit := podDeletionHandler.queue.Get()
+			endpoint, quit := endpointDeletionHandler.queue.Get()
 			if quit {
 				return
 			}
-			enabledMetrics.ProcessPodDeletion(pod.(*slim_corev1.Pod))
+			api.ProcessCiliumEndpointDeletion(endpoint, EnabledMetrics)
+			endpointDeletionHandler.queue.Done(endpoint)
 		}
 	}()
 }
 
-// initMetrics initializes the metrics system
-func initMetrics(address string, enabled api.Map, grpcMetrics *grpc_prometheus.ServerMetrics, enableOpenMetrics bool) (<-chan error, error) {
-	e, err := initMetricHandlers(enabled)
+// InitMetrics initializes the metrics system
+func InitMetrics(logger *slog.Logger, reg *prometheus.Registry, enabled *api.Config, grpcMetrics *grpc_prometheus.ServerMetrics) error {
+	e, err := InitMetricHandlers(logger, reg, enabled)
 	if err != nil {
-		return nil, err
+		return err
 	}
-	enabledMetrics = e
+	EnabledMetrics = *e
 
-	registry.MustRegister(grpcMetrics)
-	registry.MustRegister(LostEvents)
+	reg.MustRegister(grpcMetrics)
+	reg.MustRegister(LostEvents)
+	reg.MustRegister(RequestsTotal)
+	reg.MustRegister(RequestDuration)
 
-	errChan := make(chan error, 1)
+	initEndpointDeletionHandler()
 
-	initMetricsServer(address, enableOpenMetrics, errChan)
-	initPodDeletionHandler()
-
-	return errChan, nil
-}
-
-// EnableMetrics starts the metrics server with a given list of metrics. This is the
-// function Cilium uses to configure Hubble metrics in embedded mode.
-func EnableMetrics(log logrus.FieldLogger, metricsServer string, m []string, grpcMetrics *grpc_prometheus.ServerMetrics, enableOpenMetrics bool) error {
-	errChan, err := initMetrics(metricsServer, api.ParseMetricList(m), grpcMetrics, enableOpenMetrics)
-	if err != nil {
-		return fmt.Errorf("unable to setup metrics: %v", err)
-	}
-	go func() {
-		err := <-errChan
-		if err != nil {
-			log.WithError(err).Error("Unable to initialize metrics server")
-		}
-	}()
 	return nil
+}
+
+func InitHubbleInternalMetrics(reg *prometheus.Registry, grpcMetrics *grpc_prometheus.ServerMetrics) error {
+	reg.MustRegister(grpcMetrics)
+	reg.MustRegister(LostEvents)
+	reg.MustRegister(RequestsTotal)
+	reg.MustRegister(RequestDuration)
+
+	initEndpointDeletionHandler()
+
+	return nil
+}
+
+func InitMetricHandlers(logger *slog.Logger, reg *prometheus.Registry, enabled *api.Config) (*[]api.NamedHandler, error) {
+	return api.DefaultRegistry().ConfigureHandlers(logger, reg, enabled)
+}
+
+func InitMetricsServerHandler(srv *http.Server, reg *prometheus.Registry, enableOpenMetrics bool) {
+	mux := http.NewServeMux()
+	handler := promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+		EnableOpenMetrics: enableOpenMetrics,
+	})
+	handler = promhttp.InstrumentHandlerCounter(RequestsTotal, handler)
+	handler = promhttp.InstrumentHandlerDuration(RequestDuration, handler)
+	mux.Handle("/metrics", handler)
+
+	srv.Handler = mux
+}
+
+func StartMetricsServer(srv *http.Server, log logging.FieldLogger, metricsTLSConfig *certloader.WatchedServerConfig, grpcMetrics *grpc_prometheus.ServerMetrics) error {
+	if metricsTLSConfig != nil {
+		srv.TLSConfig = metricsTLSConfig.ServerConfig(&tls.Config{ //nolint:gosec
+			MinVersion: serveroption.MinTLSVersion,
+		})
+		return srv.ListenAndServeTLS("", "")
+	}
+	return srv.ListenAndServe()
 }

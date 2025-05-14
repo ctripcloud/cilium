@@ -6,19 +6,25 @@
 
 .. _chaining_azure:
 
-*********
-Azure CNI
-*********
+******************
+Azure CNI (Legacy)
+******************
 
 .. note::
 
    For most users, the best way to run Cilium on AKS is either
    AKS BYO CNI as described in :ref:`k8s_install_quick`
-   or `Azure CNI Powered by Cilium <https://aka.ms/aks/cilium-dataplane>`_.
+   or `Azure CNI Powered by Cilium <https://aka.ms/aks/cilium-dataplane>`__.
    This guide provides alternative instructions to run Cilium with Azure CNI
-   in a chaining configuration.
+   in a chaining configuration. This is the legacy way of running Azure CNI with
+   cilium as Azure IPAM is legacy, for more information see :ref:`ipam_azure`.
 
 .. include:: cni-chaining-limitations.rst
+
+.. admonition:: Video
+ :class: attention
+
+  If you'd like a video explanation of the Azure CNI Powered by Cilium, check out `eCHO episode 70: Azure CNI Powered by Cilium <https://www.youtube.com/watch?v=8it8Hm2F_GM>`__.
 
 This guide explains how to set up Cilium in combination with Azure CNI in a
 chaining configuration. In this hybrid mode, the Azure CNI plugin is
@@ -88,6 +94,7 @@ Deploy Cilium release via Helm:
      --namespace kube-system \\
      --set cni.chainingMode=generic-veth \\
      --set cni.customConf=true \\
+     --set cni.exclusive=false \\
      --set nodeinit.enabled=true \\
      --set cni.configMap=cni-configuration \\
      --set routingMode=native \\

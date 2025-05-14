@@ -53,7 +53,7 @@ func (s *Service) Notify(_ *peerpb.NotifyRequest, stream peerpb.Peer_NotifyServe
 	g, ctx := errgroup.WithContext(ctx)
 
 	// monitor for global stop signal to tear down all routines
-	h := newHandler(s.opts.WithoutTLSInfo, s.opts.AddressFamilyPreference)
+	h := newHandler(s.opts.WithoutTLSInfo, s.opts.AddressFamilyPreference, s.opts.HubblePort)
 	g.Go(func() error {
 		defer h.Close()
 		select {
@@ -89,14 +89,13 @@ func (s *Service) Notify(_ *peerpb.NotifyRequest, stream peerpb.Peer_NotifyServe
 	g.Go(func() error {
 		for {
 			cn, err := buf.Pop()
-			switch err {
-			case nil:
-				if err := stream.Send(cn); err != nil {
-					return err
+			if err != nil {
+				if errors.Is(err, io.EOF) {
+					return nil
 				}
-			case io.EOF:
-				return nil
-			default:
+				return err
+			}
+			if err := stream.Send(cn); err != nil {
 				return err
 			}
 		}

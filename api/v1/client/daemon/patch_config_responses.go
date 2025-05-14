@@ -9,6 +9,7 @@ package daemon
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -38,6 +39,12 @@ func (o *PatchConfigReader) ReadResponse(response runtime.ClientResponse, consum
 			return nil, err
 		}
 		return nil, result
+	case 403:
+		result := NewPatchConfigForbidden()
+		if err := result.readResponse(response, consumer, o.formats); err != nil {
+			return nil, err
+		}
+		return nil, result
 	case 500:
 		result := NewPatchConfigFailure()
 		if err := result.readResponse(response, consumer, o.formats); err != nil {
@@ -45,7 +52,7 @@ func (o *PatchConfigReader) ReadResponse(response runtime.ClientResponse, consum
 		}
 		return nil, result
 	default:
-		return nil, runtime.NewAPIError("response status code does not match any response statuses defined for this endpoint in the swagger spec", response, response.Code())
+		return nil, runtime.NewAPIError("[PATCH /config] PatchConfig", response, response.Code())
 	}
 }
 
@@ -87,12 +94,17 @@ func (o *PatchConfigOK) IsCode(code int) bool {
 	return code == 200
 }
 
+// Code gets the status code for the patch config o k response
+func (o *PatchConfigOK) Code() int {
+	return 200
+}
+
 func (o *PatchConfigOK) Error() string {
-	return fmt.Sprintf("[PATCH /config][%d] patchConfigOK ", 200)
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigOK", 200)
 }
 
 func (o *PatchConfigOK) String() string {
-	return fmt.Sprintf("[PATCH /config][%d] patchConfigOK ", 200)
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigOK", 200)
 }
 
 func (o *PatchConfigOK) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
@@ -139,12 +151,19 @@ func (o *PatchConfigBadRequest) IsCode(code int) bool {
 	return code == 400
 }
 
+// Code gets the status code for the patch config bad request response
+func (o *PatchConfigBadRequest) Code() int {
+	return 400
+}
+
 func (o *PatchConfigBadRequest) Error() string {
-	return fmt.Sprintf("[PATCH /config][%d] patchConfigBadRequest  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigBadRequest %s", 400, payload)
 }
 
 func (o *PatchConfigBadRequest) String() string {
-	return fmt.Sprintf("[PATCH /config][%d] patchConfigBadRequest  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigBadRequest %s", 400, payload)
 }
 
 func (o *PatchConfigBadRequest) GetPayload() models.Error {
@@ -157,6 +176,62 @@ func (o *PatchConfigBadRequest) readResponse(response runtime.ClientResponse, co
 	if err := consumer.Consume(response.Body(), &o.Payload); err != nil && err != io.EOF {
 		return err
 	}
+
+	return nil
+}
+
+// NewPatchConfigForbidden creates a PatchConfigForbidden with default headers values
+func NewPatchConfigForbidden() *PatchConfigForbidden {
+	return &PatchConfigForbidden{}
+}
+
+/*
+PatchConfigForbidden describes a response with status code 403, with default header values.
+
+Forbidden
+*/
+type PatchConfigForbidden struct {
+}
+
+// IsSuccess returns true when this patch config forbidden response has a 2xx status code
+func (o *PatchConfigForbidden) IsSuccess() bool {
+	return false
+}
+
+// IsRedirect returns true when this patch config forbidden response has a 3xx status code
+func (o *PatchConfigForbidden) IsRedirect() bool {
+	return false
+}
+
+// IsClientError returns true when this patch config forbidden response has a 4xx status code
+func (o *PatchConfigForbidden) IsClientError() bool {
+	return true
+}
+
+// IsServerError returns true when this patch config forbidden response has a 5xx status code
+func (o *PatchConfigForbidden) IsServerError() bool {
+	return false
+}
+
+// IsCode returns true when this patch config forbidden response a status code equal to that given
+func (o *PatchConfigForbidden) IsCode(code int) bool {
+	return code == 403
+}
+
+// Code gets the status code for the patch config forbidden response
+func (o *PatchConfigForbidden) Code() int {
+	return 403
+}
+
+func (o *PatchConfigForbidden) Error() string {
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigForbidden", 403)
+}
+
+func (o *PatchConfigForbidden) String() string {
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigForbidden", 403)
+}
+
+func (o *PatchConfigForbidden) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	return nil
 }
@@ -200,12 +275,19 @@ func (o *PatchConfigFailure) IsCode(code int) bool {
 	return code == 500
 }
 
+// Code gets the status code for the patch config failure response
+func (o *PatchConfigFailure) Code() int {
+	return 500
+}
+
 func (o *PatchConfigFailure) Error() string {
-	return fmt.Sprintf("[PATCH /config][%d] patchConfigFailure  %+v", 500, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigFailure %s", 500, payload)
 }
 
 func (o *PatchConfigFailure) String() string {
-	return fmt.Sprintf("[PATCH /config][%d] patchConfigFailure  %+v", 500, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PATCH /config][%d] patchConfigFailure %s", 500, payload)
 }
 
 func (o *PatchConfigFailure) GetPayload() models.Error {

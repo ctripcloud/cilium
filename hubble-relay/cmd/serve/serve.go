@@ -4,7 +4,10 @@
 package serve
 
 import (
+	"context"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"os/signal"
 
@@ -13,8 +16,11 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/sys/unix"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/metadata"
 
 	"github.com/cilium/cilium/pkg/crypto/certloader"
+	"github.com/cilium/cilium/pkg/hubble/build"
 	"github.com/cilium/cilium/pkg/hubble/relay/defaults"
 	"github.com/cilium/cilium/pkg/hubble/relay/server"
 	"github.com/cilium/cilium/pkg/logging"
@@ -23,26 +29,31 @@ import (
 )
 
 const (
-	keyClusterName            = "cluster-name"
-	keyPprof                  = "pprof"
-	keyPprofAddress           = "pprof-address"
-	keyPprofPort              = "pprof-port"
-	keyGops                   = "gops"
-	keyGopsPort               = "gops-port"
-	keyDialTimeout            = "dial-timeout"
-	keyRetryTimeout           = "retry-timeout"
-	keyListenAddress          = "listen-address"
-	keyMetricsListenAddress   = "metrics-listen-address"
-	keyPeerService            = "peer-service"
-	keySortBufferMaxLen       = "sort-buffer-len-max"
-	keySortBufferDrainTimeout = "sort-buffer-drain-timeout"
-	keyTLSClientCertFile      = "tls-client-cert-file"
-	keyTLSClientKeyFile       = "tls-client-key-file"
-	keyTLSHubbleServerCAFiles = "tls-hubble-server-ca-files"
-	keyTLSClientDisabled      = "disable-client-tls"
-	keyTLSServerCertFile      = "tls-server-cert-file"
-	keyTLSServerKeyFile       = "tls-server-key-file"
-	keyTLSServerDisabled      = "disable-server-tls"
+	keyClusterName             = "cluster-name"
+	keyPprof                   = "pprof"
+	keyPprofAddress            = "pprof-address"
+	keyPprofPort               = "pprof-port"
+	keyGops                    = "gops"
+	keyGopsPort                = "gops-port"
+	keyRetryTimeout            = "retry-timeout"
+	keyListenAddress           = "listen-address"
+	keyHealthListenAddress     = "health-listen-address"
+	keyMetricsListenAddress    = "metrics-listen-address"
+	keyPeerService             = "peer-service"
+	keySortBufferMaxLen        = "sort-buffer-len-max"
+	keySortBufferDrainTimeout  = "sort-buffer-drain-timeout"
+	keyTLSHubbleClientCertFile = "tls-hubble-client-cert-file"
+	keyTLSClientCertFile       = "tls-client-cert-file" // Deprecated: replaced by keyTLSHubbleClientCertFile
+	keyTLSHubbleClientKeyFile  = "tls-hubble-client-key-file"
+	keyTLSClientKeyFile        = "tls-client-key-file" // Deprecated: replaced by keyTLSHubbleClientKeyFile
+	keyTLSHubbleServerCAFiles  = "tls-hubble-server-ca-files"
+	keyTLSClientDisabled       = "disable-client-tls"
+	keyTLSRelayServerCertFile  = "tls-relay-server-cert-file"
+	keyTLSServerCertFile       = "tls-server-cert-file" // Deprecated: replaced by keyTLSRelayServerCertFile
+	keyTLSRelayServerKeyFile   = "tls-relay-server-key-file"
+	keyTLSServerKeyFile        = "tls-server-key-file" // Deprecated: replaced by keyTLSRelayServerKeyFile
+	keyTLSRelayClientCAFiles   = "tls-relay-client-ca-files"
+	keyTLSServerDisabled       = "disable-server-tls"
 )
 
 // New creates a new serve command.
@@ -77,10 +88,6 @@ func New(vp *viper.Viper) *cobra.Command {
 		defaults.GopsPort,
 		"Port for gops server to listen on")
 	flags.Duration(
-		keyDialTimeout,
-		defaults.DialTimeout,
-		"Dial timeout when connecting to hubble peers")
-	flags.Duration(
 		keyRetryTimeout,
 		defaults.RetryTimeout,
 		"Time to wait before attempting to reconnect to a hubble peer when the connection is lost")
@@ -88,6 +95,10 @@ func New(vp *viper.Viper) *cobra.Command {
 		keyListenAddress,
 		defaults.ListenAddress,
 		"Address on which to listen")
+	flags.String(
+		keyHealthListenAddress,
+		defaults.HealthListenAddress,
+		"Address on which to listen for the gRPC health service")
 	flags.String(
 		keyMetricsListenAddress,
 		"",
@@ -109,8 +120,20 @@ func New(vp *viper.Viper) *cobra.Command {
 		"",
 		"Path to the public key file for the client certificate to connect to Hubble server instances. The file must contain PEM encoded data.",
 	)
+	flags.MarkDeprecated(keyTLSClientCertFile, fmt.Sprintf("use --%s", keyTLSHubbleClientCertFile))
+	flags.String(
+		keyTLSHubbleClientCertFile,
+		"",
+		"Path to the public key file for the client certificate to connect to Hubble server instances. The file must contain PEM encoded data.",
+	)
 	flags.String(
 		keyTLSClientKeyFile,
+		"",
+		"Path to the private key file for the client certificate to connect to Hubble server instances. The file must contain PEM encoded data.",
+	)
+	flags.MarkDeprecated(keyTLSClientKeyFile, fmt.Sprintf("use --%s", keyTLSHubbleClientKeyFile))
+	flags.String(
+		keyTLSHubbleClientKeyFile,
 		"",
 		"Path to the private key file for the client certificate to connect to Hubble server instances. The file must contain PEM encoded data.",
 	)
@@ -124,10 +147,27 @@ func New(vp *viper.Viper) *cobra.Command {
 		"",
 		"Path to the public key file for the Hubble Relay server. The file must contain PEM encoded data.",
 	)
+	flags.MarkDeprecated(keyTLSServerCertFile, fmt.Sprintf("use --%s", keyTLSRelayServerCertFile))
+	flags.String(
+		keyTLSRelayServerCertFile,
+		"",
+		"Path to the public key file for the Hubble Relay server. The file must contain PEM encoded data.",
+	)
 	flags.String(
 		keyTLSServerKeyFile,
 		"",
 		"Path to the private key file for the Hubble Relay server. The file must contain PEM encoded data.",
+	)
+	flags.MarkDeprecated(keyTLSServerKeyFile, fmt.Sprintf("use --%s", keyTLSRelayServerKeyFile))
+	flags.String(
+		keyTLSRelayServerKeyFile,
+		"",
+		"Path to the private key file for the Hubble Relay server. The file must contain PEM encoded data.",
+	)
+	flags.StringSlice(
+		keyTLSRelayClientCAFiles,
+		[]string{},
+		"Paths to one or more public key files of the CA which sign certificates for Hubble Relay client instances.",
 	)
 	flags.Bool(
 		keyTLSClientDisabled,
@@ -148,17 +188,19 @@ func runServe(vp *viper.Viper) error {
 	if vp.GetBool("debug") {
 		logging.SetLogLevelToDebug()
 	}
-	logger := logging.DefaultLogger.WithField(logfields.LogSubsys, "hubble-relay")
+	logger := logging.DefaultSlogLogger.With(logfields.LogSubsys, "hubble-relay")
 
 	opts := []server.Option{
 		server.WithLocalClusterName(vp.GetString(keyClusterName)),
-		server.WithDialTimeout(vp.GetDuration(keyDialTimeout)),
 		server.WithPeerTarget(vp.GetString(keyPeerService)),
 		server.WithListenAddress(vp.GetString(keyListenAddress)),
+		server.WithHealthListenAddress(vp.GetString(keyHealthListenAddress)),
 		server.WithRetryTimeout(vp.GetDuration(keyRetryTimeout)),
 		server.WithSortBufferMaxLen(vp.GetInt(keySortBufferMaxLen)),
 		server.WithSortBufferDrainTimeout(vp.GetDuration(keySortBufferDrainTimeout)),
 		server.WithLogger(logger),
+		server.WithGRPCUnaryInterceptor(relayVersionUnaryInterceptor()),
+		server.WithGRPCStreamInterceptor(relayVersionStreamInterceptor()),
 	}
 
 	metricsListenAddress := vp.GetString(keyMetricsListenAddress)
@@ -179,10 +221,10 @@ func runServe(vp *viper.Viper) error {
 		opts = append(opts, server.WithInsecureClient())
 	} else {
 		tlsClientConfig, err := certloader.NewWatchedClientConfig(
-			logger.WithField("config", "tls-to-hubble"),
+			logger.With(logfields.Config, "tls-to-hubble"),
 			vp.GetStringSlice(keyTLSHubbleServerCAFiles),
-			vp.GetString(keyTLSClientCertFile),
-			vp.GetString(keyTLSClientKeyFile),
+			hubbleClientCertFile(vp),
+			hubbleClientKeyFile(vp),
 		)
 		if err != nil {
 			return err
@@ -196,10 +238,10 @@ func runServe(vp *viper.Viper) error {
 		opts = append(opts, server.WithInsecureServer())
 	} else {
 		tlsServerConfig, err := certloader.NewWatchedServerConfig(
-			logger.WithField("config", "tls-server"),
-			nil, // no caFiles, mTLS is not supported for Relay clients yet.
-			vp.GetString(keyTLSServerCertFile),
-			vp.GetString(keyTLSServerKeyFile),
+			logger.With(logfields.Config, "tls-server"),
+			vp.GetStringSlice(keyTLSRelayClientCAFiles),
+			relayServerCertFile(vp),
+			relayServerKeyFile(vp),
 		)
 		if err != nil {
 			return err
@@ -217,12 +259,12 @@ func runServe(vp *viper.Viper) error {
 			Addr:                   addr,
 			ReuseSocketAddrAndPort: true,
 		}); err != nil {
-			return fmt.Errorf("failed to start gops agent: %v", err)
+			return fmt.Errorf("failed to start gops agent: %w", err)
 		}
 	}
 	srv, err := server.New(opts...)
 	if err != nil {
-		return fmt.Errorf("cannot create hubble-relay server: %v", err)
+		return fmt.Errorf("cannot create hubble-relay server: %w", err)
 	}
 	go func() {
 		sigs := make(chan os.Signal, 1)
@@ -239,5 +281,54 @@ func runServe(vp *viper.Viper) error {
 			agent.Close()
 		}
 	}()
-	return srv.Serve()
+
+	if err := srv.Serve(); !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	return nil
+}
+
+func relayServerKeyFile(vp *viper.Viper) string {
+	if val := vp.GetString(keyTLSRelayServerKeyFile); val != "" {
+		return val
+	}
+	return vp.GetString(keyTLSServerKeyFile)
+}
+
+func relayServerCertFile(vp *viper.Viper) string {
+	if val := vp.GetString(keyTLSRelayServerCertFile); val != "" {
+		return val
+	}
+	return vp.GetString(keyTLSServerCertFile)
+}
+
+func hubbleClientKeyFile(vp *viper.Viper) string {
+	if val := vp.GetString(keyTLSHubbleClientKeyFile); val != "" {
+		return val
+	}
+	return vp.GetString(keyTLSClientKeyFile)
+}
+
+func hubbleClientCertFile(vp *viper.Viper) string {
+	if val := vp.GetString(keyTLSHubbleClientCertFile); val != "" {
+		return val
+	}
+	return vp.GetString(keyTLSClientCertFile)
+}
+
+var relayVersionHeader = metadata.Pairs(defaults.GRPCMetadataRelayVersionKey, build.RelayVersion.SemVer())
+
+func relayVersionUnaryInterceptor() grpc.UnaryServerInterceptor {
+	return func(ctx context.Context, req any, _ *grpc.UnaryServerInfo, handler grpc.UnaryHandler) (any, error) {
+		resp, err := handler(ctx, req)
+		grpc.SetHeader(ctx, relayVersionHeader)
+		return resp, err
+	}
+}
+
+func relayVersionStreamInterceptor() grpc.StreamServerInterceptor {
+	return func(srv any, ss grpc.ServerStream, _ *grpc.StreamServerInfo, handler grpc.StreamHandler) error {
+		ss.SetHeader(relayVersionHeader)
+		return handler(srv, ss)
+	}
 }

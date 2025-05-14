@@ -4,117 +4,124 @@
 package watchers
 
 import (
-	"fmt"
+	"context"
+	"log/slog"
 	"net"
-	"sync"
+	"sync/atomic"
 
-	"k8s.io/client-go/tools/cache"
+	"github.com/cilium/hive/cell"
 
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
+	"github.com/cilium/cilium/pkg/endpointmanager"
+	hubblemetrics "github.com/cilium/cilium/pkg/hubble/metrics"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
-	"github.com/cilium/cilium/pkg/k8s"
-	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/informer"
+	"github.com/cilium/cilium/pkg/k8s/resource"
+	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/k8s/types"
-	"github.com/cilium/cilium/pkg/k8s/utils"
-	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
-	"github.com/cilium/cilium/pkg/kvstore"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/source"
 	ciliumTypes "github.com/cilium/cilium/pkg/types"
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
-func (k *K8sWatcher) ciliumEndpointsInit(ciliumNPClient client.Clientset, asyncControllers *sync.WaitGroup) {
-	// CiliumEndpoint objects are used for ipcache discovery until the
-	// key-value store is connected
-	var once sync.Once
-	apiGroup := k8sAPIGroupCiliumEndpointV2
-	for {
-		cepIndexer, ciliumEndpointInformer := informer.NewIndexerInformer(
-			utils.ListerWatcherFromTyped[*cilium_v2.CiliumEndpointList](ciliumNPClient.CiliumV2().CiliumEndpoints("")),
-			&cilium_v2.CiliumEndpoint{},
-			0,
-			cache.ResourceEventHandlerFuncs{
-				AddFunc: func(obj interface{}) {
-					var valid, equal bool
-					defer func() {
-						k.K8sEventReceived(apiGroup, metricCiliumEndpoint, resources.MetricCreate, valid, equal)
-					}()
-					if ciliumEndpoint, ok := obj.(*types.CiliumEndpoint); ok {
-						valid = true
-						k.endpointUpdated(nil, ciliumEndpoint)
-						k.K8sEventProcessed(metricCiliumEndpoint, resources.MetricCreate, true)
-					}
-				},
-				UpdateFunc: func(oldObj, newObj interface{}) {
-					var valid, equal bool
-					defer func() { k.K8sEventReceived(apiGroup, metricCiliumEndpoint, resources.MetricUpdate, valid, equal) }()
-					if oldCE := k8s.ObjToCiliumEndpoint(oldObj); oldCE != nil {
-						if newCE := k8s.ObjToCiliumEndpoint(newObj); newCE != nil {
-							valid = true
-							if oldCE.DeepEqual(newCE) {
-								equal = true
-								return
-							}
-							k.endpointUpdated(oldCE, newCE)
-							k.K8sEventProcessed(metricCiliumEndpoint, resources.MetricUpdate, true)
-						}
-					}
-				},
-				DeleteFunc: func(obj interface{}) {
-					var valid, equal bool
-					defer func() { k.K8sEventReceived(apiGroup, metricCiliumEndpoint, resources.MetricDelete, valid, equal) }()
-					ciliumEndpoint := k8s.ObjToCiliumEndpoint(obj)
-					if ciliumEndpoint == nil {
-						return
-					}
-					valid = true
-					k.endpointDeleted(ciliumEndpoint)
-				},
-			},
-			k8s.ConvertToCiliumEndpoint,
-			cache.Indexers{
-				"localNode": CreateCiliumEndpointLocalPodIndexFunc(),
-			},
-		)
-		k.ciliumEndpointIndexerMU.Lock()
-		k.ciliumEndpointIndexer = cepIndexer
-		k.ciliumEndpointIndexerMU.Unlock()
-		isConnected := make(chan struct{})
-		// once isConnected is closed, it will stop waiting on caches to be
-		// synchronized.
-		k.blockWaitGroupToSyncResources(isConnected, nil, ciliumEndpointInformer.HasSynced, k8sAPIGroupCiliumEndpointV2)
+type k8sCiliumEndpointsWatcherParams struct {
+	cell.In
 
-		once.Do(func() {
-			// Signalize that we have put node controller in the wait group
-			// to sync resources.
-			asyncControllers.Done()
-		})
-		k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumEndpointV2)
-		go ciliumEndpointInformer.Run(isConnected)
+	Logger *slog.Logger
 
-		<-kvstore.Connected()
-		close(isConnected)
+	Resources         agentK8s.Resources
+	K8sResourceSynced *k8sSynced.Resources
+	K8sAPIGroups      *k8sSynced.APIGroups
 
-		log.Info("Connected to key-value store, stopping CiliumEndpoint watcher")
+	EndpointManager endpointmanager.EndpointManager
+	PolicyUpdater   *policy.Updater
+	IPCache         *ipcache.IPCache
+}
 
-		k.k8sAPIGroups.RemoveAPI(k8sAPIGroupCiliumEndpointV2)
-		k.cancelWaitGroupToSyncResources(k8sAPIGroupCiliumEndpointV2)
-		// Create a new node controller when we are disconnected with the
-		// kvstore
-		<-kvstore.Client().Disconnected()
-
-		log.Info("Disconnected from key-value store, restarting CiliumEndpoint watcher")
+func newK8sCiliumEndpointsWatcher(params k8sCiliumEndpointsWatcherParams) *K8sCiliumEndpointsWatcher {
+	return &K8sCiliumEndpointsWatcher{
+		logger:            params.Logger,
+		k8sResourceSynced: params.K8sResourceSynced,
+		k8sAPIGroups:      params.K8sAPIGroups,
+		resources:         params.Resources,
+		endpointManager:   params.EndpointManager,
+		policyManager:     params.PolicyUpdater,
+		ipcache:           params.IPCache,
 	}
 }
 
-func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {
+type K8sCiliumEndpointsWatcher struct {
+	logger *slog.Logger
+	// k8sResourceSynced maps a resource name to a channel. Once the given
+	// resource name is synchronized with k8s, the channel for which that
+	// resource name maps to is closed.
+	k8sResourceSynced *k8sSynced.Resources
+
+	// k8sAPIGroups is a set of k8s API in use. They are setup in watchers,
+	// and may be disabled while the agent runs.
+	k8sAPIGroups *k8sSynced.APIGroups
+
+	endpointManager endpointManager
+	policyManager   policyManager
+	ipcache         ipcacheManager
+
+	resources agentK8s.Resources
+}
+
+// initCiliumEndpointOrSlices initializes the ciliumEndpoints or ciliumEndpointSlice
+func (k *K8sCiliumEndpointsWatcher) initCiliumEndpointOrSlices(ctx context.Context) {
+	// If CiliumEndpointSlice feature is enabled, Cilium-agent watches CiliumEndpointSlice
+	// objects instead of CiliumEndpoints. Hence, skip watching CiliumEndpoints if CiliumEndpointSlice
+	// feature is enabled.
+	if option.Config.EnableCiliumEndpointSlice {
+		k.ciliumEndpointSliceInit(ctx)
+	} else {
+		k.ciliumEndpointsInit(ctx)
+	}
+}
+
+func (k *K8sCiliumEndpointsWatcher) ciliumEndpointsInit(ctx context.Context) {
+	var synced atomic.Bool
+
+	k.k8sResourceSynced.BlockWaitGroupToSyncResources(
+		ctx.Done(),
+		nil,
+		func() bool { return synced.Load() },
+		k8sAPIGroupCiliumEndpointV2,
+	)
+	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumEndpointV2)
+
+	go func() {
+		events := k.resources.CiliumSlimEndpoint.Events(ctx)
+		cache := make(map[resource.Key]*types.CiliumEndpoint)
+		for event := range events {
+			switch event.Kind {
+			case resource.Sync:
+				synced.Store(true)
+			case resource.Upsert:
+				oldObj, ok := cache[event.Key]
+				if !ok || !oldObj.DeepEqual(event.Object) {
+					k.endpointUpdated(oldObj, event.Object)
+					cache[event.Key] = event.Object
+				}
+			case resource.Delete:
+				k.endpointDeleted(event.Object)
+				delete(cache, event.Key)
+			}
+			event.Done(nil)
+		}
+	}()
+}
+
+func (k *K8sCiliumEndpointsWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint) {
 	var namedPortsChanged bool
 	defer func() {
 		if namedPortsChanged {
-			k.policyManager.TriggerPolicyUpdates(true, "Named ports added or updated")
+			k.policyManager.TriggerPolicyUpdates("Named ports added or updated")
 		}
 	}()
 	var ipsAdded []string
@@ -148,7 +155,7 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 	}
 
 	// default to the standard key
-	encryptionKey := node.GetIPsecKeyIdentity()
+	encryptionKey := node.GetEndpointEncryptKeyIndex(k.logger)
 
 	id := identity.ReservedIdentityUnmanaged
 	if endpoint.Identity != nil {
@@ -168,7 +175,10 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 
 	nodeIP := net.ParseIP(endpoint.Networking.NodeIP)
 	if nodeIP == nil {
-		log.WithField("nodeIP", endpoint.Networking.NodeIP).Warning("Unable to parse node IP while processing CiliumEndpoint update")
+		k.logger.Warn(
+			"Unable to parse node IP while processing CiliumEndpoint update",
+			logfields.NodeIP, endpoint.Networking.NodeIP,
+		)
 		return
 	}
 
@@ -184,7 +194,7 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 		}
 		k8sMeta.NamedPorts[port.Name] = ciliumTypes.PortProto{
 			Port:  port.Port,
-			Proto: uint8(p),
+			Proto: p,
 		}
 	}
 
@@ -207,13 +217,9 @@ func (k *K8sWatcher) endpointUpdated(oldEndpoint, endpoint *types.CiliumEndpoint
 			}
 		}
 	}
-
-	if k.egressGatewayManager != nil {
-		k.egressGatewayManager.OnUpdateEndpoint(endpoint)
-	}
 }
 
-func (k *K8sWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
+func (k *K8sCiliumEndpointsWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 	if endpoint.Networking != nil {
 		namedPortsChanged := false
 		for _, pair := range endpoint.Networking.Addressing {
@@ -232,32 +238,8 @@ func (k *K8sWatcher) endpointDeleted(endpoint *types.CiliumEndpoint) {
 			}
 		}
 		if namedPortsChanged {
-			k.policyManager.TriggerPolicyUpdates(true, "Named ports deleted")
+			k.policyManager.TriggerPolicyUpdates("Named ports deleted")
 		}
 	}
-	if k.egressGatewayManager != nil {
-		k.egressGatewayManager.OnDeleteEndpoint(endpoint)
-	}
-}
-
-// CreateCiliumEndpointLocalPodIndexFunc returns an IndexFunc that indexes only local
-// CiliumEndpoints, by their local Node IP.
-func CreateCiliumEndpointLocalPodIndexFunc() cache.IndexFunc {
-	nodeIP := node.GetCiliumEndpointNodeIP()
-	return func(obj interface{}) ([]string, error) {
-		cep, ok := obj.(*types.CiliumEndpoint)
-		if !ok {
-			return nil, fmt.Errorf("unexpected object type: %T", obj)
-		}
-		indices := []string{}
-		if cep.Networking == nil {
-			log.WithField("ciliumendpoint", cep.GetNamespace()+"/"+cep.GetName()).
-				Debug("cannot index CiliumEndpoint by node without network status")
-			return nil, nil
-		}
-		if cep.Networking.NodeIP == nodeIP {
-			indices = append(indices, cep.Networking.NodeIP)
-		}
-		return indices, nil
-	}
+	hubblemetrics.ProcessCiliumEndpointDeletion(endpoint)
 }

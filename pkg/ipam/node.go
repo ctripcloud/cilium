@@ -7,12 +7,16 @@ package ipam
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"time"
+	"log/slog"
+	"maps"
+	"slices"
+	"sync/atomic"
 
-	"github.com/sirupsen/logrus"
 	"k8s.io/client-go/tools/cache"
 
+	operatorK8s "github.com/cilium/cilium/operator/k8s"
 	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/operator/watchers"
 	"github.com/cilium/cilium/pkg/defaults"
@@ -24,7 +28,7 @@ import (
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/math"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
 
@@ -51,10 +55,6 @@ func (n *Node) SetPoolMaintainer(maintainer PoolMaintainer) {
 	n.poolMaintainer = maintainer
 }
 
-func (n *Node) Update(resource *v2.CiliumNode) bool {
-	return n.manager.Update(resource)
-}
-
 type PoolMaintainer interface {
 	Trigger()
 	Shutdown()
@@ -63,6 +63,9 @@ type PoolMaintainer interface {
 // Node represents a Kubernetes node running Cilium with an associated
 // CiliumNode custom resource
 type Node struct {
+	rootLogger *slog.Logger
+	logger     atomic.Pointer[slog.Logger]
+
 	// mutex protects all members of this structure
 	mutex lock.RWMutex
 
@@ -87,10 +90,10 @@ type Node struct {
 	// instanceStoppedRunning records when an instance was most recently set to not running
 	instanceStoppedRunning time.Time
 
-	// waitingForPoolMaintenance is true when the node is subject to an
-	// IP allocation or release which must be performed before another
-	// allocation or release can be attempted
-	waitingForPoolMaintenance bool
+	// ipv4Alloc represents IPv4-specific allocation attributes for this node
+	ipv4Alloc ipAllocAttrs
+
+	// TODO: Add support for IPv6 allocation: https://github.com/cilium/cilium/issues/19251
 
 	// resyncNeeded is set to the current time when a resync with the EC2
 	// API is required. The timestamp is required to ensure that this is
@@ -98,9 +101,6 @@ type Node struct {
 	// resyncNeeded. This is needed because resyncs and allocations happen
 	// in parallel.
 	resyncNeeded time.Time
-
-	// available is the map of IPs available to this node
-	available ipamTypes.AllocationMap
 
 	// manager is the NodeManager responsible for this node
 	manager *NodeManager
@@ -117,6 +117,10 @@ type Node struct {
 	// limiting.
 	k8sSync *trigger.Trigger
 
+	// instanceSync is the trigger used to fetch instance information
+	// with external APIs or systems.
+	instanceSync *trigger.Trigger
+
 	// ops is the IPAM implementation to used for this node
 	ops NodeOperations
 
@@ -124,23 +128,48 @@ type Node struct {
 	// instances API is unstable
 	retry *trigger.Trigger
 
-	// Excess IPs from a cilium node would be marked for release only after a delay configured by excess-ip-release-delay
-	// flag. ipsMarkedForRelease tracks the IP and the timestamp at which it was marked for release.
+	// logLimiter rate limits potentially repeating warning logs
+	logLimiter logging.Limiter
+}
+
+// ipAllocAttrs represents IP-specific allocation attributes.
+type ipAllocAttrs struct {
+	// waitingForPoolMaintenance is true when the node is subject to an
+	// IP address allocation or release which must be performed before
+	// another allocation or release can be attempted
+	waitingForPoolMaintenance bool
+
+	// available is the map of IP addresses available to this node
+	available ipamTypes.AllocationMap
+
+	// Excess IP address from a cilium node would be marked for release only after a delay
+	// configured by excess-ip-release-delay flag. ipsMarkedForRelease tracks the IP and the
+	// timestamp at which it was marked for release.
 	ipsMarkedForRelease map[string]time.Time
 
-	// ipReleaseStatus tracks the state for every IP considered for release.
+	// ipReleaseStatus tracks the state for every IP address considered for release.
 	// IPAMMarkForRelease  : Marked for Release
 	// IPAMReadyForRelease : Acknowledged as safe to release by agent
 	// IPAMDoNotRelease    : Release request denied by agent
 	// IPAMReleased        : IP released by the operator
 	ipReleaseStatus map[string]string
-
-	// logLimiter rate limits potentially repeating warning logs
-	logLimiter logging.Limiter
 }
 
 // Statistics represent the IP allocation statistics of a node
 type Statistics struct {
+	// IPv4 represents IPv4-specific statistics.
+	IPv4 IPStatistics
+
+	// IPv6 represents IPv6-specific statistics.
+	IPv6 IPStatistics
+
+	// EmptyInterfaceSlots is the number of empty interface slots available
+	// for interfaces to be attached.
+	EmptyInterfaceSlots int
+}
+
+// IPStatistics represents IP-specific allocation statistics.
+type IPStatistics struct {
 	// UsedIPs is the number of IPs currently in use
 	UsedIPs int
 
@@ -168,9 +197,8 @@ type Statistics struct {
 	// available for allocation.
 	InterfaceCandidates int
 
-	// EmptyInterfaceSlots is the number of empty interface slots available
-	// for interfaces to be attached
-	EmptyInterfaceSlots int
+	// AssignedStaticIP is the static IP address assigned to the node (ex: public Elastic IP address in AWS)
+	AssignedStaticIP string
 }
 
 // IsRunning returns true if the node is considered to be running
@@ -184,7 +212,7 @@ func (n *Node) SetRunning(running bool) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
-	n.loggerLocked().Infof("Set running %t", running)
+	n.logger.Load().Info(fmt.Sprintf("Set running %t", running))
 	n.instanceRunning = running
 	if !n.instanceRunning {
 		n.instanceStoppedRunning = time.Now()
@@ -208,27 +236,13 @@ func (n *Node) IsPrefixDelegationEnabled() bool {
 	return n.manager.prefixDelegation
 }
 
-func (n *Node) logger() *logrus.Entry {
-	if n == nil {
-		return log
+func (n *Node) updateLogger() {
+	if n.resource != nil {
+		n.logger.Store(n.rootLogger.With(
+			fieldName, n.name,
+			logfields.InstanceID, n.resource.InstanceID(),
+		))
 	}
-
-	n.mutex.RLock()
-	defer n.mutex.RUnlock()
-
-	return n.loggerLocked()
-}
-
-func (n *Node) loggerLocked() (logger *logrus.Entry) {
-	logger = log
-
-	if n != nil {
-		logger = logger.WithField(fieldName, n.name)
-		if n.resource != nil {
-			logger = logger.WithField("instanceID", n.resource.InstanceID())
-		}
-	}
-	return
 }
 
 // getMaxAboveWatermark returns the max-above-watermark setting for an AWS node
@@ -260,7 +274,11 @@ func (n *Node) getMaxAllocate() int {
 	instanceMax := n.ops.GetMaximumAllocatableIPv4()
 	if n.resource.Spec.IPAM.MaxAllocate > 0 {
 		if n.resource.Spec.IPAM.MaxAllocate > instanceMax {
-			n.loggerLocked().Warningf("max-allocate (%d) is higher than the instance type limits (%d)", n.resource.Spec.IPAM.MaxAllocate, instanceMax)
+			n.logger.Load().Warn(
+				fmt.Sprintf("max-allocate (%d) is higher than the instance type limits (%d)",
+					n.resource.Spec.IPAM.MaxAllocate,
+					instanceMax),
+			)
 		}
 		return n.resource.Spec.IPAM.MaxAllocate
 	}
@@ -268,18 +286,26 @@ func (n *Node) getMaxAllocate() int {
 	return instanceMax
 }
 
+func (n *Node) getStaticIPTags() ipamTypes.Tags {
+	if n.resource.Spec.IPAM.StaticIPTags != nil {
+		return n.resource.Spec.IPAM.StaticIPTags
+	} else {
+		return ipamTypes.Tags{}
+	}
+}
+
 // GetNeededAddresses returns the number of needed addresses that need to be
 // allocated or released. A positive number is returned to indicate allocation.
 // A negative number is returned to indicate release of addresses.
 func (n *Node) GetNeededAddresses() int {
 	stats := n.Stats()
-	if stats.NeededIPs > 0 {
-		return stats.NeededIPs
+	if stats.IPv4.NeededIPs > 0 {
+		return stats.IPv4.NeededIPs
 	}
-	if n.manager.releaseExcessIPs && stats.ExcessIPs > 0 {
+	if n.manager.releaseExcessIPs && stats.IPv4.ExcessIPs > 0 {
 		// Nodes are sorted by needed addresses, return negative values of excessIPs
 		// so that nodes with IP deficit are resolved first
-		return stats.ExcessIPs * -1
+		return stats.IPv4.ExcessIPs * -1
 	}
 	return 0
 }
@@ -291,7 +317,7 @@ func getPendingPodCount(nodeName string) (int, error) {
 	if watchers.PodStore == nil {
 		return pendingPods, fmt.Errorf("pod store uninitialized")
 	}
-	values, err := watchers.PodStore.(cache.Indexer).ByIndex(watchers.PodNodeNameIndex, nodeName)
+	values, err := watchers.PodStore.(cache.Indexer).ByIndex(operatorK8s.PodNodeNameIndex, nodeName)
 	if err != nil {
 		return pendingPods, fmt.Errorf("unable to access pod to node name index: %w", err)
 	}
@@ -308,7 +334,7 @@ func calculateNeededIPs(availableIPs, usedIPs, preAllocate, minAllocate, maxAllo
 	neededIPs = preAllocate - (availableIPs - usedIPs)
 
 	if minAllocate > 0 {
-		neededIPs = math.IntMax(neededIPs, minAllocate-availableIPs)
+		neededIPs = max(neededIPs, minAllocate-availableIPs)
 	}
 
 	// If maxAllocate is set (> 0) and neededIPs is higher than the
@@ -335,6 +361,12 @@ func calculateExcessIPs(availableIPs, usedIPs, preAllocate, minAllocate, maxAbov
 		if availableIPs <= (minAllocate + maxAboveWatermark) {
 			return 0
 		}
+
+		// if usedIPs+preAllocate not over minAllocate + maxAboveWatermark, only care
+		// the ips out of minAllocate + maxAboveWatermark
+		if (usedIPs + preAllocate) <= (minAllocate + maxAboveWatermark) {
+			return availableIPs - minAllocate - maxAboveWatermark
+		}
 	}
 
 	// Once above the minimum allocation level, calculate based on
@@ -343,23 +375,20 @@ func calculateExcessIPs(availableIPs, usedIPs, preAllocate, minAllocate, maxAbov
 	// interface restrictions, less than max-above-watermark may have been
 	// allocated but we never want to release IPs that have been allocated
 	// because of max-above-watermark.
-	excessIPs = availableIPs - usedIPs - preAllocate - maxAboveWatermark
-	if excessIPs < 0 {
-		excessIPs = 0
-	}
+	excessIPs = max(availableIPs-usedIPs-preAllocate-maxAboveWatermark, 0)
 
 	return
 }
 
 func (n *Node) requirePoolMaintenance() {
 	n.mutex.Lock()
-	n.waitingForPoolMaintenance = true
+	n.ipv4Alloc.waitingForPoolMaintenance = true
 	n.mutex.Unlock()
 }
 
 func (n *Node) poolMaintenanceComplete() {
 	n.mutex.Lock()
-	n.waitingForPoolMaintenance = false
+	n.ipv4Alloc.waitingForPoolMaintenance = false
 	n.mutex.Unlock()
 }
 
@@ -371,6 +400,12 @@ func (n *Node) InstanceID() (id string) {
 	}
 	n.mutex.RUnlock()
 	return
+}
+
+func (n *Node) instanceAPISync(ctx context.Context, instanceID string) (time.Time, bool) {
+	syncTime := n.manager.instancesAPI.InstanceSync(ctx, instanceID)
+	success := !syncTime.IsZero()
+	return syncTime, success
 }
 
 // UpdatedResource is called when an update to the CiliumNode has been
@@ -394,10 +429,11 @@ func (n *Node) UpdatedResource(resource *v2.CiliumNode) bool {
 	n.instanceRunning = true
 	n.resource = resource
 	n.mutex.Unlock()
+	n.updateLogger()
 
 	n.ops.UpdatedNode(resource)
 
-	n.recalculate()
+	n.recalculate(context.Background())
 	allocationNeeded := n.allocationNeeded()
 	if allocationNeeded {
 		n.requirePoolMaintenance()
@@ -414,57 +450,67 @@ func (n *Node) resourceAttached() (attached bool) {
 	return
 }
 
-func (n *Node) recalculate() {
+func (n *Node) recalculate(ctx context.Context) {
 	// Skip any recalculation if the CiliumNode resource does not exist yet
 	if !n.resourceAttached() {
 		return
 	}
-	scopedLog := n.logger()
+	scopedLog := n.logger.Load()
 
-	a, stats, err := n.ops.ResyncInterfacesAndIPs(context.TODO(), scopedLog)
+	a, stats, err := n.ops.ResyncInterfacesAndIPs(ctx, scopedLog)
 
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 
 	if err != nil {
-		scopedLog.Warning("Instance not found! Please delete corresponding ciliumnode if instance has already been deleted.")
+		var limitsNotFound LimitsNotFound
+		ok := errors.As(err, &limitsNotFound)
+		if ok {
+			scopedLog.Warn("Instance limits not found.", logfields.Error, err)
+		} else {
+			scopedLog.Warn("Instance not found! Please delete corresponding ciliumnode if instance has already been deleted.", logfields.Error, err)
+		}
 		// Avoid any further action
-		n.stats.NeededIPs = 0
-		n.stats.ExcessIPs = 0
+		n.stats.IPv4.NeededIPs = 0
+		n.stats.IPv4.ExcessIPs = 0
 		return
 	}
 
-	n.available = a
-	n.stats.UsedIPs = len(n.resource.Status.IPAM.Used)
+	n.ipv4Alloc.available = a
+	n.stats.IPv4.UsedIPs = len(n.resource.Status.IPAM.Used)
+	if stats.AssignedStaticIP != "" {
+		n.stats.IPv4.AssignedStaticIP = stats.AssignedStaticIP
+	}
 
 	// Get used IP count with prefixes included
-	usedIPForExcessCalc := n.stats.UsedIPs
+	usedIPForExcessCalc := n.stats.IPv4.UsedIPs
 	if n.ops.IsPrefixDelegated() {
 		usedIPForExcessCalc = n.ops.GetUsedIPWithPrefixes()
 	}
 
-	n.stats.AvailableIPs = len(n.available)
-	n.stats.NeededIPs = calculateNeededIPs(n.stats.AvailableIPs, n.stats.UsedIPs, n.getPreAllocate(), n.getMinAllocate(), n.getMaxAllocate())
-	n.stats.ExcessIPs = calculateExcessIPs(n.stats.AvailableIPs, usedIPForExcessCalc, n.getPreAllocate(), n.getMinAllocate(), n.getMaxAboveWatermark())
-	n.stats.RemainingInterfaces = stats.RemainingAvailableInterfaceCount
-	n.stats.Capacity = stats.NodeCapacity
+	n.stats.IPv4.AvailableIPs = len(n.ipv4Alloc.available)
+	n.stats.IPv4.NeededIPs = calculateNeededIPs(n.stats.IPv4.AvailableIPs, n.stats.IPv4.UsedIPs, n.getPreAllocate(), n.getMinAllocate(), n.getMaxAllocate())
+	n.stats.IPv4.ExcessIPs = calculateExcessIPs(n.stats.IPv4.AvailableIPs, usedIPForExcessCalc, n.getPreAllocate(), n.getMinAllocate(), n.getMaxAboveWatermark())
+	n.stats.IPv4.RemainingInterfaces = stats.RemainingAvailableInterfaceCount
+	n.stats.IPv4.Capacity = stats.NodeCapacity
 
-	scopedLog.WithFields(logrus.Fields{
-		"available":                 n.stats.AvailableIPs,
-		"capacity":                  n.stats.Capacity,
-		"used":                      n.stats.UsedIPs,
-		"toAlloc":                   n.stats.NeededIPs,
-		"toRelease":                 n.stats.ExcessIPs,
-		"waitingForPoolMaintenance": n.waitingForPoolMaintenance,
-		"resyncNeeded":              n.resyncNeeded,
-		"remainingInterfaces":       stats.RemainingAvailableInterfaceCount,
-	}).Debug("Recalculated needed addresses")
+	scopedLog.Debug(
+		"Recalculated needed addresses",
+		logfields.Available, n.stats.IPv4.AvailableIPs,
+		logfields.Capacity, n.stats.IPv4.Capacity,
+		logfields.Used, n.stats.IPv4.UsedIPs,
+		logfields.ToAllocate, n.stats.IPv4.NeededIPs,
+		logfields.ToRelease, n.stats.IPv4.ExcessIPs,
+		logfields.WaitingForPoolMaintenance, n.ipv4Alloc.waitingForPoolMaintenance,
+		logfields.ResyncNeeded, n.resyncNeeded,
+		logfields.RemainingInterfaces, stats.RemainingAvailableInterfaceCount,
+	)
 }
 
 // allocationNeeded returns true if this node requires IPs to be allocated
 func (n *Node) allocationNeeded() (needed bool) {
 	n.mutex.RLock()
-	needed = !n.waitingForPoolMaintenance && n.resyncNeeded.IsZero() && n.stats.NeededIPs > 0
+	needed = !n.ipv4Alloc.waitingForPoolMaintenance && n.resyncNeeded.IsZero() && n.stats.IPv4.NeededIPs > 0
 	n.mutex.RUnlock()
 	return
 }
@@ -472,7 +518,7 @@ func (n *Node) allocationNeeded() (needed bool) {
 // releaseNeeded returns true if this node requires IPs to be released
 func (n *Node) releaseNeeded() (needed bool) {
 	n.mutex.RLock()
-	needed = n.manager.releaseExcessIPs && !n.waitingForPoolMaintenance && n.resyncNeeded.IsZero() && n.stats.ExcessIPs > 0
+	needed = n.manager.releaseExcessIPs && !n.ipv4Alloc.waitingForPoolMaintenance && n.resyncNeeded.IsZero() && n.stats.IPv4.ExcessIPs > 0
 	if n.resource != nil {
 		releaseInProgress := len(n.resource.Status.IPAM.ReleaseIPs) > 0
 		needed = needed || releaseInProgress
@@ -485,9 +531,7 @@ func (n *Node) releaseNeeded() (needed bool) {
 func (n *Node) Pool() (pool ipamTypes.AllocationMap) {
 	pool = ipamTypes.AllocationMap{}
 	n.mutex.RLock()
-	for k, allocationIP := range n.available {
-		pool[k] = allocationIP
-	}
+	maps.Copy(pool, n.ipv4Alloc.available)
 	n.mutex.RUnlock()
 	return
 }
@@ -511,19 +555,21 @@ func (n *Node) createInterface(ctx context.Context, a *AllocationAction) (create
 		// separate metric to track nodes running at capacity.
 		n.mutex.Lock()
 		if time.Since(n.lastMaxAdapterWarning) > warningInterval {
-			n.loggerLocked().Warning("Instance is out of interfaces")
+			n.logger.Load().Warn("Instance is out of interfaces")
 			n.lastMaxAdapterWarning = time.Now()
 		}
 		n.mutex.Unlock()
 		return false, nil
 	}
 
-	scopedLog := n.logger()
 	start := time.Now()
-	toAllocate, errCondition, err := n.ops.CreateInterface(ctx, a, scopedLog)
+	toAllocate, errCondition, err := n.ops.CreateInterface(ctx, a, n.logger.Load())
 	if err != nil {
 		n.manager.metricsAPI.AllocationAttempt(createInterfaceAndAllocateIP, errCondition, string(a.PoolID), metrics.SinceInSeconds(start))
-		scopedLog.Warningf("Unable to create interface on instance: %s", err)
+		n.logger.Load().Warn(
+			"Unable to create interface on instance",
+			logfields.Error, err,
+		)
 		return false, err
 	}
 
@@ -553,6 +599,17 @@ type AllocationAction struct {
 	// value such as "global" to indicate a single address pool.
 	PoolID ipamTypes.PoolID
 
+	// EmptyInterfaceSlots is the number of empty interface slots available
+	// for interfaces to be attached.
+	EmptyInterfaceSlots int
+
+	// IPv4 represents IPv4-specific allocation actions.
+	IPv4 IPAllocationAction
+}
+
+// IPAllocationAction is the IP-specific action to be taken to resolve allocation deficits
+// for a particular node.
+type IPAllocationAction struct {
 	// AvailableForAllocation is the number IPs available for allocation.
 	// If InterfaceID is set, then this number corresponds to the number of
 	// IPs available for allocation on that interface. This number may be
@@ -569,10 +626,6 @@ type AllocationAction struct {
 	// InterfaceCandidates is the number of attached interfaces with IPs
 	// available for allocation.
 	InterfaceCandidates int
-
-	// EmptyInterfaceSlots is the number of empty interface slots available
-	// for interfaces to be attached
-	EmptyInterfaceSlots int
 }
 
 // ReleaseAction is the action to be taken to resolve allocation excess for a
@@ -608,23 +661,22 @@ func (n *Node) determineMaintenanceAction() (*maintenanceAction, error) {
 
 	a := &maintenanceAction{}
 
-	scopedLog := n.logger()
 	stats := n.Stats()
 
 	// Validate that the node still requires addresses to be released, the
 	// request may have been resolved in the meantime.
-	if n.manager.releaseExcessIPs && stats.ExcessIPs > 0 {
-		a.release = n.ops.PrepareIPRelease(stats.ExcessIPs, scopedLog)
+	if n.manager.releaseExcessIPs && stats.IPv4.ExcessIPs > 0 {
+		a.release = n.ops.PrepareIPRelease(stats.IPv4.ExcessIPs, n.logger.Load())
 		return a, nil
 	}
 
 	// Validate that the node still requires addresses to be allocated, the
 	// request may have been resolved in the meantime.
-	if stats.NeededIPs == 0 {
+	if stats.IPv4.NeededIPs == 0 {
 		return nil, nil
 	}
 
-	a.allocation, err = n.ops.PrepareIPAllocation(scopedLog)
+	a.allocation, err = n.ops.PrepareIPAllocation(n.logger.Load())
 	if err != nil {
 		return nil, err
 	}
@@ -633,38 +685,43 @@ func (n *Node) determineMaintenanceAction() (*maintenanceAction, error) {
 	numPendingPods, err := getPendingPodCount(n.name)
 	if err != nil {
 		if n.logLimiter.Allow() {
-			scopedLog.WithError(err).Warningf("Unable to compute pending pods, will not surge-allocate")
+			n.logger.Load().Warn(
+				"Unable to compute pending pods, will not surge-allocate",
+				logfields.Error, err,
+			)
 		}
-	} else if numPendingPods > stats.NeededIPs {
-		surgeAllocate = numPendingPods - stats.NeededIPs
+	} else if numPendingPods > stats.IPv4.NeededIPs {
+		surgeAllocate = numPendingPods - stats.IPv4.NeededIPs
 	}
 
 	n.mutex.RLock()
 	// handleIPAllocation() takes a min of MaxIPsToAllocate and IPs available for allocation on the interface.
 	// This makes sure we don't try to allocate more than what's available.
-	a.allocation.MaxIPsToAllocate = stats.NeededIPs + n.getMaxAboveWatermark() + surgeAllocate
+	a.allocation.IPv4.MaxIPsToAllocate = stats.IPv4.NeededIPs + n.getMaxAboveWatermark() + surgeAllocate
 	n.mutex.RUnlock()
 
+	scopedLog := n.logger.Load()
 	if a.allocation != nil {
 		n.mutex.Lock()
-		n.stats.RemainingInterfaces = a.allocation.InterfaceCandidates + a.allocation.EmptyInterfaceSlots
+		n.stats.IPv4.RemainingInterfaces = a.allocation.IPv4.InterfaceCandidates + a.allocation.EmptyInterfaceSlots
 		stats = n.stats
 		n.mutex.Unlock()
-		scopedLog = scopedLog.WithFields(logrus.Fields{
-			"selectedInterface":      a.allocation.InterfaceID,
-			"selectedPoolID":         a.allocation.PoolID,
-			"maxIPsToAllocate":       a.allocation.MaxIPsToAllocate,
-			"availableForAllocation": a.allocation.AvailableForAllocation,
-			"emptyInterfaceSlots":    a.allocation.EmptyInterfaceSlots,
-		})
+		scopedLog = n.logger.Load().With(
+			logfields.SelectedInterface, a.allocation.InterfaceID,
+			logfields.SelectedPoolID, a.allocation.PoolID,
+			logfields.MaxIPsToAllocate, a.allocation.IPv4.MaxIPsToAllocate,
+			logfields.AvailableForAllocation, a.allocation.IPv4.AvailableForAllocation,
+			logfields.EmptyInterfaceSlots, a.allocation.EmptyInterfaceSlots,
+		)
 	}
 
-	scopedLog.WithFields(logrus.Fields{
-		"available":           stats.AvailableIPs,
-		"used":                stats.UsedIPs,
-		"neededIPs":           stats.NeededIPs,
-		"remainingInterfaces": stats.RemainingInterfaces,
-	}).Info("Resolving IP deficit of node")
+	scopedLog.Info(
+		"Resolving IP deficit of node",
+		logfields.Available, stats.IPv4.AvailableIPs,
+		logfields.Used, stats.IPv4.UsedIPs,
+		logfields.NeededIPs, stats.IPv4.NeededIPs,
+		logfields.RemainingInterfaces, stats.IPv4.RemainingInterfaces,
+	)
 
 	return a, nil
 }
@@ -675,12 +732,12 @@ func (n *Node) determineMaintenanceAction() (*maintenanceAction, error) {
 func (n *Node) removeStaleReleaseIPs() {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
-	for ip, status := range n.ipReleaseStatus {
+	for ip, status := range n.ipv4Alloc.ipReleaseStatus {
 		if status != ipamOption.IPAMReleased {
 			continue
 		}
 		if _, ok := n.resource.Status.IPAM.ReleaseIPs[ip]; !ok {
-			delete(n.ipReleaseStatus, ip)
+			delete(n.ipv4Alloc.ipReleaseStatus, ip)
 		}
 	}
 }
@@ -702,9 +759,9 @@ func (n *Node) abortNoLongerExcessIPs(excessMap map[string]bool) {
 		if status == ipamOption.IPAMReleased {
 			continue
 		}
-		if status, ok := n.ipReleaseStatus[ip]; ok && status != ipamOption.IPAMReleased {
-			delete(n.ipsMarkedForRelease, ip)
-			delete(n.ipReleaseStatus, ip)
+		if status, ok := n.ipv4Alloc.ipReleaseStatus[ip]; ok && status != ipamOption.IPAMReleased {
+			delete(n.ipv4Alloc.ipsMarkedForRelease, ip)
+			delete(n.ipv4Alloc.ipReleaseStatus, ip)
 		}
 	}
 }
@@ -719,8 +776,8 @@ func (n *Node) handleIPReleaseResponse(markedIP string, ipsToRelease *[]string) 
 			case ipamOption.IPAMReadyForRelease:
 				*ipsToRelease = append(*ipsToRelease, markedIP)
 			case ipamOption.IPAMDoNotRelease:
-				delete(n.ipsMarkedForRelease, markedIP)
-				delete(n.ipReleaseStatus, markedIP)
+				delete(n.ipv4Alloc.ipsMarkedForRelease, markedIP)
+				delete(n.ipv4Alloc.ipReleaseStatus, markedIP)
 			}
 			// 'released' state is already handled in removeStaleReleaseIPs()
 			// Other states don't need additional handling.
@@ -733,7 +790,7 @@ func (n *Node) handleIPReleaseResponse(markedIP string, ipsToRelease *[]string) 
 func (n *Node) deleteLocalReleaseStatus(ip string) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
-	delete(n.ipReleaseStatus, ip)
+	delete(n.ipv4Alloc.ipReleaseStatus, ip)
 }
 
 // handleIPRelease implements IP release handshake needed for releasing excess IPs on the node.
@@ -750,7 +807,6 @@ func (n *Node) deleteLocalReleaseStatus(ip string) {
 //
 // Handshake would be aborted if there are new allocations and the node doesn't have IPs in excess anymore.
 func (n *Node) handleIPRelease(ctx context.Context, a *maintenanceAction) (instanceMutated bool, err error) {
-	scopedLog := n.logger()
 	var ipsToMark []string
 	var ipsToRelease []string
 
@@ -758,31 +814,25 @@ func (n *Node) handleIPRelease(ctx context.Context, a *maintenanceAction) (insta
 	releaseTS := time.Now()
 	if a.release != nil && a.release.IPsToRelease != nil {
 		for _, ip := range a.release.IPsToRelease {
-			if _, ok := n.ipsMarkedForRelease[ip]; !ok {
-				n.ipsMarkedForRelease[ip] = releaseTS
+			if _, ok := n.ipv4Alloc.ipsMarkedForRelease[ip]; !ok {
+				n.ipv4Alloc.ipsMarkedForRelease[ip] = releaseTS
 			}
 		}
 	}
 
-	if n.ipsMarkedForRelease == nil || a.release == nil || len(a.release.IPsToRelease) == 0 {
+	if n.ipv4Alloc.ipsMarkedForRelease == nil || a.release == nil || len(a.release.IPsToRelease) == 0 {
 		// Resetting ipsMarkedForRelease if there are no IPs to release in this iteration
-		n.ipsMarkedForRelease = make(map[string]time.Time)
+		n.ipv4Alloc.ipsMarkedForRelease = make(map[string]time.Time)
 	}
 
-	for markedIP, ts := range n.ipsMarkedForRelease {
+	for markedIP, ts := range n.ipv4Alloc.ipsMarkedForRelease {
 		// Determine which IPs are still marked for release.
-		stillMarkedForRelease := false
-		for _, ip := range a.release.IPsToRelease {
-			if markedIP == ip {
-				stillMarkedForRelease = true
-				break
-			}
-		}
+		stillMarkedForRelease := slices.Contains(a.release.IPsToRelease, markedIP)
 		if !stillMarkedForRelease {
 			// n.determineMaintenanceAction() only returns the IPs on the interface with maximum number of IPs that
 			// can be freed up. If the selected interface changes or if this IP is not excess anymore, remove entry
 			// from local maps.
-			delete(n.ipsMarkedForRelease, markedIP)
+			delete(n.ipv4Alloc.ipsMarkedForRelease, markedIP)
 			n.deleteLocalReleaseStatus(markedIP)
 			continue
 		}
@@ -800,8 +850,11 @@ func (n *Node) handleIPRelease(ctx context.Context, a *maintenanceAction) (insta
 
 	n.mutex.Lock()
 	for _, ip := range ipsToMark {
-		scopedLog.WithFields(logrus.Fields{logfields.IPAddr: ip}).Debug("Marking IP for release")
-		n.ipReleaseStatus[ip] = ipamOption.IPAMMarkForRelease
+		n.logger.Load().Debug(
+			"Marking IP for release",
+			logfields.IPAddr, ip,
+		)
+		n.ipv4Alloc.ipReleaseStatus[ip] = ipamOption.IPAMMarkForRelease
 	}
 	n.mutex.Unlock()
 
@@ -817,15 +870,14 @@ func (n *Node) handleIPRelease(ctx context.Context, a *maintenanceAction) (insta
 
 	if len(ipsToRelease) > 0 {
 		a.release.IPsToRelease = ipsToRelease
-		scopedLog = scopedLog.WithFields(logrus.Fields{
-			"available":         n.stats.AvailableIPs,
-			"used":              n.stats.UsedIPs,
-			"excess":            n.stats.ExcessIPs,
-			"excessIps":         a.release.IPsToRelease,
-			"releasing":         ipsToRelease,
-			"selectedInterface": a.release.InterfaceID,
-			"selectedPoolID":    a.release.PoolID,
-		})
+		scopedLog := n.logger.Load().With(
+			logfields.Available, n.stats.IPv4.AvailableIPs,
+			logfields.Used, n.stats.IPv4.UsedIPs,
+			logfields.Excess, n.stats.IPv4.ExcessIPs,
+			logfields.ExcessIPs, a.release.IPsToRelease,
+			logfields.Releasing, ipsToRelease,
+			logfields.SelectedInterface, a.release.InterfaceID,
+			logfields.SelectedPoolID, a.release.PoolID)
 		scopedLog.Info("Releasing excess IPs from node")
 		start := time.Now()
 		err := n.ops.ReleaseIPs(ctx, a.release)
@@ -836,17 +888,19 @@ func (n *Node) handleIPRelease(ctx context.Context, a *maintenanceAction) (insta
 			// Remove the IPs from ipsMarkedForRelease
 			n.mutex.Lock()
 			for _, ip := range ipsToRelease {
-				delete(n.ipsMarkedForRelease, ip)
-				n.ipReleaseStatus[ip] = ipamOption.IPAMReleased
+				delete(n.ipv4Alloc.ipsMarkedForRelease, ip)
+				n.ipv4Alloc.ipReleaseStatus[ip] = ipamOption.IPAMReleased
 			}
 			n.mutex.Unlock()
 			return true, nil
 		}
 		n.manager.metricsAPI.ReleaseAttempt(releaseIP, failed, string(a.release.PoolID), metrics.SinceInSeconds(start))
-		scopedLog.WithFields(logrus.Fields{
-			"selectedInterface":  a.release.InterfaceID,
-			"releasingAddresses": len(a.release.IPsToRelease),
-		}).WithError(err).Warning("Unable to unassign IPs from interface")
+		scopedLog.Warn(
+			"Unable to unassign IPs from interface",
+			logfields.Error, err,
+			logfields.SelectedInterface, a.release.InterfaceID,
+			logfields.ReleasingAddresses, len(a.release.IPsToRelease),
+		)
 		return false, err
 	}
 	return false, nil
@@ -855,29 +909,30 @@ func (n *Node) handleIPRelease(ctx context.Context, a *maintenanceAction) (insta
 // handleIPAllocation allocates the necessary IPs needed to resolve deficit on the node.
 // If existing interfaces don't have enough capacity, new interface would be created.
 func (n *Node) handleIPAllocation(ctx context.Context, a *maintenanceAction) (instanceMutated bool, err error) {
-	scopedLog := n.logger()
 	if a.allocation == nil {
-		scopedLog.Debug("No allocation action required")
+		n.logger.Load().Debug("No allocation action required")
 		return false, nil
 	}
 
 	// Assign needed addresses
-	if a.allocation.AvailableForAllocation > 0 {
-		a.allocation.AvailableForAllocation = math.IntMin(a.allocation.AvailableForAllocation, a.allocation.MaxIPsToAllocate)
+	if a.allocation.IPv4.AvailableForAllocation > 0 {
+		a.allocation.IPv4.AvailableForAllocation = min(a.allocation.IPv4.AvailableForAllocation, a.allocation.IPv4.MaxIPsToAllocate)
 
 		start := time.Now()
 		err := n.ops.AllocateIPs(ctx, a.allocation)
 		if err == nil {
 			n.manager.metricsAPI.AllocationAttempt(allocateIP, success, string(a.allocation.PoolID), metrics.SinceInSeconds(start))
-			n.manager.metricsAPI.AddIPAllocation(string(a.allocation.PoolID), int64(a.allocation.AvailableForAllocation))
+			n.manager.metricsAPI.AddIPAllocation(string(a.allocation.PoolID), int64(a.allocation.IPv4.AvailableForAllocation))
 			return true, nil
 		}
 
 		n.manager.metricsAPI.AllocationAttempt(allocateIP, failed, string(a.allocation.PoolID), metrics.SinceInSeconds(start))
-		scopedLog.WithFields(logrus.Fields{
-			"selectedInterface": a.allocation.InterfaceID,
-			"ipsToAllocate":     a.allocation.AvailableForAllocation,
-		}).WithError(err).Warning("Unable to assign additional IPs to interface, will create new interface")
+		n.logger.Load().Warn(
+			"Unable to assign additional IPs to interface, will create new interface",
+			logfields.Error, err,
+			logfields.SelectedInterface, a.allocation.InterfaceID,
+			logfields.IPsToAllocate, a.allocation.IPv4.AvailableForAllocation,
+		)
 	}
 
 	return n.createInterface(ctx, a.allocation)
@@ -889,6 +944,16 @@ func (n *Node) handleIPAllocation(ctx context.Context, a *maintenanceAction) (in
 func (n *Node) maintainIPPool(ctx context.Context) (instanceMutated bool, err error) {
 	if n.manager.releaseExcessIPs {
 		n.removeStaleReleaseIPs()
+	}
+
+	if len(n.getStaticIPTags()) > 0 {
+		if n.stats.IPv4.AssignedStaticIP == "" {
+			ip, err := n.ops.AllocateStaticIP(ctx, n.getStaticIPTags())
+			if err != nil {
+				return false, err
+			}
+			n.stats.IPv4.AssignedStaticIP = ip
+		}
 	}
 
 	a, err := n.determineMaintenanceAction()
@@ -926,7 +991,7 @@ func (n *Node) requireResync() {
 func (n *Node) updateLastResync(syncTime time.Time) {
 	n.mutex.Lock()
 	if syncTime.After(n.resyncNeeded) {
-		n.loggerLocked().Debug("Resetting resyncNeeded")
+		n.logger.Load().Debug("Resetting resyncNeeded")
 		n.resyncNeeded = time.Time{}
 	}
 	n.mutex.Unlock()
@@ -953,13 +1018,13 @@ func (n *Node) MaintainIPPool(ctx context.Context) error {
 
 	instanceMutated, err := n.maintainIPPool(ctx)
 	if err == nil {
-		n.logger().Debug("Setting resync needed")
+		n.logger.Load().Debug("Setting resync needed")
 		n.requireResync()
 	}
 	n.poolMaintenanceComplete()
-	n.recalculate()
+	n.recalculate(ctx)
 	if instanceMutated || err != nil {
-		n.manager.resyncTrigger.Trigger()
+		n.instanceSync.Trigger()
 	}
 	return err
 }
@@ -972,7 +1037,7 @@ func (n *Node) PopulateIPReleaseStatus(node *v2.CiliumNode) {
 	n.mutex.Lock()
 	defer n.mutex.Unlock()
 	releaseStatus := make(map[string]ipamTypes.IPReleaseStatus)
-	for ip, status := range n.ipReleaseStatus {
+	for ip, status := range n.ipv4Alloc.ipReleaseStatus {
 		if existingStatus, ok := node.Status.IPAM.ReleaseIPs[ip]; ok && status == ipamOption.IPAMMarkForRelease {
 			// retain status if agent already responded to this IP
 			if existingStatus == ipamOption.IPAMReadyForRelease || existingStatus == ipamOption.IPAMDoNotRelease {
@@ -985,6 +1050,14 @@ func (n *Node) PopulateIPReleaseStatus(node *v2.CiliumNode) {
 	node.Status.IPAM.ReleaseIPs = releaseStatus
 }
 
+func (n *Node) PopulateStaticIPStatus(node *v2.CiliumNode) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
+	if n.stats.IPv4.AssignedStaticIP != "" {
+		node.Status.IPAM.AssignedStaticIP = n.stats.IPv4.AssignedStaticIP
+	}
+}
+
 // syncToAPIServer synchronizes the contents of the CiliumNode resource
 // [(*Node).resource)] with the K8s apiserver. This operation occurs on an
 // interval to refresh the CiliumNode resource.
@@ -995,14 +1068,13 @@ func (n *Node) PopulateIPReleaseStatus(node *v2.CiliumNode) {
 //
 // To initialize, or seed, the CiliumNode resource, the PreAllocate field is
 // populated with a default value and then is adjusted as necessary.
-func (n *Node) syncToAPIServer() (err error) {
-	scopedLog := n.logger()
-	scopedLog.Debug("Refreshing node")
+func (n *Node) syncToAPIServer() error {
+	n.logger.Load().Debug("Refreshing node")
 
 	node := n.ResourceCopy()
 	// n.resource may not have been assigned yet
 	if node == nil {
-		return
+		return nil
 	}
 
 	origNode := node.DeepCopy()
@@ -1026,28 +1098,30 @@ func (n *Node) syncToAPIServer() (err error) {
 	// Two attempts are made in case the local resource is outdated. If the
 	// second attempt fails as well we are likely under heavy contention,
 	// fall back to the controller based background interval to retry.
-	for retry := 0; retry < 2; retry++ {
+	maxRetries := 2
+	for retry := range maxRetries {
 		if node.Status.IPAM.Used == nil {
 			node.Status.IPAM.Used = ipamTypes.AllocationMap{}
 		}
 
 		n.ops.PopulateStatusFields(node)
 		n.PopulateIPReleaseStatus(node)
+		n.PopulateStaticIPStatus(node)
 
-		err = n.update(origNode, node, retry, true)
+		err := n.update(origNode, node, true)
 		if err == nil {
 			break
+		} else if retry+1 < maxRetries {
+			n.logger.Load().Info("Failed to update CiliumNode status, will retry", logfields.Error, err)
+		} else {
+			n.logger.Load().Warn("Unable to update CiliumNode status", logfields.Error, err)
+			return err
 		}
 	}
 
-	if err != nil {
-		scopedLog.WithError(err).Warning("Unable to update CiliumNode status")
-		return err
-	}
-
-	for retry := 0; retry < 2; retry++ {
+	for retry := range maxRetries {
 		node.Spec.IPAM.Pool = pool
-		scopedLog.WithField("poolSize", len(node.Spec.IPAM.Pool)).Debug("Updating node in apiserver")
+		n.logger.Load().Debug("Updating node in apiserver", logfields.PoolSize, len(node.Spec.IPAM.Pool))
 
 		// The PreAllocate value is added here rather than where the CiliumNode
 		// resource is created ((*NodeDiscovery).mutateNodeResource() inside
@@ -1058,17 +1132,20 @@ func (n *Node) syncToAPIServer() (err error) {
 			node.Spec.IPAM.PreAllocate = n.ops.GetMinimumAllocatableIPv4()
 		}
 
-		err = n.update(origNode, node, retry, false)
+		err := n.update(origNode, node, false)
 		if err == nil {
 			break
+		} else if retry+1 < maxRetries {
+			n.logger.Load().Info("Failed to update CiliumNode spec, will retry", logfields.Error, err)
+		} else {
+			n.logger.Load().Warn("Unable to update CiliumNode spec", logfields.Error, err)
+			return err
 		}
 	}
 
-	if err != nil {
-		scopedLog.WithError(err).Warning("Unable to update CiliumNode spec")
-	}
+	n.logger.Load().Debug("Node refreshed")
 
-	return err
+	return nil
 }
 
 // update is a helper function for syncToAPIServer(). This function updates the
@@ -1083,9 +1160,7 @@ func (n *Node) syncToAPIServer() (err error) {
 //   - `origNode` and `node` are updated when we fail to update the resource,
 //     but we succeed in retrieving the latest version of it from the
 //     apiserver.
-func (n *Node) update(origNode, node *v2.CiliumNode, attempts int, status bool) error {
-	scopedLog := n.logger()
-
+func (n *Node) update(origNode, node *v2.CiliumNode, status bool) error {
 	var (
 		updatedNode    *v2.CiliumNode
 		updateErr, err error
@@ -1103,11 +1178,6 @@ func (n *Node) update(origNode, node *v2.CiliumNode, attempts int, status bool) 
 			return nil
 		}
 	} else if updateErr != nil {
-		scopedLog.WithError(updateErr).WithFields(logrus.Fields{
-			logfields.Attempt: attempts,
-			"updateStatus":    status,
-		}).Warning("Failed to update CiliumNode")
-
 		var newNode *v2.CiliumNode
 		newNode, err = n.manager.k8sAPI.Get(node.Name)
 		if err != nil {

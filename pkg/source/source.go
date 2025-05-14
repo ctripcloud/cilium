@@ -3,6 +3,12 @@
 
 package source
 
+import (
+	"slices"
+
+	"github.com/cilium/hive/cell"
+)
+
 // Source describes the source of a definition
 type Source string
 
@@ -33,6 +39,9 @@ const (
 	// Kubernetes is the source used for state derived from Kubernetes
 	Kubernetes Source = "k8s"
 
+	// ClusterMesh is the source used for state derived from remote clusters
+	ClusterMesh Source = "clustermesh"
+
 	// LocalAPI is the source used for state derived from the API served
 	// locally on the node.
 	LocalAPI Source = "api"
@@ -45,56 +54,58 @@ const (
 	// by the previous agent instance. Can be overwritten by all other
 	// sources (except for unspec).
 	Restored Source = "restored"
+
+	// Directory is the source used for watching and reading
+	// cilium network policy files from specific directory.
+	Directory Source = "directory"
+
+	// Please remember to add your source to defaultSources below.
 )
+
+// Sources is a priority-sorted slice of sources.
+type Sources []Source
+
+// The ordering in defaultSources is critical and it should only be changed
+// with care because as it determines the behavior of AllowOverwrite().
+// It is from highest precedence to lowest precedence.
+var defaultSources Sources = []Source{
+	KubeAPIServer,
+	Local,
+	KVStore,
+	CustomResource,
+	Kubernetes,
+	ClusterMesh,
+	Directory,
+	LocalAPI,
+	Generated,
+	Restored,
+	Unspec,
+}
 
 // AllowOverwrite returns true if new state from a particular source is allowed
 // to overwrite existing state from another source
 func AllowOverwrite(existing, new Source) bool {
-	switch existing {
+	overflowNegative := overflowNegativeTo(len(defaultSources))
+	return overflowNegative(slices.Index(defaultSources, new)) <= overflowNegative(slices.Index(defaultSources, existing))
+}
 
-	// KubeAPIServer state can only be overwritten by other kube-apiserver
-	// state.
-	case KubeAPIServer:
-		return new == KubeAPIServer
-
-	// Local state can only be overwritten by other local state or
-	// kube-apiserver state.
-	case Local:
-		return new == Local || new == KubeAPIServer
-
-	// KVStore can be overwritten by other kvstore, local state, or
-	// kube-apiserver state.
-	case KVStore:
-		return new == KVStore || new == Local || new == KubeAPIServer
-
-	// Custom-resource state can be overwritten by other CRD, kvstore,
-	// local or kube-apiserver state.
-	case CustomResource:
-		return new == CustomResource || new == KVStore || new == Local || new == KubeAPIServer
-
-	// Kubernetes state can be overwritten by everything except local API,
-	// generated, restored and unspecified state.
-	case Kubernetes:
-		return new != LocalAPI && new != Generated && new != Restored && new != Unspec
-
-	// Local API state can be overwritten by everything except restored,
-	// generated and unspecified state
-	case LocalAPI:
-		return new != Generated && new != Restored && new != Unspec
-
-	// Generated can be overwritten by everything except by Restored and
-	// Unspecified
-	case Generated:
-		return new != Restored && new != Unspec
-
-	// Restored can be overwritten by everything except by Unspecified
-	case Restored:
-		return new != Unspec
-
-	// Unspecified state can be overwritten by everything
-	case Unspec:
-		return true
+func overflowNegativeTo(infinity int) func(int) int {
+	return func(n int) int {
+		if n < 0 {
+			return infinity
+		} else {
+			return n
+		}
 	}
+}
 
-	return true
+var Cell = cell.Module(
+	"source",
+	"Definitions and priorities of data sources",
+	cell.Provide(NewSources),
+)
+
+// NewSources returns sources ordered from the most preferred.
+func NewSources() Sources {
+	return defaultSources
 }

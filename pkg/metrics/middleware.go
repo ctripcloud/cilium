@@ -8,8 +8,7 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/prometheus/client_golang/prometheus"
-
+	"github.com/cilium/cilium/pkg/metrics/metric"
 	"github.com/cilium/cilium/pkg/spanstat"
 )
 
@@ -18,8 +17,8 @@ import (
 // It records the timestamp of an API call in the provided gauge.
 type APIEventTSHelper struct {
 	Next      http.Handler
-	TSGauge   GaugeVec
-	Histogram prometheus.ObserverVec
+	TSGauge   metric.Vec[metric.Gauge]
+	Histogram metric.Vec[metric.Observer]
 }
 
 type ResponderWrapper struct {
@@ -40,7 +39,7 @@ func (rw *ResponderWrapper) WriteHeader(code int) {
 //	"/v1/endpoint/container-id:597.." -> "/v1/endpoint"
 func getShortPath(s string) string {
 	var idxSum int
-	for nThSlash := 0; nThSlash < 3; nThSlash++ {
+	for range 3 {
 		idx := strings.IndexByte(s[idxSum:], '/')
 		if idx == -1 {
 			return s

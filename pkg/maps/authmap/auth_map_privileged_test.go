@@ -4,64 +4,60 @@
 package authmap
 
 import (
-	"errors"
 	"testing"
 
-	. "gopkg.in/check.v1"
-
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/utime"
 	"github.com/cilium/cilium/pkg/ebpf"
-	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/policy"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-// Hook up gocheck into the "go test" runner.
-type AuthMapTestSuite struct{}
+func setup(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
 
-var _ = Suite(&AuthMapTestSuite{})
-
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-func (k *AuthMapTestSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-
-	bpf.CheckOrMountFS("")
+	bpf.CheckOrMountFS(hivetest.Logger(tb), "")
 	err := rlimit.RemoveMemlock()
-	c.Assert(err, IsNil)
+	require.NoError(tb, err)
 }
 
-func (k *AuthMapTestSuite) TestAuthMap(c *C) {
-	authMap := newMap(10)
+func TestAuthMap(t *testing.T) {
+	setup(t)
+	authMap := newMap(hivetest.Logger(t), 10)
 	err := authMap.init()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	defer authMap.bpfMap.Unpin()
 
-	_, err = authMap.Lookup(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull)
-	c.Assert(errors.Is(err, ebpf.ErrKeyNotExist), Equals, true)
+	testKey := AuthKey{
+		LocalIdentity:  1,
+		RemoteIdentity: 2,
+		RemoteNodeID:   1,
+		AuthType:       1, // policy.AuthTypeNull
+	}
 
-	err = authMap.Update(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull, 10)
-	c.Assert(err, IsNil)
+	_, err = authMap.Lookup(testKey)
+	require.ErrorIs(t, err, ebpf.ErrKeyNotExist)
 
-	info, err := authMap.Lookup(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull)
-	c.Assert(err, IsNil)
-	c.Assert(info.Expiration, Equals, utime.UTime(10))
+	err = authMap.Update(testKey, 10)
+	require.NoError(t, err)
 
-	err = authMap.Update(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull, 20)
-	c.Assert(err, IsNil)
+	info, err := authMap.Lookup(testKey)
+	require.NoError(t, err)
+	require.Equal(t, utime.UTime(10), info.Expiration)
 
-	info, err = authMap.Lookup(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull)
-	c.Assert(err, IsNil)
-	c.Assert(info.Expiration, Equals, utime.UTime(20))
+	err = authMap.Update(testKey, 20)
+	require.NoError(t, err)
 
-	err = authMap.Delete(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull)
-	c.Assert(err, IsNil)
+	info, err = authMap.Lookup(testKey)
+	require.NoError(t, err)
+	require.Equal(t, utime.UTime(20), info.Expiration)
 
-	_, err = authMap.Lookup(identity.NumericIdentity(1), identity.NumericIdentity(2), 1, policy.AuthTypeNull)
-	c.Assert(errors.Is(err, ebpf.ErrKeyNotExist), Equals, true)
+	err = authMap.Delete(testKey)
+	require.NoError(t, err)
+
+	_, err = authMap.Lookup(testKey)
+	require.ErrorIs(t, err, ebpf.ErrKeyNotExist)
 }

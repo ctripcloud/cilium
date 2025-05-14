@@ -3,53 +3,18 @@
 
 package testidentity
 
-import (
-	"net"
-
-	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/policy/api"
-)
+import "github.com/cilium/cilium/pkg/policy/api"
 
 type DummyIdentityNotifier struct {
-	mutex     lock.Mutex
-	selectors map[api.FQDNSelector][]identity.NumericIdentity
+	Registered map[api.FQDNSelector]struct{}
 }
 
 func NewDummyIdentityNotifier() *DummyIdentityNotifier {
 	return &DummyIdentityNotifier{
-		selectors: make(map[api.FQDNSelector][]identity.NumericIdentity),
+		Registered: make(map[api.FQDNSelector]struct{}),
 	}
 }
 
-// Lock must be held during any calls to RegisterForIdentityUpdatesLocked or
-// UnregisterForIdentityUpdatesLocked.
-func (d *DummyIdentityNotifier) Lock() {
-	d.mutex.Lock()
-}
+func (d DummyIdentityNotifier) RegisterFQDNSelector(selector api.FQDNSelector) {}
 
-// Unlock must be called after calls to RegisterForIdentityUpdatesLocked or
-// UnregisterForIdentityUpdatesLocked are done.
-func (d *DummyIdentityNotifier) Unlock() {
-	d.mutex.Unlock()
-}
-
-// RegisterForIdentityUpdatesLocked starts managing this selector.
-//
-// It doesn't implement the identity allocation semantics of the interface.
-func (d *DummyIdentityNotifier) RegisterForIdentityUpdatesLocked(selector api.FQDNSelector) {
-	if _, ok := d.selectors[selector]; !ok {
-		d.selectors[selector] = []identity.NumericIdentity{}
-	}
-}
-
-// UnregisterForIdentityUpdatesLocked stops managing this selector.
-func (d *DummyIdentityNotifier) UnregisterForIdentityUpdatesLocked(selector api.FQDNSelector) {
-	delete(d.selectors, selector)
-}
-
-// MapSelectorsToIPsLocked is a dummy implementation that does not implement
-// the selectors of the real implementation.
-func (d *DummyIdentityNotifier) MapSelectorsToIPsLocked(fqdnSelectors map[api.FQDNSelector]struct{}) (selectorsMissingIPs []api.FQDNSelector, selectorIPMapping map[api.FQDNSelector][]net.IP) {
-	return nil, nil
-}
+func (d DummyIdentityNotifier) UnregisterFQDNSelector(selector api.FQDNSelector) {}

@@ -6,7 +6,8 @@
 package parser
 
 import (
-	"github.com/sirupsen/logrus"
+	"log/slog"
+
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"google.golang.org/protobuf/types/known/wrapperspb"
 
@@ -25,6 +26,13 @@ import (
 	"github.com/cilium/cilium/pkg/proxy/accesslog"
 )
 
+// Decoder is an interface for the parser.
+// It decodes a monitor event into a hubble event.
+type Decoder interface {
+	// Decode transforms a monitor event into a hubble event.
+	Decode(monitorEvent *observerTypes.MonitorEvent) (*v1.Event, error)
+}
+
 // Parser for all flows
 type Parser struct {
 	l34  *threefour.Parser
@@ -35,7 +43,7 @@ type Parser struct {
 
 // New creates a new parser
 func New(
-	log logrus.FieldLogger,
+	log *slog.Logger,
 	endpointGetter getters.EndpointGetter,
 	identityGetter getters.IdentityGetter,
 	dnsGetter getters.DNSGetter,
@@ -43,10 +51,11 @@ func New(
 	serviceGetter getters.ServiceGetter,
 	linkGetter getters.LinkGetter,
 	cgroupGetter getters.PodMetadataGetter,
+	skipUnknownCGroupIDs bool,
 	opts ...options.Option,
 ) (*Parser, error) {
 
-	l34, err := threefour.New(log, endpointGetter, identityGetter, dnsGetter, ipGetter, serviceGetter, linkGetter)
+	l34, err := threefour.New(log, endpointGetter, identityGetter, dnsGetter, ipGetter, serviceGetter, linkGetter, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -61,7 +70,7 @@ func New(
 		return nil, err
 	}
 
-	sock, err := sock.New(log, endpointGetter, identityGetter, dnsGetter, ipGetter, serviceGetter, cgroupGetter)
+	sock, err := sock.New(log, endpointGetter, identityGetter, dnsGetter, ipGetter, serviceGetter, cgroupGetter, skipUnknownCGroupIDs)
 	if err != nil {
 		return nil, err
 	}

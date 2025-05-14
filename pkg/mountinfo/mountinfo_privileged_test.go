@@ -7,46 +7,41 @@ package mountinfo
 
 import (
 	"os"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"golang.org/x/sys/unix"
 
 	"github.com/cilium/cilium/pkg/testutils"
-
-	"golang.org/x/sys/unix"
-	. "gopkg.in/check.v1"
 )
-
-type MountInfoPrivilegedTestSuite struct{}
-
-var _ = Suite(&MountInfoPrivilegedTestSuite{})
-
-func (s *MountInfoPrivilegedTestSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-}
 
 // TestIsMountFSbyMount tests the public function IsMountFS by performing
 // an actual mount.
-func (s *MountInfoPrivilegedTestSuite) TestIsMountFSbyMount(c *C) {
+func TestIsMountFSbyMount(t *testing.T) {
+	testutils.PrivilegedTest(t)
+
 	tmpDir, err := os.MkdirTemp("", "IsMountFS_")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	defer os.RemoveAll(tmpDir)
 
 	mounted, matched, err := IsMountFS(unix.TMPFS_MAGIC, tmpDir)
-	c.Assert(err, IsNil)
-	c.Assert(mounted, Equals, false)
-	c.Assert(matched, Equals, false)
+	require.NoError(t, err)
+	require.False(t, mounted)
+	require.False(t, matched)
 
 	err = unix.Mount("tmpfs", tmpDir, "tmpfs", 0, "")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	defer unix.Unmount(tmpDir, unix.MNT_DETACH)
 
 	// deliberately check with wrong fstype
 	mounted, matched, err = IsMountFS(unix.PROC_SUPER_MAGIC, tmpDir)
-	c.Assert(err, IsNil)
-	c.Assert(mounted, Equals, true)
-	c.Assert(matched, Equals, false)
+	require.NoError(t, err)
+	require.True(t, mounted)
+	require.False(t, matched)
 
 	// now check with proper fstype
 	mounted, matched, err = IsMountFS(unix.TMPFS_MAGIC, tmpDir)
-	c.Assert(err, IsNil)
-	c.Assert(mounted, Equals, true)
-	c.Assert(matched, Equals, true)
+	require.NoError(t, err)
+	require.True(t, mounted)
+	require.True(t, matched)
 }

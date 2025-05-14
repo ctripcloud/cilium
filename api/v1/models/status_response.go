@@ -24,6 +24,12 @@ import (
 // swagger:model StatusResponse
 type StatusResponse struct {
 
+	// Status of core datapath attachment mode
+	AttachMode AttachMode `json:"attach-mode,omitempty"`
+
+	// Status of Mutual Authentication certificate provider
+	AuthCertificateProvider *Status `json:"auth-certificate-provider,omitempty"`
+
 	// Status of bandwidth manager
 	BandwidthManager *BandwidthManager `json:"bandwidth-manager,omitempty"`
 
@@ -60,14 +66,14 @@ type StatusResponse struct {
 	// Status of all endpoint controllers
 	Controllers ControllerStatuses `json:"controllers,omitempty"`
 
+	// Status of datapath mode
+	DatapathMode DatapathMode `json:"datapath-mode,omitempty"`
+
 	// Status of transparent encryption
 	Encryption *EncryptionStatus `json:"encryption,omitempty"`
 
 	// Status of the host firewall
 	HostFirewall *HostFirewall `json:"host-firewall,omitempty"`
-
-	// Status of host routing
-	HostRouting *HostRouting `json:"host-routing,omitempty"`
 
 	// Status of Hubble server
 	Hubble *HubbleStatus `json:"hubble,omitempty"`
@@ -77,6 +83,9 @@ type StatusResponse struct {
 
 	// Status of IP address management
 	Ipam *IPAMStatus `json:"ipam,omitempty"`
+
+	// Status of IPv4 BIG TCP
+	IPV4BigTCP *IPV4BigTCP `json:"ipv4-big-tcp,omitempty"`
 
 	// Status of IPv6 BIG TCP
 	IPV6BigTCP *IPV6BigTCP `json:"ipv6-big-tcp,omitempty"`
@@ -99,6 +108,12 @@ type StatusResponse struct {
 	// Status of proxy
 	Proxy *ProxyStatus `json:"proxy,omitempty"`
 
+	// Status of routing
+	Routing *Routing `json:"routing,omitempty"`
+
+	// Status of SRv6
+	Srv6 *Srv6 `json:"srv6,omitempty"`
+
 	// List of stale information in the status
 	Stale map[string]strfmt.DateTime `json:"stale,omitempty"`
 }
@@ -106,6 +121,14 @@ type StatusResponse struct {
 // Validate validates this status response
 func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 	var res []error
+
+	if err := m.validateAttachMode(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateAuthCertificateProvider(formats); err != nil {
+		res = append(res, err)
+	}
 
 	if err := m.validateBandwidthManager(formats); err != nil {
 		res = append(res, err)
@@ -147,15 +170,15 @@ func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
+	if err := m.validateDatapathMode(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.validateEncryption(formats); err != nil {
 		res = append(res, err)
 	}
 
 	if err := m.validateHostFirewall(formats); err != nil {
-		res = append(res, err)
-	}
-
-	if err := m.validateHostRouting(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -168,6 +191,10 @@ func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 	}
 
 	if err := m.validateIpam(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateIPV4BigTCP(formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -199,6 +226,14 @@ func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 		res = append(res, err)
 	}
 
+	if err := m.validateRouting(formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.validateSrv6(formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.validateStale(formats); err != nil {
 		res = append(res, err)
 	}
@@ -206,6 +241,42 @@ func (m *StatusResponse) Validate(formats strfmt.Registry) error {
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
+	return nil
+}
+
+func (m *StatusResponse) validateAttachMode(formats strfmt.Registry) error {
+	if swag.IsZero(m.AttachMode) { // not required
+		return nil
+	}
+
+	if err := m.AttachMode.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("attach-mode")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("attach-mode")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) validateAuthCertificateProvider(formats strfmt.Registry) error {
+	if swag.IsZero(m.AuthCertificateProvider) { // not required
+		return nil
+	}
+
+	if m.AuthCertificateProvider != nil {
+		if err := m.AuthCertificateProvider.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("auth-certificate-provider")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("auth-certificate-provider")
+			}
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -397,6 +468,23 @@ func (m *StatusResponse) validateControllers(formats strfmt.Registry) error {
 	return nil
 }
 
+func (m *StatusResponse) validateDatapathMode(formats strfmt.Registry) error {
+	if swag.IsZero(m.DatapathMode) { // not required
+		return nil
+	}
+
+	if err := m.DatapathMode.Validate(formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("datapath-mode")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("datapath-mode")
+		}
+		return err
+	}
+
+	return nil
+}
+
 func (m *StatusResponse) validateEncryption(formats strfmt.Registry) error {
 	if swag.IsZero(m.Encryption) { // not required
 		return nil
@@ -427,25 +515,6 @@ func (m *StatusResponse) validateHostFirewall(formats strfmt.Registry) error {
 				return ve.ValidateName("host-firewall")
 			} else if ce, ok := err.(*errors.CompositeError); ok {
 				return ce.ValidateName("host-firewall")
-			}
-			return err
-		}
-	}
-
-	return nil
-}
-
-func (m *StatusResponse) validateHostRouting(formats strfmt.Registry) error {
-	if swag.IsZero(m.HostRouting) { // not required
-		return nil
-	}
-
-	if m.HostRouting != nil {
-		if err := m.HostRouting.Validate(formats); err != nil {
-			if ve, ok := err.(*errors.Validation); ok {
-				return ve.ValidateName("host-routing")
-			} else if ce, ok := err.(*errors.CompositeError); ok {
-				return ce.ValidateName("host-routing")
 			}
 			return err
 		}
@@ -503,6 +572,25 @@ func (m *StatusResponse) validateIpam(formats strfmt.Registry) error {
 				return ve.ValidateName("ipam")
 			} else if ce, ok := err.(*errors.CompositeError); ok {
 				return ce.ValidateName("ipam")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) validateIPV4BigTCP(formats strfmt.Registry) error {
+	if swag.IsZero(m.IPV4BigTCP) { // not required
+		return nil
+	}
+
+	if m.IPV4BigTCP != nil {
+		if err := m.IPV4BigTCP.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("ipv4-big-tcp")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("ipv4-big-tcp")
 			}
 			return err
 		}
@@ -644,6 +732,44 @@ func (m *StatusResponse) validateProxy(formats strfmt.Registry) error {
 	return nil
 }
 
+func (m *StatusResponse) validateRouting(formats strfmt.Registry) error {
+	if swag.IsZero(m.Routing) { // not required
+		return nil
+	}
+
+	if m.Routing != nil {
+		if err := m.Routing.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("routing")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("routing")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) validateSrv6(formats strfmt.Registry) error {
+	if swag.IsZero(m.Srv6) { // not required
+		return nil
+	}
+
+	if m.Srv6 != nil {
+		if err := m.Srv6.Validate(formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("srv6")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("srv6")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (m *StatusResponse) validateStale(formats strfmt.Registry) error {
 	if swag.IsZero(m.Stale) { // not required
 		return nil
@@ -663,6 +789,14 @@ func (m *StatusResponse) validateStale(formats strfmt.Registry) error {
 // ContextValidate validate this status response based on the context it is used
 func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Registry) error {
 	var res []error
+
+	if err := m.contextValidateAttachMode(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateAuthCertificateProvider(ctx, formats); err != nil {
+		res = append(res, err)
+	}
 
 	if err := m.contextValidateBandwidthManager(ctx, formats); err != nil {
 		res = append(res, err)
@@ -704,15 +838,15 @@ func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Reg
 		res = append(res, err)
 	}
 
+	if err := m.contextValidateDatapathMode(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if err := m.contextValidateEncryption(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
 	if err := m.contextValidateHostFirewall(ctx, formats); err != nil {
-		res = append(res, err)
-	}
-
-	if err := m.contextValidateHostRouting(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -725,6 +859,10 @@ func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Reg
 	}
 
 	if err := m.contextValidateIpam(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateIPV4BigTCP(ctx, formats); err != nil {
 		res = append(res, err)
 	}
 
@@ -756,15 +894,67 @@ func (m *StatusResponse) ContextValidate(ctx context.Context, formats strfmt.Reg
 		res = append(res, err)
 	}
 
+	if err := m.contextValidateRouting(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
+	if err := m.contextValidateSrv6(ctx, formats); err != nil {
+		res = append(res, err)
+	}
+
 	if len(res) > 0 {
 		return errors.CompositeValidationError(res...)
 	}
 	return nil
 }
 
+func (m *StatusResponse) contextValidateAttachMode(ctx context.Context, formats strfmt.Registry) error {
+
+	if swag.IsZero(m.AttachMode) { // not required
+		return nil
+	}
+
+	if err := m.AttachMode.ContextValidate(ctx, formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("attach-mode")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("attach-mode")
+		}
+		return err
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) contextValidateAuthCertificateProvider(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.AuthCertificateProvider != nil {
+
+		if swag.IsZero(m.AuthCertificateProvider) { // not required
+			return nil
+		}
+
+		if err := m.AuthCertificateProvider.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("auth-certificate-provider")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("auth-certificate-provider")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (m *StatusResponse) contextValidateBandwidthManager(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.BandwidthManager != nil {
+
+		if swag.IsZero(m.BandwidthManager) { // not required
+			return nil
+		}
+
 		if err := m.BandwidthManager.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("bandwidth-manager")
@@ -781,6 +971,11 @@ func (m *StatusResponse) contextValidateBandwidthManager(ctx context.Context, fo
 func (m *StatusResponse) contextValidateBpfMaps(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.BpfMaps != nil {
+
+		if swag.IsZero(m.BpfMaps) { // not required
+			return nil
+		}
+
 		if err := m.BpfMaps.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("bpf-maps")
@@ -797,6 +992,11 @@ func (m *StatusResponse) contextValidateBpfMaps(ctx context.Context, formats str
 func (m *StatusResponse) contextValidateCilium(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Cilium != nil {
+
+		if swag.IsZero(m.Cilium) { // not required
+			return nil
+		}
+
 		if err := m.Cilium.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("cilium")
@@ -813,6 +1013,11 @@ func (m *StatusResponse) contextValidateCilium(ctx context.Context, formats strf
 func (m *StatusResponse) contextValidateClockSource(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.ClockSource != nil {
+
+		if swag.IsZero(m.ClockSource) { // not required
+			return nil
+		}
+
 		if err := m.ClockSource.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("clock-source")
@@ -829,6 +1034,11 @@ func (m *StatusResponse) contextValidateClockSource(ctx context.Context, formats
 func (m *StatusResponse) contextValidateCluster(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Cluster != nil {
+
+		if swag.IsZero(m.Cluster) { // not required
+			return nil
+		}
+
 		if err := m.Cluster.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("cluster")
@@ -845,6 +1055,11 @@ func (m *StatusResponse) contextValidateCluster(ctx context.Context, formats str
 func (m *StatusResponse) contextValidateClusterMesh(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.ClusterMesh != nil {
+
+		if swag.IsZero(m.ClusterMesh) { // not required
+			return nil
+		}
+
 		if err := m.ClusterMesh.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("cluster-mesh")
@@ -861,6 +1076,11 @@ func (m *StatusResponse) contextValidateClusterMesh(ctx context.Context, formats
 func (m *StatusResponse) contextValidateCniChaining(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.CniChaining != nil {
+
+		if swag.IsZero(m.CniChaining) { // not required
+			return nil
+		}
+
 		if err := m.CniChaining.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("cni-chaining")
@@ -877,6 +1097,11 @@ func (m *StatusResponse) contextValidateCniChaining(ctx context.Context, formats
 func (m *StatusResponse) contextValidateCniFile(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.CniFile != nil {
+
+		if swag.IsZero(m.CniFile) { // not required
+			return nil
+		}
+
 		if err := m.CniFile.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("cni-file")
@@ -893,6 +1118,11 @@ func (m *StatusResponse) contextValidateCniFile(ctx context.Context, formats str
 func (m *StatusResponse) contextValidateContainerRuntime(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.ContainerRuntime != nil {
+
+		if swag.IsZero(m.ContainerRuntime) { // not required
+			return nil
+		}
+
 		if err := m.ContainerRuntime.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("container-runtime")
@@ -920,9 +1150,32 @@ func (m *StatusResponse) contextValidateControllers(ctx context.Context, formats
 	return nil
 }
 
+func (m *StatusResponse) contextValidateDatapathMode(ctx context.Context, formats strfmt.Registry) error {
+
+	if swag.IsZero(m.DatapathMode) { // not required
+		return nil
+	}
+
+	if err := m.DatapathMode.ContextValidate(ctx, formats); err != nil {
+		if ve, ok := err.(*errors.Validation); ok {
+			return ve.ValidateName("datapath-mode")
+		} else if ce, ok := err.(*errors.CompositeError); ok {
+			return ce.ValidateName("datapath-mode")
+		}
+		return err
+	}
+
+	return nil
+}
+
 func (m *StatusResponse) contextValidateEncryption(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Encryption != nil {
+
+		if swag.IsZero(m.Encryption) { // not required
+			return nil
+		}
+
 		if err := m.Encryption.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("encryption")
@@ -939,6 +1192,11 @@ func (m *StatusResponse) contextValidateEncryption(ctx context.Context, formats 
 func (m *StatusResponse) contextValidateHostFirewall(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.HostFirewall != nil {
+
+		if swag.IsZero(m.HostFirewall) { // not required
+			return nil
+		}
+
 		if err := m.HostFirewall.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("host-firewall")
@@ -952,25 +1210,14 @@ func (m *StatusResponse) contextValidateHostFirewall(ctx context.Context, format
 	return nil
 }
 
-func (m *StatusResponse) contextValidateHostRouting(ctx context.Context, formats strfmt.Registry) error {
-
-	if m.HostRouting != nil {
-		if err := m.HostRouting.ContextValidate(ctx, formats); err != nil {
-			if ve, ok := err.(*errors.Validation); ok {
-				return ve.ValidateName("host-routing")
-			} else if ce, ok := err.(*errors.CompositeError); ok {
-				return ce.ValidateName("host-routing")
-			}
-			return err
-		}
-	}
-
-	return nil
-}
-
 func (m *StatusResponse) contextValidateHubble(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Hubble != nil {
+
+		if swag.IsZero(m.Hubble) { // not required
+			return nil
+		}
+
 		if err := m.Hubble.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("hubble")
@@ -987,6 +1234,11 @@ func (m *StatusResponse) contextValidateHubble(ctx context.Context, formats strf
 func (m *StatusResponse) contextValidateIdentityRange(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.IdentityRange != nil {
+
+		if swag.IsZero(m.IdentityRange) { // not required
+			return nil
+		}
+
 		if err := m.IdentityRange.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("identity-range")
@@ -1003,6 +1255,11 @@ func (m *StatusResponse) contextValidateIdentityRange(ctx context.Context, forma
 func (m *StatusResponse) contextValidateIpam(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Ipam != nil {
+
+		if swag.IsZero(m.Ipam) { // not required
+			return nil
+		}
+
 		if err := m.Ipam.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("ipam")
@@ -1016,9 +1273,35 @@ func (m *StatusResponse) contextValidateIpam(ctx context.Context, formats strfmt
 	return nil
 }
 
+func (m *StatusResponse) contextValidateIPV4BigTCP(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.IPV4BigTCP != nil {
+
+		if swag.IsZero(m.IPV4BigTCP) { // not required
+			return nil
+		}
+
+		if err := m.IPV4BigTCP.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("ipv4-big-tcp")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("ipv4-big-tcp")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
 func (m *StatusResponse) contextValidateIPV6BigTCP(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.IPV6BigTCP != nil {
+
+		if swag.IsZero(m.IPV6BigTCP) { // not required
+			return nil
+		}
+
 		if err := m.IPV6BigTCP.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("ipv6-big-tcp")
@@ -1035,6 +1318,11 @@ func (m *StatusResponse) contextValidateIPV6BigTCP(ctx context.Context, formats 
 func (m *StatusResponse) contextValidateKubeProxyReplacement(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.KubeProxyReplacement != nil {
+
+		if swag.IsZero(m.KubeProxyReplacement) { // not required
+			return nil
+		}
+
 		if err := m.KubeProxyReplacement.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("kube-proxy-replacement")
@@ -1051,6 +1339,11 @@ func (m *StatusResponse) contextValidateKubeProxyReplacement(ctx context.Context
 func (m *StatusResponse) contextValidateKubernetes(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Kubernetes != nil {
+
+		if swag.IsZero(m.Kubernetes) { // not required
+			return nil
+		}
+
 		if err := m.Kubernetes.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("kubernetes")
@@ -1067,6 +1360,11 @@ func (m *StatusResponse) contextValidateKubernetes(ctx context.Context, formats 
 func (m *StatusResponse) contextValidateKvstore(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Kvstore != nil {
+
+		if swag.IsZero(m.Kvstore) { // not required
+			return nil
+		}
+
 		if err := m.Kvstore.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("kvstore")
@@ -1083,6 +1381,11 @@ func (m *StatusResponse) contextValidateKvstore(ctx context.Context, formats str
 func (m *StatusResponse) contextValidateMasquerading(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Masquerading != nil {
+
+		if swag.IsZero(m.Masquerading) { // not required
+			return nil
+		}
+
 		if err := m.Masquerading.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("masquerading")
@@ -1099,6 +1402,11 @@ func (m *StatusResponse) contextValidateMasquerading(ctx context.Context, format
 func (m *StatusResponse) contextValidateNodeMonitor(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.NodeMonitor != nil {
+
+		if swag.IsZero(m.NodeMonitor) { // not required
+			return nil
+		}
+
 		if err := m.NodeMonitor.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("nodeMonitor")
@@ -1115,11 +1423,58 @@ func (m *StatusResponse) contextValidateNodeMonitor(ctx context.Context, formats
 func (m *StatusResponse) contextValidateProxy(ctx context.Context, formats strfmt.Registry) error {
 
 	if m.Proxy != nil {
+
+		if swag.IsZero(m.Proxy) { // not required
+			return nil
+		}
+
 		if err := m.Proxy.ContextValidate(ctx, formats); err != nil {
 			if ve, ok := err.(*errors.Validation); ok {
 				return ve.ValidateName("proxy")
 			} else if ce, ok := err.(*errors.CompositeError); ok {
 				return ce.ValidateName("proxy")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) contextValidateRouting(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.Routing != nil {
+
+		if swag.IsZero(m.Routing) { // not required
+			return nil
+		}
+
+		if err := m.Routing.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("routing")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("routing")
+			}
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (m *StatusResponse) contextValidateSrv6(ctx context.Context, formats strfmt.Registry) error {
+
+	if m.Srv6 != nil {
+
+		if swag.IsZero(m.Srv6) { // not required
+			return nil
+		}
+
+		if err := m.Srv6.ContextValidate(ctx, formats); err != nil {
+			if ve, ok := err.(*errors.Validation); ok {
+				return ve.ValidateName("srv6")
+			} else if ce, ok := err.(*errors.CompositeError); ok {
+				return ce.ValidateName("srv6")
 			}
 			return err
 		}

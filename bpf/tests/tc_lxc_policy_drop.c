@@ -6,12 +6,6 @@
 #include <bpf/ctx/skb.h>
 #include "pktgen.h"
 
-#define LXC_IPV4 (__be32)v4_pod_one
-#include "config_replacement.h"
-
-/* Set ETH_HLEN to 14 to indicate that the packet has a 14 byte ethernet header */
-#define ETH_HLEN 14
-
 /* Enable code paths under test */
 #define ENABLE_IPV4
 
@@ -23,12 +17,14 @@
 
 #define NODE_IP			v4_node_one
 
-#define SECCTX_FROM_IPCACHE 1
-
 static volatile const __u8 *client_mac = mac_one;
 static volatile const __u8 *server_mac = mac_two;
 
 #include "bpf_lxc.c"
+
+ASSIGN_CONFIG(__u32, endpoint_ipv4, v4_pod_one)
+
+#include "lib/policy.h"
 
 #define FROM_CONTAINER 0
 
@@ -50,35 +46,17 @@ int tc_lxc_policy_drop_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
 	struct tcphdr *l4;
-	struct ethhdr *l2;
-	struct iphdr *l3;
 	void *data;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)client_mac, (__u8 *)server_mac);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->saddr = CLIENT_IP;
-	l3->daddr = SERVER_IP;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)client_mac, (__u8 *)server_mac,
+					  CLIENT_IP, SERVER_IP,
+					  CLIENT_PORT, SERVER_PORT);
 	if (!l4)
 		return TEST_ERROR;
-
-	l4->source = CLIENT_PORT;
-	l4->dest = SERVER_PORT;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
 	if (!data)
@@ -95,18 +73,10 @@ __u64 drop_count;
 SETUP("tc", "tc_lxc_policy_drop")
 int tc_lxc_policy_drop__setup(struct __ctx_buff *ctx)
 {
-	struct policy_key policy_key = {
-		.egress = 1,
-	};
-	struct policy_entry policy_value = {
-		.deny = 1,
-	};
-
-	/* Add deny policy */
-	map_update_elem(&POLICY_MAP, &policy_key, &policy_value, BPF_ANY);
+	policy_add_egress_deny_all_entry();
 
 	/* Jump into the entrypoint */
-	tail_call_static(ctx, &entry_call_map, FROM_CONTAINER);
+	tail_call_static(ctx, entry_call_map, FROM_CONTAINER);
 	/* Fail if we didn't jump */
 	return TEST_ERROR;
 }
@@ -117,7 +87,6 @@ int tc_lxc_policy_drop_check(const struct __ctx_buff *ctx)
 	void *data, *data_end;
 	__u32 *status_code;
 
-	struct metrics_value *entry = NULL;
 	struct metrics_key key = {};
 
 	test_init();
@@ -133,10 +102,9 @@ int tc_lxc_policy_drop_check(const struct __ctx_buff *ctx)
 
 	key.reason = (__u8)-DROP_POLICY_DENY;
 	key.dir = METRIC_EGRESS;
-	entry = map_lookup_elem(&METRICS_MAP, &key);
-	if (!entry)
-		test_fatal("metrics entry not found");
-	assert(entry->count == 1);
+
+	__u64 count = 1;
+	assert_metrics_count(key, count);
 
 	test_finish();
 }

@@ -3,17 +3,25 @@ apiVersion: monitoring.coreos.com/v1
 kind: ServiceMonitor
 metadata:
   name: cilium-operator
-  namespace: {{ .Values.operator.prometheus.serviceMonitor.namespace | default .Release.Namespace }}
+  namespace: {{ .Values.operator.prometheus.serviceMonitor.namespace | default (include "cilium.namespace" .) }}
   labels:
     app.kubernetes.io/part-of: cilium
     app.kubernetes.io/name: cilium-operator
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
     {{- with .Values.operator.prometheus.serviceMonitor.labels }}
     {{- toYaml . | nindent 4 }}
     {{- end }}
+  {{- if or .Values.operator.prometheus.serviceMonitor.annotations .Values.operator.annotations }}
   annotations:
-    {{- with .Values.operator.prometheus.serviceMonitor.annotations }}
-    {{- toYaml . | nindent 4 }}
+    {{- with .Values.operator.annotations }}
+      {{- toYaml . | nindent 4 }}
     {{- end }}
+    {{- with .Values.operator.prometheus.serviceMonitor.annotations }}
+      {{- toYaml . | nindent 4 }}
+    {{- end }}
+  {{- end }}
 spec:
   selector:
     matchLabels:
@@ -21,10 +29,13 @@ spec:
       name: cilium-operator
   namespaceSelector:
     matchNames:
-    - {{ .Release.Namespace }}
+    - {{ include "cilium.namespace" . }}
   endpoints:
   - port: metrics
     interval: {{ .Values.operator.prometheus.serviceMonitor.interval | quote }}
+    {{- if .Values.operator.prometheus.serviceMonitor.scrapeTimeout }}
+    scrapeTimeout: {{ .Values.operator.prometheus.serviceMonitor.scrapeTimeout | quote }}
+    {{- end }}
     honorLabels: true
     path: /metrics
     {{- with .Values.operator.prometheus.serviceMonitor.relabelings }}
@@ -37,4 +48,7 @@ spec:
     {{- end }}
   targetLabels:
   - io.cilium/app
+{{- if .Values.operator.prometheus.serviceMonitor.jobLabel }}
+  jobLabel: {{ .Values.operator.prometheus.serviceMonitor.jobLabel | quote }}
+{{- end }}
 {{- end }}

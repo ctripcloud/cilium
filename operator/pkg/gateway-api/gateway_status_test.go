@@ -10,14 +10,15 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	gatewayv1beta1 "sigs.k8s.io/gateway-api/apis/v1beta1"
+	gatewayv1 "sigs.k8s.io/gateway-api/apis/v1"
 )
 
 func Test_gatewayStatusScheduledCondition(t *testing.T) {
 	type args struct {
-		gw        *gatewayv1beta1.Gateway
+		gw        *gatewayv1.Gateway
 		scheduled bool
 		msg       string
+		reason    gatewayv1.GatewayConditionReason
 	}
 	tests := []struct {
 		name string
@@ -27,11 +28,12 @@ func Test_gatewayStatusScheduledCondition(t *testing.T) {
 		{
 			name: "scheduled",
 			args: args{
-				gw: &gatewayv1beta1.Gateway{
+				gw: &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Generation: 100,
 					},
 				},
+				reason:    gatewayv1.GatewayReasonAccepted,
 				scheduled: true,
 				msg:       "Scheduled Gateway",
 			},
@@ -46,12 +48,13 @@ func Test_gatewayStatusScheduledCondition(t *testing.T) {
 		{
 			name: "non-scheduled",
 			args: args{
-				gw: &gatewayv1beta1.Gateway{
+				gw: &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Generation: 100,
 					},
 				},
 				scheduled: false,
+				reason:    gatewayv1.GatewayReasonNoResources,
 				msg:       "Invalid Gateway",
 			},
 			want: metav1.Condition{
@@ -65,7 +68,7 @@ func Test_gatewayStatusScheduledCondition(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := gatewayStatusAcceptedCondition(tt.args.gw, tt.args.scheduled, tt.args.msg)
+			got := gatewayStatusAcceptedCondition(tt.args.gw, tt.args.scheduled, tt.args.msg, tt.args.reason)
 			assert.True(t, cmp.Equal(got, tt.want, cmpopts.IgnoreFields(metav1.Condition{}, "LastTransitionTime")), "gatewayStatusAcceptedCondition() = %v, want %v", got, tt.want)
 		})
 	}
@@ -73,7 +76,7 @@ func Test_gatewayStatusScheduledCondition(t *testing.T) {
 
 func Test_gatewayStatusReadyCondition(t *testing.T) {
 	type args struct {
-		gw    *gatewayv1beta1.Gateway
+		gw    *gatewayv1.Gateway
 		ready bool
 		msg   string
 	}
@@ -85,7 +88,7 @@ func Test_gatewayStatusReadyCondition(t *testing.T) {
 		{
 			name: "ready",
 			args: args{
-				gw: &gatewayv1beta1.Gateway{
+				gw: &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Generation: 100,
 					},
@@ -104,7 +107,7 @@ func Test_gatewayStatusReadyCondition(t *testing.T) {
 		{
 			name: "unready",
 			args: args{
-				gw: &gatewayv1beta1.Gateway{
+				gw: &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Generation: 100,
 					},
@@ -131,7 +134,7 @@ func Test_gatewayStatusReadyCondition(t *testing.T) {
 
 func Test_gatewayListenerProgrammedCondition(t *testing.T) {
 	type args struct {
-		gw    *gatewayv1beta1.Gateway
+		gw    *gatewayv1.Gateway
 		ready bool
 		msg   string
 	}
@@ -143,7 +146,7 @@ func Test_gatewayListenerProgrammedCondition(t *testing.T) {
 		{
 			name: "ready",
 			args: args{
-				gw: &gatewayv1beta1.Gateway{
+				gw: &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Generation: 100,
 					},
@@ -162,7 +165,7 @@ func Test_gatewayListenerProgrammedCondition(t *testing.T) {
 		{
 			name: "unready",
 			args: args{
-				gw: &gatewayv1beta1.Gateway{
+				gw: &gatewayv1.Gateway{
 					ObjectMeta: metav1.ObjectMeta{
 						Generation: 100,
 					},

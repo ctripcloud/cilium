@@ -4,20 +4,24 @@
 #include <bpf/ctx/skb.h>
 #include <bpf/api.h>
 
-#include <node_config.h>
+#include <bpf/config/node.h>
 #include <netdev_config.h>
 
 #include "lib/common.h"
 #include "lib/trace.h"
 #include "lib/encrypt.h"
 
-__section("from-network")
+__section_entry
 int cil_from_network(struct __ctx_buff *ctx)
 {
 	int ret = CTX_ACT_OK;
 
 	__u16 proto __maybe_unused;
-	enum trace_reason reason = TRACE_REASON_UNKNOWN;
+	__u32 ingress_ifindex = ctx->ingress_ifindex;
+	struct trace_ctx trace = {
+		.reason = TRACE_REASON_UNKNOWN,
+		.monitor = 0,
+	};
 	enum trace_point obs_point_to = TRACE_TO_STACK;
 	enum trace_point obs_point_from = TRACE_FROM_NETWORK;
 
@@ -68,7 +72,7 @@ int cil_from_network(struct __ctx_buff *ctx)
  */
 #ifdef ENABLE_IPSEC
 	if ((ctx->mark & MARK_MAGIC_HOST_MASK) == MARK_MAGIC_DECRYPT)
-		reason = TRACE_REASON_ENCRYPTED;
+		trace.reason = TRACE_REASON_ENCRYPTED;
 
 	/* Only possible redirect in here is the one in the do_decrypt
 	 * which redirects to cilium_host.
@@ -78,11 +82,13 @@ int cil_from_network(struct __ctx_buff *ctx)
 #endif
 
 out:
-	send_trace_notify(ctx, obs_point_from, 0, 0, 0,
-			  ctx->ingress_ifindex, reason, TRACE_PAYLOAD_LEN);
+	send_trace_notify(ctx, obs_point_from, UNKNOWN_ID, UNKNOWN_ID,
+			  TRACE_EP_ID_UNKNOWN, ingress_ifindex,
+			  trace.reason, trace.monitor);
 
-	send_trace_notify(ctx, obs_point_to, 0, 0, 0,
-			  ctx->ingress_ifindex, reason, TRACE_PAYLOAD_LEN);
+	send_trace_notify(ctx, obs_point_to, UNKNOWN_ID, UNKNOWN_ID,
+			  TRACE_EP_ID_UNKNOWN, ingress_ifindex,
+			  trace.reason, trace.monitor);
 
 	return ret;
 }

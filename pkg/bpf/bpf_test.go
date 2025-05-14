@@ -6,28 +6,27 @@ package bpf
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/ebpf"
+	"github.com/stretchr/testify/require"
 )
 
-func Test(t *testing.T) { TestingT(t) }
+func TestDefaultMapFlags(t *testing.T) {
+	require.Equal(t, uint32(BPF_F_NO_PREALLOC), GetMapMemoryFlags(ebpf.Hash))
+	require.Equal(t, uint32(0), GetMapMemoryFlags(ebpf.LRUHash))
+	require.Equal(t, uint32(BPF_F_NO_PREALLOC), GetMapMemoryFlags(ebpf.LPMTrie))
+	require.Equal(t, uint32(0), GetMapMemoryFlags(ebpf.Array))
 
-func (s *BPFTestSuite) TestDefaultMapFlags(c *C) {
-	c.Assert(GetPreAllocateMapFlags(MapTypeLPMTrie), Equals, uint32(BPF_F_NO_PREALLOC))
-	c.Assert(GetPreAllocateMapFlags(MapTypeArray), Equals, uint32(0))
-	c.Assert(GetPreAllocateMapFlags(MapTypeLRUHash), Equals, uint32(0))
-
-	c.Assert(GetPreAllocateMapFlags(MapTypeHash), Equals, uint32(BPF_F_NO_PREALLOC))
 	EnableMapPreAllocation()
-	c.Assert(GetPreAllocateMapFlags(MapTypeHash), Equals, uint32(0))
-
-	c.Assert(GetPreAllocateMapFlags(MapTypeLPMTrie), Equals, uint32(BPF_F_NO_PREALLOC))
-	c.Assert(GetPreAllocateMapFlags(MapTypeArray), Equals, uint32(0))
-	c.Assert(GetPreAllocateMapFlags(MapTypeLRUHash), Equals, uint32(0))
+	require.Equal(t, uint32(0), GetMapMemoryFlags(ebpf.Hash))
+	require.Equal(t, uint32(0), GetMapMemoryFlags(ebpf.LRUHash))
+	require.Equal(t, uint32(BPF_F_NO_PREALLOC), GetMapMemoryFlags(ebpf.LPMTrie))
+	require.Equal(t, uint32(0), GetMapMemoryFlags(ebpf.Array))
 	DisableMapPreAllocation()
-}
 
-func (s *BPFTestSuite) TestPreallocationFlags(c *C) {
-	for m := MapType(0); m < MapTypeMaximum; m++ {
-		c.Assert(m.allowsPreallocation() || !m.requiresPreallocation(), Equals, true)
-	}
+	EnableMapDistributedLRU()
+	require.Equal(t, uint32(BPF_F_NO_PREALLOC), GetMapMemoryFlags(ebpf.Hash))
+	require.Equal(t, uint32(BPF_F_NO_COMMON_LRU), GetMapMemoryFlags(ebpf.LRUHash))
+	require.Equal(t, uint32(BPF_F_NO_PREALLOC), GetMapMemoryFlags(ebpf.LPMTrie))
+	require.Equal(t, uint32(0), GetMapMemoryFlags(ebpf.Array))
+	DisableMapDistributedLRU()
 }

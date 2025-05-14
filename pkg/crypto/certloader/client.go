@@ -4,10 +4,11 @@
 package certloader
 
 import (
+	"context"
 	"crypto/tls"
-	"fmt"
+	"log/slog"
 
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 // ClientConfigBuilder creates tls.Config to be used as TLS client.
@@ -20,14 +21,14 @@ type ClientConfigBuilder interface {
 // watched for changes.
 type WatchedClientConfig struct {
 	*Watcher
-	log logrus.FieldLogger
+	log *slog.Logger
 }
 
 // NewWatchedClientConfig returns a WatchedClientConfig configured with the
 // provided files. When caFiles is nil or empty, the system CA CertPool is
 // used. To configure a mTLS capable ClientConfigBuilder, both certFile and
 // privkeyFile must be provided.
-func NewWatchedClientConfig(log logrus.FieldLogger, caFiles []string, certFile, privkeyFile string) (*WatchedClientConfig, error) {
+func NewWatchedClientConfig(log *slog.Logger, caFiles []string, certFile, privkeyFile string) (*WatchedClientConfig, error) {
 	w, err := NewWatcher(log, caFiles, certFile, privkeyFile)
 	if err != nil {
 		return nil, err
@@ -52,12 +53,13 @@ func (c *WatchedClientConfig) ClientConfig(base *tls.Config) *tls.Config {
 	keypair, caCertPool := c.KeypairAndCACertPool()
 	tlsConfig := base.Clone()
 	tlsConfig.RootCAs = caCertPool
-	tlsConfig.GetClientCertificate = func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
-		if !c.IsMutualTLS() {
-			return nil, fmt.Errorf("mTLS client certificate requested, but not configured")
+	if c.IsMutualTLS() {
+		tlsConfig.GetClientCertificate = func(_ *tls.CertificateRequestInfo) (*tls.Certificate, error) {
+			if c.log.Enabled(context.Background(), slog.LevelDebug) {
+				c.log.Debug("Client mtls handshake", logfields.KeyPairSN, keypairId(keypair))
+			}
+			return keypair, nil
 		}
-		c.log.WithField("keypair-sn", keypairId(keypair)).Debugf("Client mtls handshake")
-		return keypair, nil
 	}
 
 	return tlsConfig

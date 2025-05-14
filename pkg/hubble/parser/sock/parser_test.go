@@ -12,15 +12,15 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/sirupsen/logrus"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/cilium/cilium/pkg/byteorder"
 	cgroupManager "github.com/cilium/cilium/pkg/cgroups/manager"
-	"github.com/cilium/cilium/pkg/checker"
-	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
 	parserErrors "github.com/cilium/cilium/pkg/hubble/parser/errors"
+	"github.com/cilium/cilium/pkg/hubble/parser/getters"
 	"github.com/cilium/cilium/pkg/hubble/testutils"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/ipcache"
@@ -76,7 +76,7 @@ func TestDecodeSockEvent(t *testing.T) {
 	)
 
 	endpointGetter := &testutils.FakeEndpointGetter{
-		OnGetEndpointInfo: func(ip netip.Addr) (endpoint v1.EndpointInfo, ok bool) {
+		OnGetEndpointInfo: func(ip netip.Addr) (endpoint getters.EndpointInfo, ok bool) {
 			switch ip.String() {
 			case xwingIPv4, xwingIPv6:
 				return &testutils.FakeEndpointInfo{
@@ -399,8 +399,8 @@ func TestDecodeSockEvent(t *testing.T) {
 		},
 	}
 
-	p, err := New(logrus.New(), endpointGetter, identityGetter, dnsGetter, ipGetter, serviceGetter, cgroupGetter)
-	assert.Nil(t, err)
+	p, err := New(hivetest.Logger(t), endpointGetter, identityGetter, dnsGetter, ipGetter, serviceGetter, cgroupGetter, false)
+	assert.NoError(t, err)
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
@@ -409,7 +409,7 @@ func TestDecodeSockEvent(t *testing.T) {
 			if data == nil {
 				buf := &bytes.Buffer{}
 				err := binary.Write(buf, byteorder.Native, &tc.msg)
-				assert.Nil(t, err)
+				assert.NoError(t, err)
 				data = buf.Bytes()
 			}
 			flow := &flowpb.Flow{}
@@ -417,9 +417,8 @@ func TestDecodeSockEvent(t *testing.T) {
 			if tc.errMsg != "" {
 				assert.ErrorContains(t, err, tc.errMsg)
 			} else {
-				assert.Nil(t, err)
-				ok, msg := checker.DeepEqual(flow, tc.flow)
-				assert.True(t, ok, msg)
+				assert.NoError(t, err)
+				require.Equal(t, tc.flow, flow)
 			}
 		})
 	}

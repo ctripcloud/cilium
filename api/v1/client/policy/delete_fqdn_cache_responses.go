@@ -9,6 +9,7 @@ package policy
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -38,8 +39,14 @@ func (o *DeleteFqdnCacheReader) ReadResponse(response runtime.ClientResponse, co
 			return nil, err
 		}
 		return nil, result
+	case 403:
+		result := NewDeleteFqdnCacheForbidden()
+		if err := result.readResponse(response, consumer, o.formats); err != nil {
+			return nil, err
+		}
+		return nil, result
 	default:
-		return nil, runtime.NewAPIError("response status code does not match any response statuses defined for this endpoint in the swagger spec", response, response.Code())
+		return nil, runtime.NewAPIError("[DELETE /fqdn/cache] DeleteFqdnCache", response, response.Code())
 	}
 }
 
@@ -81,12 +88,17 @@ func (o *DeleteFqdnCacheOK) IsCode(code int) bool {
 	return code == 200
 }
 
+// Code gets the status code for the delete fqdn cache o k response
+func (o *DeleteFqdnCacheOK) Code() int {
+	return 200
+}
+
 func (o *DeleteFqdnCacheOK) Error() string {
-	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheOK ", 200)
+	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheOK", 200)
 }
 
 func (o *DeleteFqdnCacheOK) String() string {
-	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheOK ", 200)
+	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheOK", 200)
 }
 
 func (o *DeleteFqdnCacheOK) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
@@ -133,12 +145,19 @@ func (o *DeleteFqdnCacheBadRequest) IsCode(code int) bool {
 	return code == 400
 }
 
+// Code gets the status code for the delete fqdn cache bad request response
+func (o *DeleteFqdnCacheBadRequest) Code() int {
+	return 400
+}
+
 func (o *DeleteFqdnCacheBadRequest) Error() string {
-	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheBadRequest  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheBadRequest %s", 400, payload)
 }
 
 func (o *DeleteFqdnCacheBadRequest) String() string {
-	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheBadRequest  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheBadRequest %s", 400, payload)
 }
 
 func (o *DeleteFqdnCacheBadRequest) GetPayload() models.Error {
@@ -151,6 +170,62 @@ func (o *DeleteFqdnCacheBadRequest) readResponse(response runtime.ClientResponse
 	if err := consumer.Consume(response.Body(), &o.Payload); err != nil && err != io.EOF {
 		return err
 	}
+
+	return nil
+}
+
+// NewDeleteFqdnCacheForbidden creates a DeleteFqdnCacheForbidden with default headers values
+func NewDeleteFqdnCacheForbidden() *DeleteFqdnCacheForbidden {
+	return &DeleteFqdnCacheForbidden{}
+}
+
+/*
+DeleteFqdnCacheForbidden describes a response with status code 403, with default header values.
+
+Forbidden
+*/
+type DeleteFqdnCacheForbidden struct {
+}
+
+// IsSuccess returns true when this delete fqdn cache forbidden response has a 2xx status code
+func (o *DeleteFqdnCacheForbidden) IsSuccess() bool {
+	return false
+}
+
+// IsRedirect returns true when this delete fqdn cache forbidden response has a 3xx status code
+func (o *DeleteFqdnCacheForbidden) IsRedirect() bool {
+	return false
+}
+
+// IsClientError returns true when this delete fqdn cache forbidden response has a 4xx status code
+func (o *DeleteFqdnCacheForbidden) IsClientError() bool {
+	return true
+}
+
+// IsServerError returns true when this delete fqdn cache forbidden response has a 5xx status code
+func (o *DeleteFqdnCacheForbidden) IsServerError() bool {
+	return false
+}
+
+// IsCode returns true when this delete fqdn cache forbidden response a status code equal to that given
+func (o *DeleteFqdnCacheForbidden) IsCode(code int) bool {
+	return code == 403
+}
+
+// Code gets the status code for the delete fqdn cache forbidden response
+func (o *DeleteFqdnCacheForbidden) Code() int {
+	return 403
+}
+
+func (o *DeleteFqdnCacheForbidden) Error() string {
+	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheForbidden", 403)
+}
+
+func (o *DeleteFqdnCacheForbidden) String() string {
+	return fmt.Sprintf("[DELETE /fqdn/cache][%d] deleteFqdnCacheForbidden", 403)
+}
+
+func (o *DeleteFqdnCacheForbidden) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	return nil
 }

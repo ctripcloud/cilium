@@ -190,6 +190,42 @@ func TestLabelSelectorFilter(t *testing.T) {
 			},
 		},
 		{
+			name: "node label filter",
+			args: args{
+				f: []*flowpb.FlowFilter{
+					{
+						NodeLabels: []string{"src1, src2=val2"},
+					},
+				},
+				ev: []*v1.Event{
+					{
+						Event: &flowpb.Flow{
+							NodeLabels: []string{"src1", "src2=val2"},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"src1", "src2=val2"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Destination: &flowpb.Endpoint{
+								Labels: []string{"src1", "src2=val2"},
+							},
+						},
+					},
+				},
+			},
+			want: []bool{
+				true,
+				false,
+				false,
+			},
+		},
+		{
 			name: "source and destination label filter",
 			args: args{
 				f: []*flowpb.FlowFilter{
@@ -338,6 +374,52 @@ func TestLabelSelectorFilter(t *testing.T) {
 			},
 		},
 		{
+			name: "cilium fixed prefix not filter",
+			args: args{
+				f: []*flowpb.FlowFilter{
+					{
+						SourceLabel: []string{"!k8s:app"},
+					},
+				},
+				ev: []*v1.Event{
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"k8s:app=bar"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"k8s:app=baz"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"k8s.app=bar"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"container:foo=bar", "reserved:host"},
+							},
+						},
+					},
+				},
+			},
+			want: []bool{
+				false,
+				false,
+				true,
+				true,
+			},
+		},
+		{
 			name: "cilium any prefix filters",
 			args: args{
 				f: []*flowpb.FlowFilter{
@@ -376,6 +458,90 @@ func TestLabelSelectorFilter(t *testing.T) {
 			},
 		},
 		{
+			name: "cilium no prefix filters",
+			args: args{
+				f: []*flowpb.FlowFilter{
+					{
+						SourceLabel: []string{"key"},
+					},
+				},
+				ev: []*v1.Event{
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"key"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"reserved:key"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"any.key"},
+							},
+						},
+					},
+				},
+			},
+			want: []bool{
+				true,
+				true,
+				false,
+			},
+		},
+		{
+			name: "cilium k8s label with dot",
+			args: args{
+				f: []*flowpb.FlowFilter{
+					{
+						SourceLabel: []string{"key.with.dot"},
+					},
+				},
+				ev: []*v1.Event{
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"k8s:key.with.dot"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"reserved:key.with.dot"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"any.key.with.dot"},
+							},
+						},
+					},
+					{
+						Event: &flowpb.Flow{
+							Source: &flowpb.Endpoint{
+								Labels: []string{"key:with.dot"},
+							},
+						},
+					},
+				},
+			},
+			want: []bool{
+				true,
+				true,
+				false,
+				false,
+			},
+		},
+		{
 			name: "invalid source filter",
 			args: args{
 				f: []*flowpb.FlowFilter{
@@ -392,6 +558,17 @@ func TestLabelSelectorFilter(t *testing.T) {
 				f: []*flowpb.FlowFilter{
 					{
 						DestinationLabel: []string{"="},
+					},
+				},
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid node filter",
+			args: args{
+				f: []*flowpb.FlowFilter{
+					{
+						NodeLabels: []string{"!"},
 					},
 				},
 			},
@@ -432,7 +609,14 @@ func Test_parseSelector(t *testing.T) {
 			args: args{
 				selector: "bar=baz,k8s:app=hubble,reserved:world",
 			},
-			want: "bar=baz,k8s.app=hubble,reserved.world",
+			want: "any.bar=baz,k8s.app=hubble,reserved.world",
+		},
+		{
+			name: "not label",
+			args: args{
+				selector: "!k8s:app",
+			},
+			want: "!k8s.app",
 		},
 		{
 			name: "complex labels",
@@ -440,6 +624,14 @@ func Test_parseSelector(t *testing.T) {
 				selector: "any:dash-label.com,k8s:io.cilium in (is-awesome,rocks)",
 			},
 			want: "any.dash-label.com,k8s.io.cilium in (is-awesome,rocks)",
+		},
+		{
+			name: "more complex labels",
+			args: args{
+				selector: "any:dash-label.com,k8s:io.cilium in (is-awesome, andsoon, rocks), !foobar, io.cilium notin (), test:label.com/foobar",
+			},
+			// NOTE: re-ordering and whitespace trimming is due to k8sLabels.Parse()
+			want: "any.dash-label.com,!any.foobar,any.io.cilium notin (),k8s.io.cilium in (andsoon,is-awesome,rocks),test.label.com/foobar",
 		},
 		{
 			name: "too many colons",
@@ -457,7 +649,7 @@ func Test_parseSelector(t *testing.T) {
 				return
 			}
 			if !tt.wantErr && !reflect.DeepEqual(got.String(), tt.want) {
-				t.Errorf("parseSelector() = %v, want %v", got, tt.want)
+				t.Errorf("parseSelector() = %q, want %q", got, tt.want)
 			}
 		})
 	}

@@ -8,19 +8,31 @@ import (
 	"strings"
 	"testing"
 
-	flowpb "github.com/cilium/cilium/api/v1/flow"
-	"github.com/cilium/cilium/pkg/hubble/metrics/api"
-	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
-
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/protobuf/types/known/wrapperspb"
+
+	flowpb "github.com/cilium/cilium/api/v1/flow"
+	"github.com/cilium/cilium/pkg/hubble/metrics/api"
+	monitorAPI "github.com/cilium/cilium/pkg/monitor/api"
 )
 
 func TestFlowsToWorldHandler_MatchingFlow(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	opts := api.Options{"sourceContext": "namespace", "destinationContext": "dns|ip"}
+	opts := &api.MetricConfig{
+		ContextOptionConfigs: []*api.ContextOptionConfig{
+			{
+				Name:   "sourceContext",
+				Values: []string{"namespace"},
+			},
+			{
+				Name:   "destinationContext",
+				Values: []string{"dns", "ip"},
+			},
+		},
+	}
+
 	h := &flowsToWorldHandler{}
 	assert.NoError(t, h.Init(registry, opts))
 	assert.NoError(t, testutil.CollectAndCompare(h.flowsToWorld, strings.NewReader("")))
@@ -65,7 +77,18 @@ hubble_flows_to_world_total{destination="cilium.io",protocol="TCP",source="src-a
 
 func TestFlowsToWorldHandler_NonMatchingFlows(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	opts := api.Options{"sourceContext": "namespace", "destinationContext": "dns|ip"}
+	opts := &api.MetricConfig{
+		ContextOptionConfigs: []*api.ContextOptionConfig{
+			{
+				Name:   "sourceContext",
+				Values: []string{"namespace"},
+			},
+			{
+				Name:   "destinationContext",
+				Values: []string{"dns", "ip"},
+			},
+		},
+	}
 	h := &flowsToWorldHandler{}
 	assert.NoError(t, h.Init(registry, opts))
 
@@ -140,7 +163,22 @@ func TestFlowsToWorldHandler_NonMatchingFlows(t *testing.T) {
 
 func TestFlowsToWorldHandler_AnyDrop(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	opts := api.Options{"sourceContext": "namespace", "destinationContext": "dns|ip", "any-drop": ""}
+	opts := &api.MetricConfig{
+		ContextOptionConfigs: []*api.ContextOptionConfig{
+			{
+				Name:   "sourceContext",
+				Values: []string{"namespace"},
+			},
+			{
+				Name:   "destinationContext",
+				Values: []string{"dns", "ip"},
+			},
+			{
+				Name:   "any-drop",
+				Values: []string{""},
+			},
+		},
+	}
 	h := &flowsToWorldHandler{}
 	assert.NoError(t, h.Init(registry, opts))
 	assert.NoError(t, testutil.CollectAndCompare(h.flowsToWorld, strings.NewReader("")))
@@ -169,7 +207,22 @@ hubble_flows_to_world_total{destination="cilium.io",protocol="TCP",source="src-a
 
 func TestFlowsToWorldHandler_IncludePort(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	opts := api.Options{"sourceContext": "namespace", "destinationContext": "dns|ip", "port": ""}
+	opts := &api.MetricConfig{
+		ContextOptionConfigs: []*api.ContextOptionConfig{
+			{
+				Name:   "sourceContext",
+				Values: []string{"namespace"},
+			},
+			{
+				Name:   "destinationContext",
+				Values: []string{"dns", "ip"},
+			},
+			{
+				Name:   "port",
+				Values: []string{""},
+			},
+		},
+	}
 	h := &flowsToWorldHandler{}
 	assert.NoError(t, h.Init(registry, opts))
 	assert.NoError(t, testutil.CollectAndCompare(h.flowsToWorld, strings.NewReader("")))
@@ -212,7 +265,22 @@ hubble_flows_to_world_total{destination="cilium.io",port="53",protocol="UDP",sou
 
 func TestFlowsToWorldHandler_SynOnly(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	opts := api.Options{"sourceContext": "namespace", "destinationContext": "dns|ip", "syn-only": ""}
+	opts := &api.MetricConfig{
+		ContextOptionConfigs: []*api.ContextOptionConfig{
+			{
+				Name:   "sourceContext",
+				Values: []string{"namespace"},
+			},
+			{
+				Name:   "destinationContext",
+				Values: []string{"dns", "ip"},
+			},
+			{
+				Name:   "syn-only",
+				Values: []string{""},
+			},
+		},
+	}
 	h := &flowsToWorldHandler{}
 	assert.NoError(t, h.Init(registry, opts))
 	assert.NoError(t, testutil.CollectAndCompare(h.flowsToWorld, strings.NewReader("")))

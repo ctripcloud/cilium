@@ -73,17 +73,20 @@ type CreateLaunchTemplateRequest struct {
 	*requests.RpcRequest
 	LaunchTemplateName             string                                  `position:"Query" name:"LaunchTemplateName"`
 	ResourceOwnerId                requests.Integer                        `position:"Query" name:"ResourceOwnerId"`
+	HttpPutResponseHopLimit        requests.Integer                        `position:"Query" name:"HttpPutResponseHopLimit"`
 	SecurityEnhancementStrategy    string                                  `position:"Query" name:"SecurityEnhancementStrategy"`
 	NetworkType                    string                                  `position:"Query" name:"NetworkType"`
 	KeyPairName                    string                                  `position:"Query" name:"KeyPairName"`
 	SpotPriceLimit                 requests.Float                          `position:"Query" name:"SpotPriceLimit"`
 	ImageOwnerAlias                string                                  `position:"Query" name:"ImageOwnerAlias"`
+	DeletionProtection             requests.Boolean                        `position:"Query" name:"DeletionProtection"`
 	ResourceGroupId                string                                  `position:"Query" name:"ResourceGroupId"`
 	HostName                       string                                  `position:"Query" name:"HostName"`
 	SystemDiskIops                 requests.Integer                        `position:"Query" name:"SystemDisk.Iops"`
 	TemplateTag                    *[]CreateLaunchTemplateTemplateTag      `position:"Query" name:"TemplateTag"  type:"Repeated"`
 	Tag                            *[]CreateLaunchTemplateTag              `position:"Query" name:"Tag"  type:"Repeated"`
 	SystemDiskAutoSnapshotPolicyId string                                  `position:"Query" name:"SystemDisk.AutoSnapshotPolicyId"`
+	AutoRenewPeriod                requests.Integer                        `position:"Query" name:"AutoRenewPeriod"`
 	Period                         requests.Integer                        `position:"Query" name:"Period"`
 	Ipv6AddressCount               requests.Integer                        `position:"Query" name:"Ipv6AddressCount"`
 	TemplateResourceGroupId        string                                  `position:"Query" name:"TemplateResourceGroupId"`
@@ -92,7 +95,9 @@ type CreateLaunchTemplateRequest struct {
 	SpotStrategy                   string                                  `position:"Query" name:"SpotStrategy"`
 	PrivateIpAddress               string                                  `position:"Query" name:"PrivateIpAddress"`
 	SystemDiskBurstingEnabled      requests.Boolean                        `position:"Query" name:"SystemDisk.BurstingEnabled"`
+	PeriodUnit                     string                                  `position:"Query" name:"PeriodUnit"`
 	InstanceName                   string                                  `position:"Query" name:"InstanceName"`
+	AutoRenew                      requests.Boolean                        `position:"Query" name:"AutoRenew"`
 	InternetChargeType             string                                  `position:"Query" name:"InternetChargeType"`
 	ZoneId                         string                                  `position:"Query" name:"ZoneId"`
 	InternetMaxBandwidthIn         requests.Integer                        `position:"Query" name:"InternetMaxBandwidthIn"`
@@ -107,6 +112,7 @@ type CreateLaunchTemplateRequest struct {
 	SystemDiskPerformanceLevel     string                                  `position:"Query" name:"SystemDisk.PerformanceLevel"`
 	UserData                       string                                  `position:"Query" name:"UserData"`
 	PasswordInherit                requests.Boolean                        `position:"Query" name:"PasswordInherit"`
+	HttpEndpoint                   string                                  `position:"Query" name:"HttpEndpoint"`
 	InstanceType                   string                                  `position:"Query" name:"InstanceType"`
 	InstanceChargeType             string                                  `position:"Query" name:"InstanceChargeType"`
 	EnableVmOsConfig               requests.Boolean                        `position:"Query" name:"EnableVmOsConfig"`
@@ -117,12 +123,14 @@ type CreateLaunchTemplateRequest struct {
 	SystemDiskDiskName             string                                  `position:"Query" name:"SystemDisk.DiskName"`
 	RamRoleName                    string                                  `position:"Query" name:"RamRoleName"`
 	AutoReleaseTime                string                                  `position:"Query" name:"AutoReleaseTime"`
+	CreditSpecification            string                                  `position:"Query" name:"CreditSpecification"`
 	SpotDuration                   requests.Integer                        `position:"Query" name:"SpotDuration"`
 	SecurityGroupIds               *[]string                               `position:"Query" name:"SecurityGroupIds"  type:"Repeated"`
 	DataDisk                       *[]CreateLaunchTemplateDataDisk         `position:"Query" name:"DataDisk"  type:"Repeated"`
 	SystemDiskProvisionedIops      requests.Integer                        `position:"Query" name:"SystemDisk.ProvisionedIops"`
 	SystemDiskSize                 requests.Integer                        `position:"Query" name:"SystemDisk.Size"`
 	VpcId                          string                                  `position:"Query" name:"VpcId"`
+	HttpTokens                     string                                  `position:"Query" name:"HttpTokens"`
 	SystemDiskDescription          string                                  `position:"Query" name:"SystemDisk.Description"`
 	SystemDiskEncrypted            string                                  `position:"Query" name:"SystemDisk.Encrypted"`
 }
@@ -149,6 +157,7 @@ type CreateLaunchTemplateNetworkInterface struct {
 	SecurityGroupIds            *[]string `name:"SecurityGroupIds" type:"Repeated"`
 	InstanceType                string    `name:"InstanceType"`
 	NetworkInterfaceTrafficMode string    `name:"NetworkInterfaceTrafficMode"`
+	DeleteOnRelease             string    `name:"DeleteOnRelease"`
 }
 
 // CreateLaunchTemplateDataDisk is a repeated param struct in CreateLaunchTemplateRequest
@@ -170,8 +179,9 @@ type CreateLaunchTemplateDataDisk struct {
 // CreateLaunchTemplateResponse is the response struct for api CreateLaunchTemplate
 type CreateLaunchTemplateResponse struct {
 	*responses.BaseResponse
-	LaunchTemplateId string `json:"LaunchTemplateId" xml:"LaunchTemplateId"`
-	RequestId        string `json:"RequestId" xml:"RequestId"`
+	LaunchTemplateId            string `json:"LaunchTemplateId" xml:"LaunchTemplateId"`
+	RequestId                   string `json:"RequestId" xml:"RequestId"`
+	LaunchTemplateVersionNumber int64  `json:"LaunchTemplateVersionNumber" xml:"LaunchTemplateVersionNumber"`
 }
 
 // CreateCreateLaunchTemplateRequest creates a request to invoke CreateLaunchTemplate API

@@ -4,19 +4,15 @@
 package api
 
 import (
+	"context"
 	"fmt"
+	"slices"
 	"strings"
 )
 
 // Exists returns true if the HTTP rule already exists in the list of rules
 func (h *PortRuleHTTP) Exists(rules L7Rules) bool {
-	for _, existingRule := range rules.HTTP {
-		if h.Equal(existingRule) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(rules.HTTP, h.Equal)
 }
 
 // Equal returns true if both HTTP rules are equal
@@ -61,24 +57,12 @@ func (h *HeaderMatch) Equal(o *HeaderMatch) bool {
 
 // Exists returns true if the DNS rule already exists in the list of rules
 func (d *PortRuleDNS) Exists(rules L7Rules) bool {
-	for _, existingRule := range rules.DNS {
-		if d.Equal(existingRule) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(rules.DNS, d.Equal)
 }
 
 // Exists returns true if the L7 rule already exists in the list of rules
 func (h *PortRuleL7) Exists(rules L7Rules) bool {
-	for _, existingRule := range rules.L7 {
-		if h.Equal(existingRule) {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(rules.L7, h.Equal)
 }
 
 // Equal returns true if both rules are equal
@@ -124,20 +108,73 @@ func ParseL4Proto(proto string) (L4Proto, error) {
 // prepending CEC namespace and CEC name to the resource name and using
 // '/' as a separator.
 //
-// In case of an empty CEC namespace or an empty CEC name, leading separators
-// are stripped away.
-func ResourceQualifiedName(namespace, name, resource string) string {
+// If resourceName already has a slash, it must be of the form 'namespace/name', where namespace
+// usually is equal to 'namespace'. This also applies for clusterwide resources for which
+// 'namespace' is empty.
+//
+// If 'resourceName' has no slash, it will be prepended with 'namespace/cecName' so that the
+// full name passed to Envoy is 'namespace/cecName/resourceName'. This makes non-qualified resource
+// names and resource name references local to the given namespace and CiliumEnvoyConfig CRD.
+//
+// if 'forceNamespace' is 'true' then resourceName is always prepended with "namespace/cecName/",
+// even it it already has backslashes, unless the first component of the name is equal to
+// 'namespace'.
+//
+// As a special case pass through an empty resourceName without qualification so that unnamed
+// resources do not become named. This is important to not transform an invalid Envoy configuration
+// to a valid one with a fake name.
+
+type Option int
+
+const (
+	ForceNamespace Option = iota
+)
+
+func ResourceQualifiedName(namespace, cecName, resourceName string, options ...Option) (name string, updated bool) {
+	forceNamespace := false
+	for _, option := range options {
+		switch option {
+		case ForceNamespace:
+			forceNamespace = true
+		}
+	}
+
+	idx := strings.IndexRune(resourceName, '/')
+	if resourceName == "" || idx >= 0 && (!forceNamespace || (idx == len(namespace) && strings.HasPrefix(resourceName, namespace))) {
+		return resourceName, false
+	}
+
 	var sb strings.Builder
 
-	if namespace != "" {
-		sb.WriteString(namespace)
-		sb.WriteRune('/')
-	}
-	if name != "" {
-		sb.WriteString(name)
-		sb.WriteRune('/')
-	}
-	sb.WriteString(resource)
+	sb.WriteString(namespace)
+	sb.WriteRune('/')
+	sb.WriteString(cecName)
+	sb.WriteRune('/')
+	sb.WriteString(resourceName)
 
-	return sb.String()
+	return sb.String(), true
+}
+
+// ParseQualifiedName returns the namespace, name, and the resource name of a name qualified with ResourceQualifiedName()
+func ParseQualifiedName(qualifiedName string) (namespace, name, resourceName string) {
+	parts := strings.SplitN(qualifiedName, "/", 3)
+	if len(parts) < 3 {
+		return "", "", qualifiedName
+	}
+	return parts[0], parts[1], parts[2]
+}
+
+// ExtractCidrSet abstracts away some of the logic from the CreateDerivative methods
+func ExtractCidrSet(ctx context.Context, groups []Groups) ([]CIDRRule, error) {
+	var cidrSet []CIDRRule
+	for _, group := range groups {
+		c, err := group.GetCidrSet(ctx)
+		if err != nil {
+			return cidrSet, err
+		}
+		if len(c) > 0 {
+			cidrSet = append(cidrSet, c...)
+		}
+	}
+	return cidrSet, nil
 }

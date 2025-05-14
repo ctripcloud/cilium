@@ -23,12 +23,16 @@ package socketlb
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
 	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/link"
 	"golang.org/x/sys/unix"
+
+	"github.com/cilium/cilium/pkg/bpf"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 var attachTypes = map[string]ebpf.AttachType{
@@ -51,19 +55,25 @@ var attachTypes = map[string]ebpf.AttachType{
 //
 // Upgrades from prior Cilium versions will continue to be handled by a PROG_ATTACH
 // to replace an old program attached to a cgroup.
-func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error {
+func attachCgroup(logger *slog.Logger, spec *ebpf.Collection, name, cgroupRoot, pinPath string) error {
 	prog := spec.Programs[name]
 	if prog == nil {
 		return fmt.Errorf("program %s not found in ELF", name)
 	}
 
+	scopedLog := logger.With(
+		logfields.Name, name,
+	)
+
 	// Attempt to open and update an existing link.
 	pin := filepath.Join(pinPath, name)
-	err := updateLink(pin, prog)
+	err := bpf.UpdateLink(pin, prog)
 	switch {
 	// Update successful, nothing left to do.
 	case err == nil:
-		log.Infof("Updated link %s for program %s", pin, name)
+		scopedLog.Info("Updated link for program",
+			logfields.Pin, pin,
+		)
 
 		return nil
 
@@ -77,11 +87,15 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 			return fmt.Errorf("unpinning defunct link %s: %w", pin, err)
 		}
 
-		log.Infof("Unpinned defunct link %s for program %s", pin, name)
+		scopedLog.Info("Unpinned defunct link for program",
+			logfields.Pin, pin,
+		)
 
 	// No existing link found, continue trying to create one.
 	case errors.Is(err, os.ErrNotExist):
-		log.Infof("No existing link found at %s for program %s", pin, name)
+		scopedLog.Info("No existing link found for program",
+			logfields.Pin, pin,
+		)
 
 	default:
 		return fmt.Errorf("updating link %s for program %s: %w", pin, name, err)
@@ -105,7 +119,7 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 			// The program was successfully attached using bpf_link. Closing a link
 			// does not detach the program if the link is pinned.
 			if err := l.Close(); err != nil {
-				log.Warnf("Failed to close bpf_link for program %s", name)
+				scopedLog.Warn("Failed to close bpf_link for program")
 			}
 		}()
 
@@ -114,7 +128,7 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 		}
 
 		// Successfully created and pinned bpf_link.
-		log.Debugf("Program %s attached using bpf_link", name)
+		scopedLog.Debug("Program attached using bpf_link")
 
 		return nil
 	}
@@ -130,7 +144,7 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 		return fmt.Errorf("attach program %s using bpf_link: %w", name, err)
 	}
 
-	log.Debugf("Performing PROG_ATTACH for program %s", name)
+	scopedLog.Debug("Performing PROG_ATTACH for program")
 
 	// Call PROG_ATTACH without flags to attach the program if bpf_link is not
 	// available or a previous PROG_ATTACH without flags has to be seamlessly
@@ -146,48 +160,30 @@ func attachCgroup(spec *ebpf.Collection, name, cgroupRoot, pinPath string) error
 	// Nothing left to do, the cgroup now holds a reference to the prog
 	// so we don't need to hold a reference in the agent/bpffs to ensure
 	// the program stays active.
-	log.Debugf("Program %s was attached using PROG_ATTACH", name)
+	scopedLog.Debug("Program was attached using PROG_ATTACH")
 
 	return nil
 
-}
-
-// updateLink opens a link at the given pin path and updates its program.
-func updateLink(pin string, prog *ebpf.Program) error {
-	l, err := link.LoadPinnedLink(pin, &ebpf.LoadPinOptions{})
-	if err != nil {
-		return fmt.Errorf("opening pinned link %s: %w", pin, err)
-	}
-	defer l.Close()
-
-	// Attempt to update the link. This can fail if the link is defunct (the
-	// cgroup it points to no longer exists).
-	if err = l.Update(prog); err != nil {
-		return fmt.Errorf("update link %s: %w", pin, err)
-	}
-
-	return nil
 }
 
 // detachCgroup detaches a program with the given name from cgroupRoot. Attempts
 // to open a pinned link with the given name from directory pinPath first,
 // falling back to PROG_DETACH if no pin is present.
-func detachCgroup(name, cgroupRoot, pinPath string) error {
+func detachCgroup(logger *slog.Logger, name, cgroupRoot, pinPath string) error {
 	pin := filepath.Join(pinPath, name)
-	l, err := link.LoadPinnedLink(pin, &ebpf.LoadPinOptions{})
+	err := bpf.UnpinLink(pin)
 	if err == nil {
-		if err := l.Unpin(); err != nil {
-			return fmt.Errorf("unpin link %s: %w", pin, err)
-		}
-		if err := l.Close(); err != nil {
-			return fmt.Errorf("close link %s: %w", name, err)
-		}
 		return nil
 	}
 
+	if !errors.Is(err, os.ErrNotExist) {
+		// The pinned link exists, something went wrong unpinning it.
+		return fmt.Errorf("unpinning cgroup program using bpf_link: %w", err)
+	}
+
 	// No bpf_link pin found, detach all prog_attach progs.
-	log.Debugf("No pinned link '%s', querying cgroup", pin)
-	err = detachAll(attachTypes[name], cgroupRoot)
+	logger.Debug("No pinned link, querying cgroup", logfields.Pin, pin)
+	err = detachAll(logger, attachTypes[name], cgroupRoot)
 	// Treat detaching unsupported attach types as successful.
 	if errors.Is(err, link.ErrNotSupported) {
 		return nil
@@ -196,37 +192,45 @@ func detachCgroup(name, cgroupRoot, pinPath string) error {
 }
 
 // detachAll detaches all programs attached to cgroupRoot with the corresponding attach type.
-func detachAll(attach ebpf.AttachType, cgroupRoot string) error {
+func detachAll(logger *slog.Logger, attach ebpf.AttachType, cgroupRoot string) error {
+	cg, err := os.Open(cgroupRoot)
+	if err != nil {
+		return fmt.Errorf("open cgroup %s: %w", cgroupRoot, err)
+	}
+	defer cg.Close()
+
 	// Query the program ids of all programs currently attached to the given cgroup
 	// with the given attach type. In ciliums case this should always return only one id.
 	ids, err := link.QueryPrograms(link.QueryOptions{
-		Path:   cgroupRoot,
+		Target: int(cg.Fd()),
 		Attach: attach,
 	})
 	// We know the cgroup root exists, so EINVAL will likely mean querying
 	// the given attach type is not supported.
 	if errors.Is(err, unix.EINVAL) {
-		err = fmt.Errorf("%s: %w", err, link.ErrNotSupported)
+		err = fmt.Errorf("%w: %w", err, link.ErrNotSupported)
+	}
+	// Even though the cgroup exists, QueryPrograms will return EBADF
+	// on a cgroupv1.
+	if errors.Is(err, unix.EBADF) {
+		logger.Debug("The cgroup exists but is a cgroupv1. No detachment necessary")
+		return nil
 	}
 	if err != nil {
 		return fmt.Errorf("query cgroup %s for type %s: %w", cgroupRoot, attach, err)
 	}
-
-	if len(ids) == 0 {
-		log.Debugf("No programs in cgroup %s with attach type %s", cgroupRoot, attach)
+	if ids == nil || len(ids.Programs) == 0 {
+		logger.Debug("No programs in cgroup with attach type",
+			logfields.Root, cgroupRoot,
+			logfields.Type, attach,
+		)
 		return nil
 	}
 
-	cg, err := os.Open(cgroupRoot)
-	if err != nil {
-		return fmt.Errorf("open cgroup %s: %w", cg.Name(), err)
-	}
-	defer cg.Close()
-
 	// cilium owns the cgroup and assumes only one program is attached.
 	// This allows to remove all ids returned in the query phase.
-	for _, id := range ids {
-		prog, err := ebpf.NewProgramFromID(id)
+	for _, id := range ids.Programs {
+		prog, err := ebpf.NewProgramFromID(id.ID)
 		if err != nil {
 			return fmt.Errorf("could not open program id %d: %w", id, err)
 		}
@@ -240,7 +244,9 @@ func detachAll(attach ebpf.AttachType, cgroupRoot string) error {
 			return fmt.Errorf("detach programs from cgroup %s attach type %s: %w", cgroupRoot, attach, err)
 		}
 
-		log.Debugf("Detached program id %d", id)
+		logger.Debug("Detached program id",
+			logfields.ID, id,
+		)
 	}
 
 	return nil

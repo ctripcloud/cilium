@@ -6,81 +6,112 @@ package limits
 import (
 	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
-	"github.com/cilium/cilium/operator/option"
+	ec2_types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
+	"github.com/cilium/hive/hivetest"
+
+	ec2mock "github.com/cilium/cilium/pkg/aws/ec2/mock"
+	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-func Test(t *testing.T) {
-	check.TestingT(t)
+const (
+	testTriggerMinInterval = time.Second
+	testEC2apiTimeout      = time.Second
+	testEC2apiRetryCount   = 2
+)
+
+var api *ec2mock.API
+
+func TestGet(t *testing.T) {
+	api = ec2mock.NewAPI(nil, nil, nil, nil)
+	api.UpdateInstanceTypes([]ec2_types.InstanceTypeInfo{{
+		InstanceType: "test.large",
+		NetworkInfo: &ec2_types.NetworkInfo{
+			MaximumNetworkInterfaces:  ptr.To[int32](4),
+			Ipv4AddressesPerInterface: ptr.To[int32](5),
+			Ipv6AddressesPerInterface: ptr.To[int32](6),
+		},
+		Hypervisor: ec2_types.InstanceTypeHypervisorNitro,
+	}})
+	newLimitsGetter, err := NewLimitsGetter(hivetest.Logger(t), api, testTriggerMinInterval, testEC2apiTimeout, testEC2apiRetryCount)
+	require.NoError(t, err)
+
+	// Test 1: Get unknown instance type
+	limit, ok := newLimitsGetter.Get("unknown")
+	require.False(t, ok)
+	require.Equal(t, ipamTypes.Limits{}, limit)
+	// Test 2: Get Known instance type
+	limit, ok = newLimitsGetter.Get("test.large")
+	require.True(t, ok)
+	require.Equal(t, ipamTypes.Limits{
+		Adapters:       4,
+		IPv4:           5,
+		IPv6:           6,
+		HypervisorType: "nitro",
+	}, limit)
+
+	// Test 3: EC2 API call and update limits but trigger can't be triggered
+	api.UpdateInstanceTypes([]ec2_types.InstanceTypeInfo{{
+		InstanceType: "newtype",
+		NetworkInfo: &ec2_types.NetworkInfo{
+			MaximumNetworkInterfaces:  ptr.To[int32](4),
+			Ipv4AddressesPerInterface: ptr.To[int32](15),
+			Ipv6AddressesPerInterface: ptr.To[int32](15),
+		},
+		Hypervisor: ec2_types.InstanceTypeHypervisorNitro,
+	}})
+
+	limit, ok = newLimitsGetter.Get("newtype")
+	require.False(t, ok)
+	require.Equal(t, ipamTypes.Limits{}, limit)
+	// Test 4: EC2 API call and update limits and trigger can be triggered after triggerMinInterval
+	require.Eventually(t, func() bool {
+		limit, ok = newLimitsGetter.Get("newtype")
+		return ok && limit == ipamTypes.Limits{
+			Adapters:       4,
+			IPv4:           15,
+			IPv6:           15,
+			HypervisorType: "nitro",
+		}
+	}, 2*testTriggerMinInterval, time.Millisecond)
 }
 
-type ENILimitsSuite struct{}
+func TestInitEC2APIUpdateTrigger(t *testing.T) {
+	// Setup mock API with some test instance types
+	api := ec2mock.NewAPI(nil, nil, nil, nil)
+	api.UpdateInstanceTypes([]ec2_types.InstanceTypeInfo{
+		{
+			InstanceType: "test.large",
+			NetworkInfo: &ec2_types.NetworkInfo{
+				MaximumNetworkInterfaces:  ptr.To[int32](4),
+				Ipv4AddressesPerInterface: ptr.To[int32](10),
+				Ipv6AddressesPerInterface: ptr.To[int32](10),
+			},
+			Hypervisor: ec2_types.InstanceTypeHypervisorNitro,
+		},
+	})
 
-var _ = check.Suite(&ENILimitsSuite{})
+	// Create a new LimitsGetter instance
+	limitsGetter, err := NewLimitsGetter(hivetest.Logger(t), api, testTriggerMinInterval, testEC2apiTimeout, testEC2apiRetryCount)
+	require.NotNil(t, limitsGetter)
+	require.NoError(t, err)
 
-func (e *ENILimitsSuite) TestGet(c *check.C) {
-	option.Config.AWSInstanceLimitMapping = map[string]string{"a2.custom2": "4,5,6"}
+	// Verify the fields are set correctly
+	require.Equal(t, testTriggerMinInterval, limitsGetter.triggerMinInterval)
+	require.Equal(t, testEC2apiTimeout, limitsGetter.ec2APITimeout)
+	require.Equal(t, testEC2apiRetryCount, limitsGetter.ec2APIRetryCount)
+	require.NotNil(t, limitsGetter.limitsUpdateTrigger)
 
-	_, ok := Get("unknown")
-	c.Assert(ok, check.Equals, false)
-
-	l, ok := Get("m3.large")
-	c.Assert(ok, check.Equals, true)
-	c.Assert(l.Adapters, check.Not(check.Equals), 0)
-	c.Assert(l.IPv4, check.Not(check.Equals), 0)
-	c.Assert(l.HypervisorType, check.Equals, "xen")
-
-	UpdateFromUserDefinedMappings(option.Config.AWSInstanceLimitMapping)
-	l, ok = Get("a2.custom2")
-	c.Assert(ok, check.Equals, true)
-	c.Assert(l.Adapters, check.Equals, 4)
-	c.Assert(l.IPv4, check.Equals, 5)
-	c.Assert(l.IPv6, check.Equals, 6)
-}
-
-func (e *ENILimitsSuite) TestUpdateFromUserDefinedMappings(c *check.C) {
-	m1 := map[string]string{"a1.medium": "2,4,100"}
-
-	err := UpdateFromUserDefinedMappings(m1)
-	c.Assert(err, check.Equals, nil)
-
-	limit, ok := Get("a1.medium")
-	c.Assert(ok, check.Equals, true)
-	c.Assert(limit.Adapters, check.Equals, 2)
-	c.Assert(limit.IPv4, check.Equals, 4)
-	c.Assert(limit.IPv6, check.Equals, 100)
-}
-
-func (e *ENILimitsSuite) TestParseLimitString(c *check.C) {
-	limitString1 := "4,5 ,6"
-	limitString2 := "4,5,a"
-	limitString3 := "4,5"
-	limitString4 := "45"
-	limitString5 := ","
-	limitString6 := ""
-
-	limit, err := parseLimitString(limitString1)
-	c.Assert(err, check.Equals, nil)
-	c.Assert(limit.Adapters, check.Equals, 4)
-	c.Assert(limit.IPv4, check.Equals, 5)
-	c.Assert(limit.IPv6, check.Equals, 6)
-
-	limit, err = parseLimitString(limitString2)
-	c.Assert(err, check.Not(check.Equals), nil)
-
-	limit, err = parseLimitString(limitString3)
-	c.Assert(err.Error(), check.Equals, "invalid limit value")
-	c.Assert(limit.Adapters, check.Not(check.Equals), 4)
-	c.Assert(limit.IPv4, check.Not(check.Equals), 5)
-	c.Assert(limit.IPv6, check.Equals, 0)
-
-	limit, err = parseLimitString(limitString4)
-	c.Assert(err.Error(), check.Equals, "invalid limit value")
-
-	limit, err = parseLimitString(limitString5)
-	c.Assert(err.Error(), check.Equals, "invalid limit value")
-
-	limit, err = parseLimitString(limitString6)
-	c.Assert(err.Error(), check.Equals, "invalid limit value")
+	// Verify that the limits were actually retrieved
+	limits, ok := limitsGetter.Get("test.large")
+	require.True(t, ok)
+	require.Equal(t, ipamTypes.Limits{
+		Adapters:       4,
+		IPv4:           10,
+		IPv6:           10,
+		HypervisorType: "nitro",
+	}, limits)
 }

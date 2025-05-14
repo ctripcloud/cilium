@@ -7,8 +7,8 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"log/slog"
 
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	healthpb "google.golang.org/grpc/health/grpc_health_v1"
@@ -27,17 +27,17 @@ var (
 
 // Server is hubble's gRPC server.
 type Server struct {
-	log  logrus.FieldLogger
+	log  *slog.Logger
 	srv  *grpc.Server
 	opts serveroption.Options
 }
 
 // NewServer creates a new hubble gRPC server.
-func NewServer(log logrus.FieldLogger, options ...serveroption.Option) (*Server, error) {
+func NewServer(log *slog.Logger, options ...serveroption.Option) (*Server, error) {
 	opts := serveroption.Options{}
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
-			return nil, fmt.Errorf("failed to apply option: %v", err)
+			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
 	if opts.Listener == nil {
@@ -48,19 +48,17 @@ func NewServer(log logrus.FieldLogger, options ...serveroption.Option) (*Server,
 	}
 
 	s := &Server{log: log, opts: opts}
-	if err := s.initGRPCServer(); err != nil {
-		return nil, err
-	}
+	s.initGRPCServer()
 	return s, nil
 }
 
-func (s *Server) newGRPCServer() (*grpc.Server, error) {
+func (s *Server) newGRPCServer() *grpc.Server {
 	var opts []grpc.ServerOption
-	for _, interceptor := range s.opts.GRPCUnaryInterceptors {
-		opts = append(opts, grpc.UnaryInterceptor(interceptor))
+	if len(s.opts.GRPCUnaryInterceptors) > 0 {
+		opts = append(opts, grpc.ChainUnaryInterceptor(s.opts.GRPCUnaryInterceptors...))
 	}
-	for _, interceptor := range s.opts.GRPCStreamInterceptors {
-		opts = append(opts, grpc.StreamInterceptor(interceptor))
+	if len(s.opts.GRPCStreamInterceptors) > 0 {
+		opts = append(opts, grpc.ChainStreamInterceptor(s.opts.GRPCStreamInterceptors...))
 	}
 	if s.opts.ServerTLSConfig != nil {
 		// NOTE: gosec is unable to resolve the constant and warns about "TLS
@@ -70,14 +68,11 @@ func (s *Server) newGRPCServer() (*grpc.Server, error) {
 		})
 		opts = append(opts, grpc.Creds(credentials.NewTLS(tlsConfig)))
 	}
-	return grpc.NewServer(opts...), nil
+	return grpc.NewServer(opts...)
 }
 
-func (s *Server) initGRPCServer() error {
-	srv, err := s.newGRPCServer()
-	if err != nil {
-		return err
-	}
+func (s *Server) initGRPCServer() {
+	srv := s.newGRPCServer()
 	if s.opts.HealthService != nil {
 		healthpb.RegisterHealthServer(srv, s.opts.HealthService)
 	}
@@ -95,7 +90,6 @@ func (s *Server) initGRPCServer() error {
 		s.opts.GRPCMetrics.InitializeMetrics(srv)
 	}
 	s.srv = srv
-	return nil
 }
 
 // Serve starts the hubble server and accepts new connections on the configured

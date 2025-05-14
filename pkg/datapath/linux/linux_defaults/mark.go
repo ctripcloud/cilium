@@ -32,7 +32,7 @@ package linux_defaults
 const (
 	// MagicMarkHostMask can be used to fetch the host/proxy-relevant magic
 	// bits from a mark.
-	MagicMarkHostMask int = 0x0F00
+	MagicMarkHostMask uint32 = 0x0F00
 	// MagicMarkProxyMask can be used to fetch the proxy-relevant magic
 	// bits from a mark.
 	MagicMarkProxyMask int = 0x0E00
@@ -52,6 +52,17 @@ const (
 	// to a proxy.
 	MagicMarkIsToProxy uint32 = 0x0200
 
+	MagicMarkSNATDone int = 0x0300
+
+	// MagicMarkOverlay is set by the to-overlay program, and can be used
+	// to identify cilium-managed overlay traffic.
+	MagicMarkOverlay int = 0x0400
+
+	// MagicMarkOverlay is set by the to-overlay program, and can be used
+	// to identify cilium-managed overlay traffic which was previously IPsec
+	// encrypted before encapsulation.
+	MagicMarkOverlayEncrypted int = 0x1400
+
 	// MagicMarkProxyEgressEPID determines that the traffic is sourced from
 	// the proxy which is capturing traffic before it is subject to egress
 	// policy enforcement that must be done after the proxy. The identity
@@ -65,10 +76,10 @@ const (
 
 	// MagicMarkIngress determines that the traffic is sourced from the
 	// proxy which is applying Ingress policy
-	MagicMarkIngress int = 0x0A00
+	MagicMarkIngress uint32 = 0x0A00
 	// MagicMarkEgress determines that the traffic is sourced from the
 	// proxy which is applying Egress policy
-	MagicMarkEgress int = 0x0B00
+	MagicMarkEgress uint32 = 0x0B00
 
 	// MagicMarkHost determines that the traffic is sourced from the local
 	// host and not from a proxy.
@@ -96,24 +107,20 @@ const (
 	// 0x1000, and the K8s marks are 0x4000 and 0x8000. So both are not
 	// interfering with that bit.
 	MagicMarkWireGuardEncrypted int = 0x1E00
+
+	// MagicMarkDecrypt is the packet mark used to indicate the datapath needs
+	// to decrypt a packet.
+	MagicMarkDecrypt = 0x0D00
+
+	// MagicMarkDecryptedOverlay indicates to the datapath that the packet
+	// was IPsec decrypted and now contains a vxlan header.
+	//
+	// When this mark is present on a packet it indicates that overlay traffic
+	// was decrypted by XFRM and should be forwarded to a tunnel device for
+	// decapsulation.
+	MagicMarkDecryptedOverlay = 0x1D00
+
+	// MagicMarkEncrypt is the packet mark to use to indicate datapath
+	// needs to encrypt a packet.
+	MagicMarkEncrypt = 0x0E00
 )
-
-// getMagicMark returns the magic marker with which each packet must be marked.
-// The mark is different depending on whether the proxy is injected at ingress
-// or egress.
-func GetMagicProxyMark(isIngress bool, identity int) int {
-	var mark int
-
-	if isIngress {
-		mark = MagicMarkIngress
-	} else {
-		mark = MagicMarkEgress
-	}
-
-	if identity != 0 {
-		mark |= (identity >> 16) & 0xFF
-		mark |= (identity & 0xFFFF) << 16
-	}
-
-	return mark
-}

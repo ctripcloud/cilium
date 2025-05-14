@@ -5,168 +5,84 @@ package proxy
 
 import (
 	"context"
+	"os"
 	"testing"
 
-	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/cilium/pkg/completion"
+	"github.com/cilium/cilium/pkg/envoy"
+	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/proxy/proxyports"
+	"github.com/cilium/cilium/pkg/time"
+	"github.com/cilium/cilium/pkg/trigger"
+	"github.com/cilium/cilium/pkg/u8proto"
 )
 
-func Test(t *testing.T) { TestingT(t) }
-
-type ProxySuite struct{}
-
-var _ = Suite(&ProxySuite{})
-
-type MockDatapathUpdater struct{}
-
-func (m *MockDatapathUpdater) InstallProxyRules(ctx context.Context, proxyPort uint16, ingress, localOnly bool, name string) error {
-	return nil
+func proxyForTest(t *testing.T) (*Proxy, func()) {
+	mockDatapathUpdater := &proxyports.MockIPTablesManager{}
+	ppConfig := proxyports.ProxyPortsConfig{
+		ProxyPortrangeMin:          10000,
+		ProxyPortrangeMax:          20000,
+		RestoredProxyPortsAgeLimit: 0,
+	}
+	pp := proxyports.NewProxyPorts(hivetest.Logger(t), ppConfig, mockDatapathUpdater)
+	p := createProxy(hivetest.Logger(t), nil, pp, nil, nil)
+	triggerDone := make(chan struct{})
+	p.proxyPorts.Trigger, _ = trigger.NewTrigger(trigger.Parameters{
+		MinInterval:  10 * time.Second,
+		TriggerFunc:  func(reasons []string) {},
+		ShutdownFunc: func() { close(triggerDone) },
+	})
+	return p, func() {
+		p.proxyPorts.Trigger.Shutdown()
+		<-triggerDone
+	}
 }
 
-func (m *MockDatapathUpdater) SupportsOriginalSourceAddr() bool {
-	return true
+type fakeProxyPolicy struct{}
+
+func (p *fakeProxyPolicy) GetPerSelectorPolicies() policy.L7DataMap {
+	return policy.L7DataMap{}
 }
 
-func (s *ProxySuite) TestPortAllocator(c *C) {
-	mockDatapathUpdater := &MockDatapathUpdater{}
+func (p *fakeProxyPolicy) GetL7Parser() policy.L7ParserType {
+	return policy.ParserTypeCRD
+}
 
-	stateDir := c.MkDir()
-	p := StartProxySupport(10000, 20000, stateDir, nil, nil, mockDatapathUpdater, nil,
-		testipcache.NewMockIPCache())
+func (p *fakeProxyPolicy) GetIngress() bool {
+	return false
+}
 
-	port, err := p.AllocateProxyPort("listener1", false, true)
-	c.Assert(err, IsNil)
-	c.Assert(port, Not(Equals), 0)
+func (p *fakeProxyPolicy) GetPort() uint16 {
+	return uint16(80)
+}
 
-	port1, err := GetProxyPort("listener1")
-	c.Assert(err, IsNil)
-	c.Assert(port1, Equals, port)
+func (p *fakeProxyPolicy) GetProtocol() u8proto.U8proto {
+	return u8proto.UDP
+}
 
-	// Another allocation for the same name gets the same port
-	port1a, err := p.AllocateProxyPort("listener1", false, true)
-	c.Assert(err, IsNil)
-	c.Assert(port1a, Equals, port1)
+func (p *fakeProxyPolicy) GetListener() string {
+	return "nonexisting-listener"
+}
 
-	name, pp := findProxyPortByType(ProxyTypeCRD, "listener1", false)
-	c.Assert(name, Equals, "listener1")
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
-	c.Assert(pp.proxyPort, Equals, port)
-	c.Assert(pp.ingress, Equals, false)
-	c.Assert(pp.localOnly, Equals, true)
-	c.Assert(pp.configured, Equals, true)
-	c.Assert(pp.isStatic, Equals, false)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.rulesPort, Equals, uint16(0))
+func TestCreateOrUpdateRedirectMissingListener(t *testing.T) {
+	testRunDir := t.TempDir()
+	socketDir := envoy.GetSocketDir(testRunDir)
+	err := os.MkdirAll(socketDir, 0700)
+	require.NoError(t, err)
 
-	err = p.ReleaseProxyPort("listener1")
-	c.Assert(err, IsNil)
+	p, cleaner := proxyForTest(t)
+	defer cleaner()
 
-	// ProxyPort lingers and can still be found, but it's port is zeroed
-	port1b, err := GetProxyPort("listener1")
-	c.Assert(err, IsNil)
-	c.Assert(port1b, Equals, uint16(0))
-	c.Assert(pp.proxyPort, Equals, uint16(0))
-	c.Assert(pp.configured, Equals, false)
-	c.Assert(pp.nRedirects, Equals, 0)
+	l4 := &fakeProxyPolicy{}
 
-	// the port was never acked, so rulesPort is 0
-	c.Assert(pp.rulesPort, Equals, uint16(0))
+	ctx := context.TODO()
+	wg := completion.NewWaitGroup(ctx)
 
-	// Allocates a different port (due to port was never acked)
-	port2, err := p.AllocateProxyPort("listener1", true, false)
-	c.Assert(err, IsNil)
-	c.Assert(port2, Not(Equals), port)
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
-	c.Assert(pp.ingress, Equals, false)
-	c.Assert(pp.localOnly, Equals, true)
-	c.Assert(pp.proxyPort, Equals, port2)
-	c.Assert(pp.configured, Equals, true)
-	c.Assert(pp.isStatic, Equals, false)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.rulesPort, Equals, uint16(0))
-
-	// Ack configures the port to the datapath
-	err = p.AckProxyPort(context.TODO(), "listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 1)
-	c.Assert(pp.rulesPort, Equals, port2)
-
-	// Another Ack takes another reference
-	err = p.AckProxyPort(context.TODO(), "listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 2)
-	c.Assert(pp.rulesPort, Equals, port2)
-
-	// 1st release decreases the count
-	err = p.ReleaseProxyPort("listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 1)
-	c.Assert(pp.configured, Equals, true)
-	c.Assert(pp.proxyPort, Equals, port2)
-
-	// 2nd release decreases the count to zero
-	err = p.ReleaseProxyPort("listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.configured, Equals, false)
-	c.Assert(pp.proxyPort, Equals, uint16(0))
-	c.Assert(pp.rulesPort, Equals, port2)
-
-	// extra releases are idempotent
-	err = p.ReleaseProxyPort("listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.configured, Equals, false)
-	c.Assert(pp.proxyPort, Equals, uint16(0))
-	c.Assert(pp.rulesPort, Equals, port2)
-
-	// mimic some other process taking the port
-	allocatedPorts[port2] = true
-
-	// Allocate again, this time a different port is allocated
-	port3, err := p.AllocateProxyPort("listener1", true, true)
-	c.Assert(err, IsNil)
-	c.Assert(port3, Not(Equals), uint16(0))
-	c.Assert(port3, Not(Equals), port2)
-	c.Assert(port3, Not(Equals), port1)
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
-	c.Assert(pp.ingress, Equals, false)
-	c.Assert(pp.localOnly, Equals, true)
-	c.Assert(pp.proxyPort, Equals, port3)
-	c.Assert(pp.configured, Equals, true)
-	c.Assert(pp.isStatic, Equals, false)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.rulesPort, Equals, port2)
-
-	// Ack configures the port to the datapath
-	err = p.AckProxyPort(context.TODO(), "listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 1)
-	c.Assert(pp.rulesPort, Equals, port3)
-
-	// Release marks the port as unallocated
-	err = p.ReleaseProxyPort("listener1")
-	c.Assert(err, IsNil)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.configured, Equals, false)
-	c.Assert(pp.proxyPort, Equals, uint16(0))
-	c.Assert(pp.rulesPort, Equals, port3)
-
-	inuse, exists := allocatedPorts[port3]
-	c.Assert(exists, Equals, true)
-	c.Assert(inuse, Equals, false)
-
-	// No-one used the port so next allocation gets the same port again
-	port4, err := p.AllocateProxyPort("listener1", true, true)
-	c.Assert(err, IsNil)
-	c.Assert(port4, Equals, port3)
-	c.Assert(pp.proxyType, Equals, ProxyTypeCRD)
-	c.Assert(pp.ingress, Equals, false)
-	c.Assert(pp.localOnly, Equals, true)
-	c.Assert(pp.proxyPort, Equals, port4)
-	c.Assert(pp.configured, Equals, true)
-	c.Assert(pp.isStatic, Equals, false)
-	c.Assert(pp.nRedirects, Equals, 0)
-	c.Assert(pp.rulesPort, Equals, port3)
+	proxyPort, err, revertFunc := p.CreateOrUpdateRedirect(ctx, l4, "dummy-proxy-id", 1000, wg)
+	require.Equal(t, uint16(0), proxyPort)
+	require.Error(t, err)
+	require.Nil(t, revertFunc)
 }

@@ -4,82 +4,79 @@
 package lock
 
 import (
-	"math/rand"
+	"math/rand/v2"
 	"sync"
 	"sync/atomic"
+	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 )
 
-type StoppableWaitGroupSuite struct{}
-
-var _ = Suite(&StoppableWaitGroupSuite{})
-
-func (s *SemaphoredMutexSuite) TestAdd(c *C) {
+func TestAdd(t *testing.T) {
 	l := NewStoppableWaitGroup()
 
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
+	require.Equal(t, int64(1), l.i.Load())
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	require.Equal(t, int64(2), l.i.Load())
 	close(l.noopAdd)
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	require.Equal(t, int64(2), l.i.Load())
 }
 
-func (s *SemaphoredMutexSuite) TestDone(c *C) {
+func TestDone(t *testing.T) {
 	l := NewStoppableWaitGroup()
 
-	atomic.StoreInt64(l.i, 4)
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(3))
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	l.i.Store(4)
+	l.done()
+	require.Equal(t, int64(3), l.i.Load())
+	l.done()
+	require.Equal(t, int64(2), l.i.Load())
 	close(l.noopAdd)
 	select {
 	case _, ok := <-l.noopDone:
 		// channel should not have been closed
-		c.Assert(ok, Equals, true)
+		require.True(t, ok)
 	default:
 	}
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
+	l.done()
+	require.Equal(t, int64(1), l.i.Load())
 	select {
 	case _, ok := <-l.noopDone:
 		// channel should not have been closed
-		c.Assert(ok, Equals, true)
+		require.True(t, ok)
 	default:
 	}
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(0))
+	l.done()
+	require.Equal(t, int64(0), l.i.Load())
 	select {
 	case _, ok := <-l.noopDone:
-		c.Assert(ok, Equals, false)
+		require.False(t, ok)
 	default:
 		// channel should have been closed
-		c.Assert(false, Equals, true)
+		require.Fail(t, "channel should have been closed")
 	}
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(0))
+	l.done()
+	require.Equal(t, int64(0), l.i.Load())
 }
 
-func (s *SemaphoredMutexSuite) TestStop(c *C) {
+func TestStop(t *testing.T) {
 	l := NewStoppableWaitGroup()
 
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
+	require.Equal(t, int64(1), l.i.Load())
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	require.Equal(t, int64(2), l.i.Load())
 	l.Stop()
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	require.Equal(t, int64(2), l.i.Load())
 }
 
-func (s *SemaphoredMutexSuite) TestWait(c *C) {
+func TestWait(t *testing.T) {
 	l := NewStoppableWaitGroup()
 
 	waitClosed := make(chan struct{})
@@ -89,117 +86,119 @@ func (s *SemaphoredMutexSuite) TestWait(c *C) {
 	}()
 
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
+	require.Equal(t, int64(1), l.i.Load())
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	require.Equal(t, int64(2), l.i.Load())
 	l.Stop()
 	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	require.Equal(t, int64(2), l.i.Load())
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
+	l.done()
+	require.Equal(t, int64(1), l.i.Load())
 	select {
 	case _, ok := <-waitClosed:
 		// channel should not have been closed
-		c.Assert(ok, Equals, true)
+		require.True(t, ok)
 	default:
 	}
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(0))
+	l.done()
+	require.Equal(t, int64(0), l.i.Load())
 	select {
 	case _, ok := <-waitClosed:
 		// channel should have been closed
-		c.Assert(ok, Equals, false)
+		require.False(t, ok)
 	default:
 	}
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(0))
+	l.done()
+	require.Equal(t, int64(0), l.i.Load())
 }
 
-func (s *SemaphoredMutexSuite) TestWaitChannel(c *C) {
+func TestWaitChannel(t *testing.T) {
 	l := NewStoppableWaitGroup()
 
-	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
-	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	done1 := l.Add()
+	require.Equal(t, int64(1), l.i.Load())
+	done2 := l.Add()
+	require.Equal(t, int64(2), l.i.Load())
 	l.Stop()
-	l.Add()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(2))
+	done3 := l.Add()
+	require.Equal(t, int64(2), l.i.Load())
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(1))
+	done1()
+	require.Equal(t, int64(1), l.i.Load())
 	select {
 	case _, ok := <-l.WaitChannel():
 		// channel should not have been closed
-		c.Assert(ok, Equals, true)
+		require.True(t, ok)
 	default:
 	}
 
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(0))
+	// since add for done3 was done after stopping, this is a no-op
+	done3()
+	require.Equal(t, int64(1), l.i.Load())
+	select {
+	case _, ok := <-l.WaitChannel():
+		// channel should not have been closed
+		require.True(t, ok)
+	default:
+	}
+
+	done2()
+	require.Equal(t, int64(0), l.i.Load())
 	select {
 	case _, ok := <-l.WaitChannel():
 		// channel should have been closed
-		c.Assert(ok, Equals, false)
+		require.False(t, ok)
 	default:
 	}
-
-	l.Done()
-	c.Assert(atomic.LoadInt64(l.i), Equals, int64(0))
 }
 
-func (s *SemaphoredMutexSuite) TestParallelism(c *C) {
+func TestParallelism(t *testing.T) {
 	l := NewStoppableWaitGroup()
 
-	// Use math/rand instead of pkg/rand to avoid a test import cycle which
-	// go vet would complain about. Use the global default entropy source
-	// rather than creating a new source to avoid concurrency issues.
-	rand.Seed(time.Now().UnixNano())
 	in := make(chan int)
 	stop := make(chan struct{})
 	go func() {
 		for {
 			select {
-			case in <- rand.Intn(1 - 0):
+			case in <- rand.IntN(1 - 0):
 			case <-stop:
 				close(in)
 				return
 			}
 		}
 	}()
-	adds := int64(0)
+	var adds atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(10)
-	for i := 0; i < 10; i++ {
+	for range 10 {
 		go func() {
 			defer wg.Done()
 			for a := range in {
 				if a == 0 {
-					atomic.AddInt64(&adds, 1)
+					adds.Add(1)
 					l.Add()
 				} else {
-					l.Done()
-					atomic.AddInt64(&adds, -1)
+					l.done()
+					adds.Add(-1)
 				}
 			}
 		}()
 	}
 
-	time.Sleep(time.Duration(rand.Intn(3-0)) * time.Second)
+	time.Sleep(time.Duration(rand.IntN(3-0)) * time.Second)
 	close(stop)
 	wg.Wait()
-	add := atomic.LoadInt64(&adds)
-	for ; add != 0; add = atomic.LoadInt64(&adds) {
+	for add := adds.Load(); add != 0; add = adds.Load() {
 		switch {
 		case add < 0:
-			atomic.AddInt64(&adds, 1)
+			adds.Add(1)
 			l.Add()
 		case add > 0:
-			l.Done()
-			atomic.AddInt64(&adds, -1)
+			l.done()
+			adds.Add(-1)
 		}
 	}
 	l.Stop()

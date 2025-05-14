@@ -3,8 +3,14 @@
 
 package main
 
-import "github.com/cilium/cilium/daemon/cmd"
+import (
+	"github.com/cilium/cilium/daemon/cmd"
+	"github.com/cilium/cilium/pkg/hive"
+)
 
 func main() {
-	cmd.Execute()
+	hiveFn := func() *hive.Hive {
+		return hive.New(cmd.Agent)
+	}
+	cmd.Execute(cmd.NewAgentCmd(hiveFn))
 }

@@ -6,21 +6,10 @@ package versioncheck
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
-
-	"github.com/cilium/cilium/pkg/checker"
+	"github.com/stretchr/testify/require"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type VersionCheckTestSuite struct{}
-
-var _ = Suite(&VersionCheckTestSuite{})
-
-func (vc *VersionCheckTestSuite) TestMustCompile(c *C) {
+func TestMustCompile(t *testing.T) {
 	tests := []struct {
 		version    string
 		constraint string
@@ -117,11 +106,14 @@ func (vc *VersionCheckTestSuite) TestMustCompile(c *C) {
 			want:       false,
 		},
 	}
-	for _, t := range tests {
-		ver, err := Version(t.version)
-		c.Assert(err, IsNil, Commentf("version %s, constraint %s", t.version, t.constraint))
-		constraint, err := Compile(t.constraint)
-		c.Assert(err, IsNil, Commentf("version %s, constraint", t.version, t.constraint))
-		c.Assert(constraint(ver), checker.Equals, t.want, Commentf("version %s, constraint %s", t.version, t.constraint))
+	for _, tt := range tests {
+		t.Run(tt.version, func(t *testing.T) {
+			ver, err := Version(tt.version)
+			require.NoError(t, err, "version %s, constraint %s", tt.version, tt.constraint)
+
+			constraint, err := Compile(tt.constraint)
+			require.NoError(t, err, "version %s, constraint %s", tt.version, tt.constraint)
+			require.Equal(t, tt.want, constraint(ver), "version %s, constraint %s", tt.version, tt.constraint)
+		})
 	}
 }

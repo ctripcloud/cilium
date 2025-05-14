@@ -7,75 +7,65 @@ import (
 	"fmt"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/api/v1/models"
-	"github.com/cilium/cilium/pkg/checker"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type OptionSuite struct{}
-
-var _ = Suite(&OptionSuite{})
-
-func (s *OptionSuite) TestGetValue(c *C) {
+func TestGetValue(t *testing.T) {
 	k1, k2 := "foo", "bar"
 	v1 := OptionSetting(7)
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: v1,
 			k2: OptionEnabled,
 		},
 	}
 
-	c.Assert(o.GetValue(k1), Equals, v1)
-	c.Assert(o.GetValue(k2), Equals, OptionEnabled)
-	c.Assert(o.GetValue("unknown"), Equals, OptionDisabled)
+	require.Equal(t, v1, o.GetValue(k1))
+	require.Equal(t, OptionEnabled, o.GetValue(k2))
+	require.Equal(t, OptionDisabled, o.GetValue("unknown"))
 }
 
-func (s *OptionSuite) TestIsEnabled(c *C) {
+func TestIsEnabled(t *testing.T) {
 	k1, k2 := "foo", "bar"
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 			k2: OptionDisabled,
 		},
 	}
 
-	c.Assert(o.IsEnabled(k1), Equals, true)
-	c.Assert(o.IsEnabled(k2), Equals, false)
-	c.Assert(o.IsEnabled("unknown"), Equals, false)
+	require.True(t, o.IsEnabled(k1))
+	require.False(t, o.IsEnabled(k2))
+	require.False(t, o.IsEnabled("unknown"))
 }
 
-func (s *OptionSuite) TestSetValidated(c *C) {
+func TestSetValidated(t *testing.T) {
 	k1, k2 := "foo", "bar"
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 		},
 	}
 
-	c.Assert(o.IsEnabled(k1), Equals, true)
-	c.Assert(o.IsEnabled(k2), Equals, false)
+	require.True(t, o.IsEnabled(k1))
+	require.False(t, o.IsEnabled(k2))
 
 	o.SetValidated(k1, OptionDisabled)
 	o.SetValidated(k2, OptionEnabled)
-	c.Assert(o.IsEnabled(k1), Equals, false)
-	c.Assert(o.IsEnabled(k2), Equals, true)
+	require.False(t, o.IsEnabled(k1))
+	require.True(t, o.IsEnabled(k2))
 }
 
-func (s *OptionSuite) TestSetBool(c *C) {
+func TestSetBool(t *testing.T) {
 	k1, k2, k3 := "foo", "bar", "baz"
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 			k2: OptionDisabled,
 		},
@@ -84,59 +74,60 @@ func (s *OptionSuite) TestSetBool(c *C) {
 	o.SetBool(k1, false)
 	o.SetBool(k2, true)
 	o.SetBool(k3, true)
-	c.Assert(o.GetValue(k1), Equals, OptionDisabled)
-	c.Assert(o.GetValue(k2), Equals, OptionEnabled)
-	c.Assert(o.GetValue(k3), Equals, OptionEnabled)
+	require.Equal(t, OptionDisabled, o.GetValue(k1))
+	require.Equal(t, OptionEnabled, o.GetValue(k2))
+	require.Equal(t, OptionEnabled, o.GetValue(k3))
 }
 
-func (s *OptionSuite) TestDelete(c *C) {
+func TestDelete(t *testing.T) {
 	k1, k2 := "foo", "bar"
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 			k2: OptionEnabled,
 		},
 	}
 
 	o.Delete(k1)
-	c.Assert(o.GetValue(k1), Equals, OptionDisabled)
-	c.Assert(o.GetValue(k2), Equals, OptionEnabled)
+
+	require.Equal(t, OptionDisabled, o.GetValue(k1))
+	require.Equal(t, OptionEnabled, o.GetValue(k2))
 }
 
-func (s *OptionSuite) TestSetIfUnset(c *C) {
+func TestSetIfUnset(t *testing.T) {
 	k1, k2 := "foo", "bar"
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionDisabled,
 		},
 	}
 
 	o.SetIfUnset(k1, OptionEnabled)
 	o.SetIfUnset(k2, OptionEnabled)
-	c.Assert(o.GetValue(k1), Equals, OptionDisabled)
-	c.Assert(o.GetValue(k2), Equals, OptionEnabled)
+
+	require.Equal(t, OptionDisabled, o.GetValue(k1))
+	require.Equal(t, OptionEnabled, o.GetValue(k2))
 }
 
-func (s *OptionSuite) TestInheritDefault(c *C) {
+func TestInheritDefault(t *testing.T) {
 	k := "foo"
 
 	o := IntOptions{
-		Opts: OptionMap{},
+		opts: OptionMap{},
 	}
 	parent := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k: OptionEnabled,
 		},
 	}
-
-	c.Assert(o.GetValue(k), Equals, OptionDisabled)
+	require.Equal(t, OptionDisabled, o.GetValue(k))
 	o.InheritDefault(&parent, k)
-	c.Assert(o.GetValue(k), Equals, OptionEnabled)
+	require.Equal(t, OptionEnabled, o.GetValue(k))
 }
 
-func (s *OptionSuite) TestParseKeyValueWithDefaultParseFunc(c *C) {
+func TestParseKeyValueWithDefaultParseFunc(t *testing.T) {
 	k := "foo"
 
 	l := OptionLibrary{
@@ -146,12 +137,12 @@ func (s *OptionSuite) TestParseKeyValueWithDefaultParseFunc(c *C) {
 		},
 	}
 
-	_, res, err := ParseKeyValue(&l, k, "on")
-	c.Assert(err, IsNil)
-	c.Assert(res, Equals, OptionEnabled)
+	_, res, _, err := l.parseKeyValue(k, "on")
+	require.NoError(t, err)
+	require.Equal(t, OptionEnabled, res)
 }
 
-func (s *OptionSuite) TestParseKeyValue(c *C) {
+func TestParseKeyValue(t *testing.T) {
 	k := "foo"
 
 	l := OptionLibrary{
@@ -167,18 +158,18 @@ func (s *OptionSuite) TestParseKeyValue(c *C) {
 		},
 	}
 
-	_, _, err := ParseKeyValue(&l, k, "true")
-	c.Assert(err, NotNil)
+	_, _, _, err := l.parseKeyValue(k, "true")
+	require.Error(t, err)
 
-	_, res, err := ParseKeyValue(&l, k, "yes")
-	c.Assert(err, IsNil)
-	c.Assert(res, Equals, OptionEnabled)
+	_, res, _, err := l.parseKeyValue(k, "yes")
+	require.NoError(t, err)
+	require.Equal(t, OptionEnabled, res)
 
-	_, _, err = ParseKeyValue(&l, "unknown", "yes")
-	c.Assert(err, NotNil)
+	_, _, _, err = l.parseKeyValue("unknown", "yes")
+	require.Error(t, err)
 }
 
-func (s *OptionSuite) TestParseOption(c *C) {
+func TestParseOption(t *testing.T) {
 	k := "foo"
 	arg := k + "=enabled"
 
@@ -191,36 +182,36 @@ func (s *OptionSuite) TestParseOption(c *C) {
 		k: &OptionTest,
 	}
 
-	_, _, err := ParseOption(k+":enabled", &l)
-	c.Assert(err, NotNil)
+	_, _, _, err := l.ParseOption(k + ":enabled")
+	require.Error(t, err)
 
-	_, res, err := ParseOption(arg, &l)
-	c.Assert(err, IsNil)
-	c.Assert(res, Equals, OptionEnabled)
+	_, res, _, err := l.ParseOption(arg)
+	require.NoError(t, err)
+	require.Equal(t, OptionEnabled, res)
 
-	_, _, err = ParseOption("!"+arg, &l)
-	c.Assert(err, NotNil)
+	_, _, _, err = l.ParseOption("!" + arg)
+	require.Error(t, err)
 
 	OptionTest.Immutable = true
-	_, _, err = ParseOption(arg, &l)
-	c.Assert(err, NotNil)
+	_, _, _, err = l.ParseOption(arg)
+	require.Error(t, err)
 	OptionTest.Immutable = false
 }
 
-func (s *OptionSuite) TestGetFmtOpts(c *C) {
+func TestGetFmtOpts(t *testing.T) {
 	OptionTest := Option{
 		Define:      "TEST_DEFINE",
 		Description: "This is a test",
 	}
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			"test": OptionEnabled,
 			"BAR":  OptionDisabled,
 			"foo":  OptionEnabled,
 			"bar":  OptionDisabled,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			"test": &OptionTest,
 		},
 	}
@@ -229,16 +220,16 @@ func (s *OptionSuite) TestGetFmtOpts(c *C) {
 	fmtList2 := o.GetFmtList()
 
 	// Both strings should be equal because the formatted options should be sorted.
-	c.Assert(fmtList, Equals, fmtList2)
+	require.Equal(t, fmtList, fmtList2)
 
 	o2 := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			"foo":  OptionEnabled,
 			"BAR":  OptionDisabled,
 			"bar":  OptionDisabled,
 			"test": OptionEnabled,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			"test": &OptionTest,
 		},
 	}
@@ -247,35 +238,35 @@ func (s *OptionSuite) TestGetFmtOpts(c *C) {
 	fmtListO2 := o2.GetFmtList()
 
 	// Both strings should be equal because the formatted options should be sorted.
-	c.Assert(fmtListO, Equals, fmtListO2)
+	require.Equal(t, fmtListO, fmtListO2)
 }
 
-func (s *OptionSuite) TestGetFmtOpt(c *C) {
+func TestGetFmtOpt(t *testing.T) {
 	OptionTest := Option{
 		Define:      "TEST_DEFINE",
 		Description: "This is a test",
 	}
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			"test":  OptionEnabled,
 			"BAR":   OptionDisabled,
 			"alice": 2,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			"test":  &OptionTest,
 			"alice": &OptionTest,
 		},
 	}
 	o.optsMU.Lock()
-	c.Assert(o.getFmtOpt("test"), Equals, "#define TEST_DEFINE 1")
-	c.Assert(o.getFmtOpt("BAR"), Equals, "#undef BAR")
-	c.Assert(o.getFmtOpt("BAZ"), Equals, "#undef BAZ")
-	c.Assert(o.getFmtOpt("alice"), Equals, "#define TEST_DEFINE 2")
+	require.Equal(t, "#define TEST_DEFINE 1", o.getFmtOpt("test"))
+	require.Equal(t, "#undef BAR", o.getFmtOpt("BAR"))
+	require.Equal(t, "#undef BAZ", o.getFmtOpt("BAZ"))
+	require.Equal(t, "#define TEST_DEFINE 2", o.getFmtOpt("alice"))
 	o.optsMU.Unlock()
 }
 
-func (s *OptionSuite) TestGetImmutableModel(c *C) {
+func TestGetImmutableModel(t *testing.T) {
 	k := "foo"
 
 	OptionTest := Option{
@@ -284,20 +275,20 @@ func (s *OptionSuite) TestGetImmutableModel(c *C) {
 	}
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k: OptionEnabled,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			k: &OptionTest,
 		},
 	}
 
 	cfg := o.GetImmutableModel()
-	c.Assert(cfg, NotNil)
-	c.Assert(cfg, checker.DeepEquals, &models.ConfigurationMap{})
+	require.NotNil(t, cfg)
+	require.Equal(t, &models.ConfigurationMap{}, cfg)
 }
 
-func (s *OptionSuite) TestGetMutableModel(c *C) {
+func TestGetMutableModel(t *testing.T) {
 	k1, k2, k3 := "foo", "bar", "baz"
 
 	OptionDefaultFormat := Option{
@@ -313,12 +304,12 @@ func (s *OptionSuite) TestGetMutableModel(c *C) {
 	}
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 			k2: OptionDisabled,
 			k3: OptionEnabled,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			k1: &OptionDefaultFormat,
 			k2: &OptionDefaultFormat,
 			k3: &OptionCustomFormat,
@@ -326,20 +317,20 @@ func (s *OptionSuite) TestGetMutableModel(c *C) {
 	}
 
 	cfg := o.GetMutableModel()
-	c.Assert(cfg, NotNil)
-	c.Assert(cfg, checker.DeepEquals, &models.ConfigurationMap{
+	require.NotNil(t, cfg)
+	require.Equal(t, &models.ConfigurationMap{
 		k1: "Enabled",
 		k2: "Disabled",
 		k3: "ok",
-	})
+	}, cfg)
 
 	o2 := IntOptions{}
 	cfg2 := o2.GetMutableModel()
-	c.Assert(cfg2, NotNil)
-	c.Assert(cfg2, checker.DeepEquals, &models.ConfigurationMap{})
+	require.NotNil(t, cfg2)
+	require.Equal(t, &models.ConfigurationMap{}, cfg2)
 }
 
-func (s *OptionSuite) TestValidate(c *C) {
+func TestValidate(t *testing.T) {
 	k1, k2, k3, k4 := "foo", "bar", "baz", "qux"
 
 	OptionTest := Option{
@@ -361,13 +352,13 @@ func (s *OptionSuite) TestValidate(c *C) {
 	}
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 			k2: OptionEnabled,
 			k3: OptionDisabled,
 			k4: OptionEnabled,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			k1: &OptionTest,
 			k2: &OptionCustomVerify,
 			k3: &OptionCustomVerify,
@@ -375,14 +366,14 @@ func (s *OptionSuite) TestValidate(c *C) {
 		},
 	}
 
-	c.Assert(o.Validate(models.ConfigurationMap{k1: "on"}), IsNil)
-	c.Assert(o.Validate(models.ConfigurationMap{"unknown": "on"}), NotNil)
-	c.Assert(o.Validate(models.ConfigurationMap{k4: "on"}), NotNil)
-	c.Assert(o.Validate(models.ConfigurationMap{k1: "on", k2: "on"}), IsNil)
-	c.Assert(o.Validate(models.ConfigurationMap{k1: "on", k3: "on"}), NotNil)
+	require.NoError(t, o.Validate(models.ConfigurationMap{k1: "on"}))
+	require.Error(t, o.Validate(models.ConfigurationMap{"unknown": "on"}))
+	require.Error(t, o.Validate(models.ConfigurationMap{k4: "on"}))
+	require.NoError(t, o.Validate(models.ConfigurationMap{k1: "on", k2: "on"}))
+	require.Error(t, o.Validate(models.ConfigurationMap{k1: "on", k3: "on"}))
 }
 
-func (s *OptionSuite) TestApplyValidated(c *C) {
+func TestApplyValidated(t *testing.T) {
 	k1, k2, k3, k4, k5, k6 := "foo", "bar", "baz", "qux", "quux", "corge"
 
 	OptionDefault := Option{
@@ -401,14 +392,14 @@ func (s *OptionSuite) TestApplyValidated(c *C) {
 	}
 
 	o := IntOptions{
-		Opts: OptionMap{
+		opts: OptionMap{
 			k1: OptionEnabled,
 			k2: OptionEnabled,
 			k3: OptionDisabled,
 			k4: OptionDisabled,
 			k5: OptionDisabled,
 		},
-		Library: &OptionLibrary{
+		library: &OptionLibrary{
 			k1: &OptionDefault,
 			k2: &Option2,
 			k3: &Option3,
@@ -424,7 +415,7 @@ func (s *OptionSuite) TestApplyValidated(c *C) {
 		k5: "off",
 		k6: "on",
 	}
-	c.Assert(o.Validate(cfg), IsNil)
+	require.NoError(t, o.Validate(cfg))
 
 	expectedChanges := OptionMap{
 		k1: OptionDisabled,
@@ -432,15 +423,15 @@ func (s *OptionSuite) TestApplyValidated(c *C) {
 		k6: OptionEnabled,
 	}
 	actualChanges := OptionMap{}
-	var changed ChangedFunc = func(key string, value OptionSetting, data interface{}) {
-		c.Assert(data, Equals, &cfg)
+	var changed ChangedFunc = func(key string, value OptionSetting, data any) {
+		require.Equal(t, &cfg, data)
 		actualChanges[key] = value
 	}
 
-	om, err := o.Library.ValidateConfigurationMap(cfg)
-	c.Assert(err, IsNil)
-	c.Assert(o.ApplyValidated(om, changed, &cfg), Equals, len(expectedChanges))
-	c.Assert(actualChanges, checker.DeepEquals, expectedChanges)
+	om, err := o.library.ValidateConfigurationMap(cfg)
+	require.NoError(t, err)
+	require.Equal(t, len(expectedChanges), o.ApplyValidated(om, changed, &cfg))
+	require.Equal(t, expectedChanges, actualChanges)
 
 	expectedOpts := OptionMap{
 		k1: OptionDisabled,
@@ -451,6 +442,6 @@ func (s *OptionSuite) TestApplyValidated(c *C) {
 		k6: OptionEnabled,
 	}
 	for k, v := range expectedOpts {
-		c.Assert(o.GetValue(k), Equals, v)
+		require.Equal(t, v, o.GetValue(k))
 	}
 }

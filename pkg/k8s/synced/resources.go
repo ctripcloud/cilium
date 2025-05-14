@@ -4,19 +4,25 @@
 package synced
 
 import (
+	"context"
 	"fmt"
-	"time"
+	"log/slog"
 
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/tools/cache"
 
-	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Resources maps resource names to channels that are closed upon initial
 // sync with k8s.
 type Resources struct {
+	logger      *slog.Logger
+	CacheStatus CacheStatus
+
 	lock.RWMutex
 	// resourceChannels maps a resource name to a channel. Once the given
 	// resource name is synchronized with k8s, the channel for which that
@@ -66,6 +72,15 @@ func (r *Resources) BlockWaitGroupToSyncResources(
 	hasSyncedFunc cache.InformerSynced,
 	resourceName string,
 ) {
+	// Log an error caches have already synchronized, as the caller is making this call too late
+	// and the resource in question was missed in the initial cache sync.
+	if r.CacheStatus.Synchronized() {
+		r.logger.Error(
+			"BlockWaitGroupToSyncResources called after Caches have already synced",
+			logfields.Resource, resourceName,
+		)
+		return
+	}
 	ch := make(chan struct{})
 	r.Lock()
 	if r.resources == nil {
@@ -77,7 +92,7 @@ func (r *Resources) BlockWaitGroupToSyncResources(
 	r.Unlock()
 
 	go func() {
-		scopedLog := log.WithField("kubernetesResource", resourceName)
+		scopedLog := r.logger.With(logfields.Resource, resourceName)
 		scopedLog.Debug("waiting for cache to synchronize")
 		if ok := cache.WaitForCacheSync(stop, hasSyncedFunc); !ok {
 			select {
@@ -93,7 +108,10 @@ func (r *Resources) BlockWaitGroupToSyncResources(
 				r.Unlock()
 			default:
 				// Fatally exit it resource fails to sync
-				scopedLog.Fatalf("failed to wait for cache to sync")
+				logging.Fatal(
+					scopedLog,
+					"failed to wait for cache to sync",
+				)
 			}
 		} else {
 			scopedLog.Debug("cache synced")
@@ -123,7 +141,7 @@ func (r *Resources) WaitForCacheSync(resourceNames ...string) {
 			continue
 		}
 		for {
-			scopedLog := log.WithField("kubernetesResource", resourceName)
+			scopedLog := r.logger.With(logfields.Resource, resourceName)
 			<-c
 			r.RLock()
 			stopWait := r.stopWait[resourceName]
@@ -150,7 +168,7 @@ const syncedPollPeriod = 100 * time.Millisecond
 // WaitForCacheSyncWithTimeout waits for K8s resources represented by resourceNames to be synced.
 // For every resource type, if an event happens after starting the wait, the timeout will be pushed out
 // to be the time of the last event plus the timeout duration.
-func (r *Resources) WaitForCacheSyncWithTimeout(timeout time.Duration, resourceNames ...string) error {
+func (r *Resources) WaitForCacheSyncWithTimeout(ctx context.Context, timeout time.Duration, resourceNames ...string) error {
 	// Upon completion, release event map to reduce unnecessary memory usage.
 	// SetEventTimestamp calls to nil event time map are no-op.
 	// Running BlockWaitGroupToSyncResources will reinitialize the event map.
@@ -177,7 +195,7 @@ func (r *Resources) WaitForCacheSyncWithTimeout(timeout time.Duration, resourceN
 					// If timeout is reached, check if an event occurred that would
 					// have pushed back the timeout and wait for that amount of time.
 					select {
-					case now := <-inctimer.After(currTimeout):
+					case now := <-time.After(currTimeout):
 						lastEvent, never := r.getTimeOfLastEvent(resource)
 						if never {
 							return fmt.Errorf("timed out after %s, never received event for resource %q", timeout, resource)
@@ -188,9 +206,20 @@ func (r *Resources) WaitForCacheSyncWithTimeout(timeout time.Duration, resourceN
 						// We reset the timer to wait the timeout period minus the
 						// time since the last event.
 						currTimeout = timeout - time.Since(lastEvent)
-						log.Debugf("resource %q received event %s ago, waiting for additional %s before timing out", resource, time.Since(lastEvent), currTimeout)
+						r.logger.Debug(
+							"received event for resource type, waiting before timeout",
+							logfields.Resource, resource,
+							logfields.LastEventReceived, time.Since(lastEvent),
+							logfields.Timeout, currTimeout,
+						)
 					case <-done:
-						log.Debugf("resource %q cache has synced, stopping timeout watcher", resource)
+						r.logger.Debug(
+							"cache has synced, stopping timeout watcher",
+							logfields.Resource, resource,
+						)
+						return nil
+					case <-ctx.Done():
+						r.logger.Info("stop waiting for cache sync due to cancellation", logfields.Resource, resource)
 						return nil
 					}
 				}

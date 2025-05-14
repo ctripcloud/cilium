@@ -6,12 +6,12 @@ import (
 	"context"
 	"fmt"
 	awsmiddleware "github.com/aws/aws-sdk-go-v2/aws/middleware"
-	"github.com/aws/aws-sdk-go-v2/aws/signer/v4"
 	"github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	"github.com/aws/smithy-go/middleware"
 	smithyhttp "github.com/aws/smithy-go/transport/http"
 )
 
+// Describes the specified Amazon Web Services Verified Access instances.
 func (c *Client) DescribeVerifiedAccessInstanceLoggingConfigurations(ctx context.Context, params *DescribeVerifiedAccessInstanceLoggingConfigurationsInput, optFns ...func(*Options)) (*DescribeVerifiedAccessInstanceLoggingConfigurationsOutput, error) {
 	if params == nil {
 		params = &DescribeVerifiedAccessInstanceLoggingConfigurationsInput{}
@@ -28,22 +28,36 @@ func (c *Client) DescribeVerifiedAccessInstanceLoggingConfigurations(ctx context
 }
 
 type DescribeVerifiedAccessInstanceLoggingConfigurationsInput struct {
+
+	// Checks whether you have the required permissions for the action, without
+	// actually making the request, and provides an error response. If you have the
+	// required permissions, the error response is DryRunOperation . Otherwise, it is
+	// UnauthorizedOperation .
 	DryRun *bool
 
+	// One or more filters. Filter names and values are case-sensitive.
 	Filters []types.Filter
 
+	// The maximum number of results to return with a single call. To retrieve the
+	// remaining results, make another call with the returned nextToken value.
 	MaxResults *int32
 
+	// The token for the next page of results.
 	NextToken *string
 
+	// The IDs of the Verified Access instances.
 	VerifiedAccessInstanceIds []string
 
 	noSmithyDocumentSerde
 }
 
 type DescribeVerifiedAccessInstanceLoggingConfigurationsOutput struct {
+
+	// The logging configuration for the Verified Access instances.
 	LoggingConfigurations []types.VerifiedAccessInstanceLoggingConfiguration
 
+	// The token to use to retrieve the next page of results. This value is null when
+	// there are no more results to return.
 	NextToken *string
 
 	// Metadata pertaining to the operation's result.
@@ -53,6 +67,9 @@ type DescribeVerifiedAccessInstanceLoggingConfigurationsOutput struct {
 }
 
 func (c *Client) addOperationDescribeVerifiedAccessInstanceLoggingConfigurationsMiddlewares(stack *middleware.Stack, options Options) (err error) {
+	if err := stack.Serialize.Add(&setOperationInputMiddleware{}, middleware.After); err != nil {
+		return err
+	}
 	err = stack.Serialize.Add(&awsEc2query_serializeOpDescribeVerifiedAccessInstanceLoggingConfigurations{}, middleware.After)
 	if err != nil {
 		return err
@@ -61,34 +78,41 @@ func (c *Client) addOperationDescribeVerifiedAccessInstanceLoggingConfigurations
 	if err != nil {
 		return err
 	}
+	if err := addProtocolFinalizerMiddlewares(stack, options, "DescribeVerifiedAccessInstanceLoggingConfigurations"); err != nil {
+		return fmt.Errorf("add protocol finalizers: %v", err)
+	}
+
+	if err = addlegacyEndpointContextSetter(stack, options); err != nil {
+		return err
+	}
 	if err = addSetLoggerMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddClientRequestIDMiddleware(stack); err != nil {
+	if err = addClientRequestID(stack); err != nil {
 		return err
 	}
-	if err = smithyhttp.AddComputeContentLengthMiddleware(stack); err != nil {
+	if err = addComputeContentLength(stack); err != nil {
 		return err
 	}
 	if err = addResolveEndpointMiddleware(stack, options); err != nil {
 		return err
 	}
-	if err = v4.AddComputePayloadSHA256Middleware(stack); err != nil {
+	if err = addComputePayloadSHA256(stack); err != nil {
 		return err
 	}
-	if err = addRetryMiddlewares(stack, options); err != nil {
+	if err = addRetry(stack, options); err != nil {
 		return err
 	}
-	if err = addHTTPSignerV4Middleware(stack, options); err != nil {
+	if err = addRawResponseToMetadata(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRawResponseToMetadata(stack); err != nil {
+	if err = addRecordResponseTiming(stack); err != nil {
 		return err
 	}
-	if err = awsmiddleware.AddRecordResponseTiming(stack); err != nil {
+	if err = addSpanRetryLoop(stack, options); err != nil {
 		return err
 	}
-	if err = addClientUserAgent(stack); err != nil {
+	if err = addClientUserAgent(stack, options); err != nil {
 		return err
 	}
 	if err = smithyhttp.AddErrorCloseResponseBodyMiddleware(stack); err != nil {
@@ -97,7 +121,22 @@ func (c *Client) addOperationDescribeVerifiedAccessInstanceLoggingConfigurations
 	if err = smithyhttp.AddCloseResponseBodyMiddleware(stack); err != nil {
 		return err
 	}
+	if err = addSetLegacyContextSigningOptionsMiddleware(stack); err != nil {
+		return err
+	}
+	if err = addTimeOffsetBuild(stack, c); err != nil {
+		return err
+	}
+	if err = addUserAgentRetryMode(stack, options); err != nil {
+		return err
+	}
+	if err = addCredentialSource(stack, options); err != nil {
+		return err
+	}
 	if err = stack.Initialize.Add(newServiceMetadataMiddleware_opDescribeVerifiedAccessInstanceLoggingConfigurations(options.Region), middleware.Before); err != nil {
+		return err
+	}
+	if err = addRecursionDetection(stack); err != nil {
 		return err
 	}
 	if err = addRequestIDRetrieverMiddleware(stack); err != nil {
@@ -109,20 +148,29 @@ func (c *Client) addOperationDescribeVerifiedAccessInstanceLoggingConfigurations
 	if err = addRequestResponseLogging(stack, options); err != nil {
 		return err
 	}
+	if err = addDisableHTTPSMiddleware(stack, options); err != nil {
+		return err
+	}
+	if err = addSpanInitializeStart(stack); err != nil {
+		return err
+	}
+	if err = addSpanInitializeEnd(stack); err != nil {
+		return err
+	}
+	if err = addSpanBuildRequestStart(stack); err != nil {
+		return err
+	}
+	if err = addSpanBuildRequestEnd(stack); err != nil {
+		return err
+	}
 	return nil
 }
-
-// DescribeVerifiedAccessInstanceLoggingConfigurationsAPIClient is a client that
-// implements the DescribeVerifiedAccessInstanceLoggingConfigurations operation.
-type DescribeVerifiedAccessInstanceLoggingConfigurationsAPIClient interface {
-	DescribeVerifiedAccessInstanceLoggingConfigurations(context.Context, *DescribeVerifiedAccessInstanceLoggingConfigurationsInput, ...func(*Options)) (*DescribeVerifiedAccessInstanceLoggingConfigurationsOutput, error)
-}
-
-var _ DescribeVerifiedAccessInstanceLoggingConfigurationsAPIClient = (*Client)(nil)
 
 // DescribeVerifiedAccessInstanceLoggingConfigurationsPaginatorOptions is the
 // paginator options for DescribeVerifiedAccessInstanceLoggingConfigurations
 type DescribeVerifiedAccessInstanceLoggingConfigurationsPaginatorOptions struct {
+	// The maximum number of results to return with a single call. To retrieve the
+	// remaining results, make another call with the returned nextToken value.
 	Limit int32
 
 	// Set to true if pagination should stop if the service returns a pagination token
@@ -186,6 +234,9 @@ func (p *DescribeVerifiedAccessInstanceLoggingConfigurationsPaginator) NextPage(
 	}
 	params.MaxResults = limit
 
+	optFns = append([]func(*Options){
+		addIsPaginatorUserAgent,
+	}, optFns...)
 	result, err := p.client.DescribeVerifiedAccessInstanceLoggingConfigurations(ctx, &params, optFns...)
 	if err != nil {
 		return nil, err
@@ -205,11 +256,18 @@ func (p *DescribeVerifiedAccessInstanceLoggingConfigurationsPaginator) NextPage(
 	return result, nil
 }
 
+// DescribeVerifiedAccessInstanceLoggingConfigurationsAPIClient is a client that
+// implements the DescribeVerifiedAccessInstanceLoggingConfigurations operation.
+type DescribeVerifiedAccessInstanceLoggingConfigurationsAPIClient interface {
+	DescribeVerifiedAccessInstanceLoggingConfigurations(context.Context, *DescribeVerifiedAccessInstanceLoggingConfigurationsInput, ...func(*Options)) (*DescribeVerifiedAccessInstanceLoggingConfigurationsOutput, error)
+}
+
+var _ DescribeVerifiedAccessInstanceLoggingConfigurationsAPIClient = (*Client)(nil)
+
 func newServiceMetadataMiddleware_opDescribeVerifiedAccessInstanceLoggingConfigurations(region string) *awsmiddleware.RegisterServiceMetadata {
 	return &awsmiddleware.RegisterServiceMetadata{
 		Region:        region,
 		ServiceID:     ServiceID,
-		SigningName:   "ec2",
 		OperationName: "DescribeVerifiedAccessInstanceLoggingConfigurations",
 	}
 }

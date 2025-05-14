@@ -6,11 +6,17 @@ package endpointmanager
 import (
 	"context"
 	"fmt"
+	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
+	"k8s.io/utils/ptr"
 
+	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/identity/identitymanager"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
@@ -23,9 +29,11 @@ func fakeCheck(ep *endpoint.Endpoint) error {
 	return nil
 }
 
-func (s *EndpointManagerSuite) TestmarkAndSweep(c *C) {
+func TestMarkAndSweep(t *testing.T) {
+	logger := hivetest.Logger(t)
+	s := setupEndpointManagerSuite(t)
 	// Open-code WithPeriodicGC() to avoid running the controller
-	mgr := New(&dummyEpSyncher{})
+	mgr := New(logger, &dummyEpSyncher{}, nil, nil, nil)
 	mgr.checkHealth = fakeCheck
 	mgr.deleteEndpoint = endpointDeleteFunc(mgr.waitEndpointRemoved)
 
@@ -37,21 +45,38 @@ func (s *EndpointManagerSuite) TestmarkAndSweep(c *C) {
 	healthyEndpointIDs := []uint16{1, 3, 5, 7}
 	allEndpointIDs := append(healthyEndpointIDs, endpointIDToDelete)
 	for _, id := range allEndpointIDs {
-		ep := endpoint.NewEndpointWithState(s, s, testipcache.NewMockIPCache(), &endpoint.FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), id, endpoint.StateReady)
-		mgr.expose(ep)
+		model := newTestEndpointModel(int(id), endpoint.StateReady)
+		ep, err := endpoint.NewEndpointFromChangeModel(t.Context(), nil, &endpoint.MockEndpointBuildQueue{}, nil, nil, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &endpoint.FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+		require.NoError(t, err)
+
+		ep.Start(uint16(model.ID))
+		t.Cleanup(ep.Stop)
+
+		err = mgr.expose(ep)
+		require.NoError(t, err)
 	}
-	c.Assert(len(mgr.GetEndpoints()), Equals, len(allEndpointIDs))
+	require.Len(t, mgr.GetEndpoints(), len(allEndpointIDs))
 
 	// Two-phase mark and sweep: Mark should not yet delete any endpoints.
 	err := mgr.markAndSweep(ctx)
-	c.Assert(mgr.EndpointExists(endpointIDToDelete), Equals, true)
-	c.Assert(err, IsNil)
-	c.Assert(len(mgr.GetEndpoints()), Equals, len(allEndpointIDs))
+	require.True(t, mgr.EndpointExists(endpointIDToDelete))
+	require.NoError(t, err)
+	require.Len(t, mgr.GetEndpoints(), len(allEndpointIDs))
 
 	// Second phase: endpoint should be marked now and we should only sweep
 	// that particular endpoint.
 	err = mgr.markAndSweep(ctx)
-	c.Assert(mgr.EndpointExists(endpointIDToDelete), Equals, false)
-	c.Assert(err, IsNil)
-	c.Assert(len(mgr.GetEndpoints()), Equals, len(healthyEndpointIDs))
+	require.False(t, mgr.EndpointExists(endpointIDToDelete))
+	require.NoError(t, err)
+	require.Len(t, mgr.GetEndpoints(), len(healthyEndpointIDs))
+}
+
+func newTestEndpointModel(id int, state endpoint.State) *models.EndpointChangeRequest {
+	return &models.EndpointChangeRequest{
+		ID:    int64(id),
+		State: ptr.To(models.EndpointState(state)),
+		Properties: map[string]interface{}{
+			endpoint.PropertyFakeEndpoint: true,
+		},
+	}
 }

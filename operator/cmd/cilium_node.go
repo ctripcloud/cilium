@@ -5,30 +5,33 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
+	"time"
 
-	"golang.org/x/time/rate"
-	core_v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/workqueue"
 
+	operatorK8s "github.com/cilium/cilium/operator/k8s"
 	operatorOption "github.com/cilium/cilium/operator/option"
-	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/ipam/allocator"
-	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
-	v2 "github.com/cilium/cilium/pkg/k8s/client/clientset/versioned/typed/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/informer"
-	v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
+	"github.com/cilium/cilium/pkg/k8s/resource"
+	corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	"github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/labels"
 	"github.com/cilium/cilium/pkg/k8s/utils"
+	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/kvstore/store"
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeStore "github.com/cilium/cilium/pkg/node/store"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
@@ -44,9 +47,14 @@ func (c *ciliumNodeName) GetKeyName() string {
 	return nodeTypes.GetKeyNodeName(c.cluster, c.name)
 }
 
-type ciliumNodeManagerQueueSyncedKey struct{}
+// ciliumNodeManagerQueueSyncedKey indicates that the caches
+// are synced. The underscore prefix ensures that it can never
+// clash with a real key, as Kubernetes does not allow object
+// names to start with an underscore.
+const ciliumNodeManagerQueueSyncedKey = "_ciliumNodeManagerQueueSynced"
 
 type ciliumNodeSynchronizer struct {
+	logger      *slog.Logger
 	clientset   k8sClient.Clientset
 	nodeManager allocator.NodeEventHandler
 	withKVStore bool
@@ -58,8 +66,9 @@ type ciliumNodeSynchronizer struct {
 	ciliumNodeManagerQueueSynced chan struct{}
 }
 
-func newCiliumNodeSynchronizer(clientset k8sClient.Clientset, nodeManager allocator.NodeEventHandler, withKVStore bool) *ciliumNodeSynchronizer {
+func newCiliumNodeSynchronizer(logger *slog.Logger, clientset k8sClient.Clientset, nodeManager allocator.NodeEventHandler, withKVStore bool) *ciliumNodeSynchronizer {
 	return &ciliumNodeSynchronizer{
+		logger:      logger,
 		clientset:   clientset,
 		nodeManager: nodeManager,
 		withKVStore: withKVStore,
@@ -69,18 +78,32 @@ func newCiliumNodeSynchronizer(clientset k8sClient.Clientset, nodeManager alloca
 	}
 }
 
-func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) error {
+func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup, podsStore resource.Store[*corev1.Pod]) error {
 	var (
 		ciliumNodeKVStore      *store.SharedStore
 		err                    error
 		nodeManagerSyncHandler func(key string) error
 		kvStoreSyncHandler     func(key string) error
 		connectedToKVStore     = make(chan struct{})
-
 		resourceEventHandler   = cache.ResourceEventHandlerFuncs{}
-		ciliumNodeConvertFunc  = k8s.ConvertToCiliumNode
-		ciliumNodeManagerQueue = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
-		kvStoreQueue           = workqueue.NewRateLimitingQueue(workqueue.DefaultControllerRateLimiter())
+	)
+
+	var ciliumNodeManagerQueueConfig = workqueue.TypedRateLimitingQueueConfig[string]{
+		Name: "node_manager",
+	}
+	var kvStoreQueueConfig = workqueue.TypedRateLimitingQueueConfig[string]{
+		Name: "kvstore",
+	}
+
+	if operatorOption.Config.EnableMetrics {
+		ciliumNodeManagerQueueConfig.MetricsProvider = NewWorkqueuePrometheusMetricsProvider()
+		kvStoreQueueConfig.MetricsProvider = NewWorkqueuePrometheusMetricsProvider()
+	}
+
+	var ciliumNodeManagerQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](workqueue.DefaultTypedControllerRateLimiter[string](), ciliumNodeManagerQueueConfig)
+	var kvStoreQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+		workqueue.NewTypedItemExponentialFailureRateLimiter[string](1*time.Second, 120*time.Second),
+		kvStoreQueueConfig,
 	)
 
 	// KVStore is enabled -> we will run the event handler to sync objects into
@@ -94,15 +117,17 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 		go func() {
 			defer wg.Done()
 
-			log.Info("Starting to synchronize CiliumNode custom resources to KVStore")
+			s.logger.Info("Starting to synchronize CiliumNode custom resources to KVStore")
 
-			ciliumNodeKVStore, err = store.JoinSharedStore(store.Configuration{
-				Prefix:     nodeStore.NodeStorePrefix,
-				KeyCreator: nodeStore.KeyCreator,
-			})
+			ciliumNodeKVStore, err = store.JoinSharedStore(s.logger,
+				store.Configuration{
+					Backend:    kvstore.Client(),
+					Prefix:     nodeStore.NodeStorePrefix,
+					KeyCreator: nodeStore.KeyCreator,
+				})
 
 			if err != nil {
-				log.WithError(err).Fatal("Unable to setup node watcher")
+				logging.Fatal(s.logger, "Unable to setup node watcher", logfields.Error, err)
 			}
 			close(connectedToKVStore)
 
@@ -122,7 +147,7 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 			}
 
 			if len(listOfCiliumNodes) == 0 && len(kvStoreNodes) != 0 {
-				log.Warn("Preventing GC of nodes in the KVStore due the nonexistence of any CiliumNodes in kube-apiserver")
+				s.logger.Warn("Preventing GC of nodes in the KVStore due the nonexistence of any CiliumNodes in kube-apiserver")
 				return
 			}
 
@@ -134,32 +159,60 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 			}
 		}()
 	} else {
-		log.Info("Starting to synchronize CiliumNode custom resources")
+		s.logger.Info("Starting to synchronize CiliumNode custom resources")
 	}
 
 	if s.nodeManager != nil {
 		nodeManagerSyncHandler = s.syncHandlerConstructor(
-			func(node *cilium_v2.CiliumNode) {
+			func(node *cilium_v2.CiliumNode) error {
 				s.nodeManager.Delete(node)
+				return nil
 			},
-			func(node *cilium_v2.CiliumNode) {
+			func(node *cilium_v2.CiliumNode) error {
+				value, ok := node.Annotations[annotation.IPAMIgnore]
+				if ok && strings.ToLower(value) == "true" {
+					return nil
+				}
+
 				// node is deep copied before it is stored in pkg/aws/eni
-				s.nodeManager.Update(node)
+				s.nodeManager.Upsert(node)
+				return nil
 			})
 	}
 
 	if s.withKVStore {
+		ciliumPodsSelector, err := labels.Parse(operatorOption.Config.CiliumPodLabels)
+		if err != nil {
+			return fmt.Errorf("unable to parse cilium pod selector: %w", err)
+		}
+
 		kvStoreSyncHandler = s.syncHandlerConstructor(
-			func(node *cilium_v2.CiliumNode) {
+			func(node *cilium_v2.CiliumNode) error {
+				// Check if a Cilium agent is still running on the given node, and
+				// in that case retry later, because it would recognize the deletion
+				// event and recreate the kvstore entry right away. Hence, defeating
+				// the whole purpose of this GC logic, and leading to the node entry
+				// being eventually deleted by the lease expiration only.
+				pods, err := podsStore.ByIndex(operatorK8s.PodNodeNameIndex, node.GetName())
+				if err != nil {
+					return fmt.Errorf("retrieving pods indexed by node %q: %w", node.GetName(), err)
+				}
+
+				for _, pod := range pods {
+					if utils.IsPodRunning(pod.Status) && ciliumPodsSelector.Matches(labels.Set(pod.Labels)) {
+						return fmt.Errorf("skipping deletion from kvstore, as Cilium agent is still running on %q", node.GetName())
+					}
+				}
+
 				nodeDel := ciliumNodeName{
 					cluster: option.Config.ClusterName,
 					name:    node.Name,
 				}
 				ciliumNodeKVStore.DeleteLocalKey(ctx, &nodeDel)
+				return nil
 			},
-			func(node *cilium_v2.CiliumNode) {
-				nodeNew := nodeTypes.ParseCiliumNode(node)
-				ciliumNodeKVStore.UpdateKeySync(ctx, &nodeNew, false)
+			func(node *cilium_v2.CiliumNode) error {
+				return nil
 			})
 	}
 
@@ -169,10 +222,10 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 	// to get the latest state of a CiliumNode.
 	if s.withKVStore || s.nodeManager != nil {
 		resourceEventHandler = cache.ResourceEventHandlerFuncs{
-			AddFunc: func(obj interface{}) {
+			AddFunc: func(obj any) {
 				key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 				if err != nil {
-					log.WithError(err).Warning("Unable to process CiliumNode Add event")
+					s.logger.Warn("Unable to process CiliumNode Add event", logfields.Error, err)
 					return
 				}
 				if s.nodeManager != nil {
@@ -182,15 +235,15 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 					kvStoreQueue.Add(key)
 				}
 			},
-			UpdateFunc: func(oldObj, newObj interface{}) {
-				if oldNode := k8s.ObjToCiliumNode(oldObj); oldNode != nil {
-					if newNode := k8s.ObjToCiliumNode(newObj); newNode != nil {
+			UpdateFunc: func(oldObj, newObj any) {
+				if oldNode := informer.CastInformerEvent[cilium_v2.CiliumNode](s.logger, oldObj); oldNode != nil {
+					if newNode := informer.CastInformerEvent[cilium_v2.CiliumNode](s.logger, newObj); newNode != nil {
 						if oldNode.DeepEqual(newNode) {
 							return
 						}
 						key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(newObj)
 						if err != nil {
-							log.WithError(err).Warning("Unable to process CiliumNode Update event")
+							s.logger.Warn("Unable to process CiliumNode Update event", logfields.Error, err)
 							return
 						}
 						if s.nodeManager != nil {
@@ -200,16 +253,24 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 							kvStoreQueue.Add(key)
 						}
 					} else {
-						log.Warningf("Unknown CiliumNode object type %T received: %+v", newNode, newNode)
+						s.logger.Warn(
+							"Unknown CiliumNode object type received",
+							logfields.Type, reflect.TypeOf(newNode),
+							logfields.Node, newNode,
+						)
 					}
 				} else {
-					log.Warningf("Unknown CiliumNode object type %T received: %+v", oldNode, oldNode)
+					s.logger.Warn(
+						"Unknown CiliumNode object type received",
+						logfields.Type, reflect.TypeOf(oldNode),
+						logfields.Node, oldNode,
+					)
 				}
 			},
-			DeleteFunc: func(obj interface{}) {
+			DeleteFunc: func(obj any) {
 				key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 				if err != nil {
-					log.WithError(err).Warning("Unable to process CiliumNode Delete event")
+					s.logger.Warn("Unable to process CiliumNode Delete event", logfields.Error, err)
 					return
 				}
 				if s.nodeManager != nil {
@@ -220,10 +281,6 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 				}
 			},
 		}
-	} else {
-		// Since we won't be handling any events we don't need to convert
-		// objects.
-		ciliumNodeConvertFunc = nil
 	}
 
 	// TODO: The operator is currently storing a full copy of the
@@ -235,7 +292,7 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 		&cilium_v2.CiliumNode{},
 		0,
 		resourceEventHandler,
-		ciliumNodeConvertFunc,
+		nil,
 	)
 
 	wg.Add(1)
@@ -244,8 +301,8 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 
 		cache.WaitForCacheSync(ctx.Done(), ciliumNodeInformer.HasSynced)
 		close(s.k8sCiliumNodesCacheSynced)
-		ciliumNodeManagerQueue.Add(ciliumNodeManagerQueueSyncedKey{})
-		log.Info("CiliumNodes caches synced with Kubernetes")
+		ciliumNodeManagerQueue.Add(ciliumNodeManagerQueueSyncedKey)
+		s.logger.Info("CiliumNodes caches synced with Kubernetes")
 		// Only handle events if nodeManagerSyncHandler is not nil. If it is nil
 		// then there isn't any event handler set for CiliumNodes events.
 		if nodeManagerSyncHandler != nil {
@@ -257,14 +314,11 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 		}
 		// Start handling events for KVStore **after** nodeManagerSyncHandler
 		// otherwise Cilium Operator will block until the KVStore is available.
-		// This might be problematic in clusters that have etcd-operator with
-		// cluster-pool ipam mode because they depend on Cilium Operator to be
-		// running and handling IP Addresses with nodeManagerSyncHandler.
 		// Only handle events if kvStoreSyncHandler is not nil. If it is nil
 		// then there isn't any event handler set for CiliumNodes events.
 		if s.withKVStore && kvStoreSyncHandler != nil {
 			<-connectedToKVStore
-			log.Info("Connected to the KVStore, syncing CiliumNodes to the KVStore")
+			s.logger.Info("Connected to the KVStore, syncing CiliumNodes to the KVStore")
 			// infinite loop it will block code execution
 			for s.processNextWorkItem(kvStoreQueue, kvStoreSyncHandler) {
 			}
@@ -283,26 +337,25 @@ func (s *ciliumNodeSynchronizer) Start(ctx context.Context, wg *sync.WaitGroup) 
 	return nil
 }
 
-func (s *ciliumNodeSynchronizer) syncHandlerConstructor(notFoundHandler func(node *cilium_v2.CiliumNode), foundHandler func(node *cilium_v2.CiliumNode)) func(key string) error {
+func (s *ciliumNodeSynchronizer) syncHandlerConstructor(notFoundHandler, foundHandler func(node *cilium_v2.CiliumNode) error) func(key string) error {
 	return func(key string) error {
 		_, name, err := cache.SplitMetaNamespaceKey(key)
 		if err != nil {
-			log.WithError(err).Error("Unable to process CiliumNode event")
+			s.logger.Error("Unable to process CiliumNode event", logfields.Error, err)
 			return err
 		}
 		obj, exists, err := s.ciliumNodeStore.GetByKey(name)
 
 		// Delete handling
 		if !exists || errors.IsNotFound(err) {
-			notFoundHandler(&cilium_v2.CiliumNode{
+			return notFoundHandler(&cilium_v2.CiliumNode{
 				ObjectMeta: meta_v1.ObjectMeta{
 					Name: name,
 				},
 			})
-			return nil
 		}
 		if err != nil {
-			log.WithError(err).Warning("Unable to retrieve CiliumNode from watcher store")
+			s.logger.Warn("Unable to retrieve CiliumNode from watcher store", logfields.Error, err)
 			return err
 		}
 		cn, ok := obj.(*cilium_v2.CiliumNode)
@@ -317,36 +370,50 @@ func (s *ciliumNodeSynchronizer) syncHandlerConstructor(notFoundHandler func(nod
 			}
 		}
 		if cn.DeletionTimestamp != nil {
-			notFoundHandler(cn)
-			return nil
+			return notFoundHandler(cn)
 		}
-		foundHandler(cn)
-		return nil
+		return foundHandler(cn)
 	}
 }
 
 // processNextWorkItem process all events from the workqueue.
-func (s *ciliumNodeSynchronizer) processNextWorkItem(queue workqueue.RateLimitingInterface, syncHandler func(key string) error) bool {
+func (s *ciliumNodeSynchronizer) processNextWorkItem(queue workqueue.TypedRateLimitingInterface[string], syncHandler func(key string) error) bool {
 	key, quit := queue.Get()
 	if quit {
 		return false
 	}
 	defer queue.Done(key)
 
-	if _, ok := key.(ciliumNodeManagerQueueSyncedKey); ok {
+	if key == ciliumNodeManagerQueueSyncedKey {
 		close(s.ciliumNodeManagerQueueSynced)
 		return true
 	}
 
-	err := syncHandler(key.(string))
+	err := syncHandler(key)
 	if err == nil {
 		// If err is nil we can forget it from the queue, if it is not nil
 		// the queue handler will retry to process this key until it succeeds.
+		if queue.NumRequeues(key) > 0 {
+			s.logger.Info("CiliumNode successfully reconciled after retries", logfields.NodeName, key)
+		}
 		queue.Forget(key)
 		return true
 	}
 
-	log.WithError(err).Errorf("sync %q failed with %v", key, err)
+	const silentRetries = 5
+	if queue.NumRequeues(key) < silentRetries {
+		s.logger.Info("Failed reconciling CiliumNode, will retry",
+			logfields.Error, err,
+			logfields.NodeName, key,
+		)
+	} else {
+		s.logger.Warn(
+			"Failed reconciling CiliumNode, will retry",
+			logfields.Error, err,
+			logfields.NodeName, key,
+		)
+	}
+
 	queue.AddRateLimited(key)
 
 	return true
@@ -376,303 +443,4 @@ func (c *ciliumNodeUpdateImplementation) Update(origNode, node *cilium_v2.Cilium
 		return c.clientset.CiliumV2().CiliumNodes().Update(context.TODO(), node, meta_v1.UpdateOptions{})
 	}
 	return nil, nil
-}
-
-func RunCNPNodeStatusGC(ctx context.Context, wg *sync.WaitGroup, clientset k8sClient.Clientset, nodeStore cache.Store) {
-	runCNPNodeStatusGC("cnp-node-gc", false, ctx, wg, clientset, nodeStore)
-	runCNPNodeStatusGC("ccnp-node-gc", true, ctx, wg, clientset, nodeStore)
-}
-
-// runCNPNodeStatusGC runs the node status garbage collector for cilium network
-// policies. The policy corresponds to CiliumClusterwideNetworkPolicy if the clusterwide
-// parameter is true and CiliumNetworkPolicy otherwise.
-func runCNPNodeStatusGC(name string, clusterwide bool, ctx context.Context, wg *sync.WaitGroup, clientset k8sClient.Clientset, nodeStore cache.Store) {
-	parallelRequests := 4
-	removeNodeFromCNP := make(chan func(), 50)
-	wg.Add(parallelRequests)
-	for i := 0; i < parallelRequests; i++ {
-		go func() {
-			defer wg.Done()
-			for f := range removeNodeFromCNP {
-				f()
-			}
-		}()
-	}
-
-	mgr := controller.NewManager()
-
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		<-ctx.Done()
-		mgr.RemoveAllAndWait()
-	}()
-
-	mgr.UpdateController(name,
-		controller.ControllerParams{
-			RunInterval: operatorOption.Config.CNPNodeStatusGCInterval,
-			StopFunc: func(context.Context) error {
-				close(removeNodeFromCNP)
-				return nil
-			},
-			DoFunc: func(ctx context.Context) error {
-				lastRun := v1.NewTime(v1.Now().Add(-operatorOption.Config.CNPNodeStatusGCInterval))
-				continueID := ""
-				wg := sync.WaitGroup{}
-				defer wg.Wait()
-
-				for {
-					var cnpItemsList []cilium_v2.CiliumNetworkPolicy
-
-					if clusterwide {
-						ccnpList, err := clientset.CiliumV2().CiliumClusterwideNetworkPolicies().List(ctx,
-							meta_v1.ListOptions{
-								Limit:    10,
-								Continue: continueID,
-							})
-						if err != nil {
-							return err
-						}
-
-						cnpItemsList = make([]cilium_v2.CiliumNetworkPolicy, 0, len(ccnpList.Items))
-						for _, ccnp := range ccnpList.Items {
-							cnpItemsList = append(cnpItemsList, cilium_v2.CiliumNetworkPolicy{
-								ObjectMeta: meta_v1.ObjectMeta{
-									Name: ccnp.Name,
-								},
-								Status: ccnp.Status,
-							})
-						}
-						continueID = ccnpList.Continue
-					} else {
-						cnpList, err := clientset.CiliumV2().CiliumNetworkPolicies(core_v1.NamespaceAll).List(ctx,
-							meta_v1.ListOptions{
-								Limit:    10,
-								Continue: continueID,
-							})
-						if err != nil {
-							return err
-						}
-
-						cnpItemsList = cnpList.Items
-						continueID = cnpList.Continue
-					}
-
-					for _, cnp := range cnpItemsList {
-						needsUpdate := false
-						nodesToDelete := map[string]v1.Time{}
-						for n, status := range cnp.Status.Nodes {
-							if _, exists, err := nodeStore.GetByKey(n); !exists && err == nil {
-								// To avoid concurrency issues where a node is
-								// created and adds its CNP Status before the operator
-								// node watcher receives an event that the node
-								// was created, we will only delete the node
-								// from the CNP Status if the last time it was
-								// updated was before the lastRun.
-								if status.LastUpdated.Before(&lastRun) {
-									nodesToDelete[n] = status.LastUpdated
-									delete(cnp.Status.Nodes, n)
-									needsUpdate = true
-								}
-							}
-						}
-						if needsUpdate {
-							wg.Add(1)
-							cnpCpy := cnp.DeepCopy()
-							removeNodeFromCNP <- func() {
-								updateCNP(ctx, clientset.CiliumV2(), cnpCpy, nodesToDelete)
-								wg.Done()
-							}
-						}
-					}
-
-					// Nothing to continue, break from the loop here
-					if continueID == "" {
-						break
-					}
-				}
-
-				return nil
-			},
-			Context: ctx,
-		})
-}
-
-func updateCNP(ctx context.Context, ciliumClient v2.CiliumV2Interface, cnp *cilium_v2.CiliumNetworkPolicy, nodesToDelete map[string]v1.Time) {
-	if len(nodesToDelete) == 0 {
-		return
-	}
-
-	ns := utils.ExtractNamespace(&cnp.ObjectMeta)
-
-	var removeStatusNode, remainingStatusNode []k8s.JSONPatch
-	for nodeToDelete, timeStamp := range nodesToDelete {
-		removeStatusNode = append(removeStatusNode,
-			// It is really unlikely to happen but if a node reappears
-			// with the same name and updates the CNP Status we will perform
-			// a test to verify if the lastUpdated timestamp is the same to
-			// to avoid accidentally deleting that node.
-			// If any of the nodes fails this test *all* of the JSON patch
-			// will not be executed.
-			k8s.JSONPatch{
-				OP:    "test",
-				Path:  "/status/nodes/" + nodeToDelete + "/lastUpdated",
-				Value: timeStamp,
-			},
-			k8s.JSONPatch{
-				OP:   "remove",
-				Path: "/status/nodes/" + nodeToDelete,
-			},
-		)
-	}
-	for {
-		if len(removeStatusNode) > k8s.MaxJSONPatchOperations {
-			remainingStatusNode = removeStatusNode[k8s.MaxJSONPatchOperations:]
-			removeStatusNode = removeStatusNode[:k8s.MaxJSONPatchOperations]
-		}
-
-		removeStatusNodeJSON, err := json.Marshal(removeStatusNode)
-		if err != nil {
-			break
-		}
-
-		// If the namespace is empty the policy is the clusterwide policy
-		// and not the namespaced CiliumNetworkPolicy.
-		if ns == "" {
-			_, err = ciliumClient.CiliumClusterwideNetworkPolicies().Patch(ctx,
-				cnp.GetName(), types.JSONPatchType, removeStatusNodeJSON, meta_v1.PatchOptions{}, "status")
-		} else {
-			_, err = ciliumClient.CiliumNetworkPolicies(ns).Patch(ctx,
-				cnp.GetName(), types.JSONPatchType, removeStatusNodeJSON, meta_v1.PatchOptions{}, "status")
-		}
-		if err != nil {
-			// We can leave the errors as debug as the GC happens on a best effort
-			log.WithError(err).Debug("Unable to PATCH")
-		}
-
-		removeStatusNode = remainingStatusNode
-
-		if len(remainingStatusNode) == 0 {
-			return
-		}
-	}
-}
-
-func RunCNPStatusNodesCleaner(ctx context.Context, clientset k8sClient.Clientset, rateLimit *rate.Limiter) {
-	go clearCNPStatusNodes(ctx, false, clientset, rateLimit)
-	go clearCNPStatusNodes(ctx, true, clientset, rateLimit)
-}
-
-func clearCNPStatusNodes(ctx context.Context, clusterwide bool, clientset k8sClient.Clientset, rateLimit *rate.Limiter) {
-	body, err := json.Marshal([]k8s.JSONPatch{
-		{
-			OP:   "remove",
-			Path: "/status/nodes",
-		},
-	})
-	if err != nil {
-		log.WithError(err).Debug("Unable to json marshal")
-		return
-	}
-
-	continueID := ""
-	nCNPs, nGcCNPs := 0, 0
-	for {
-		if clusterwide {
-			if err := rateLimit.Wait(ctx); err != nil {
-				log.WithError(err).Debug("Error while rate limiting CCNP List requests")
-				return
-			}
-
-			ccnpList, err := clientset.CiliumV2().CiliumClusterwideNetworkPolicies().List(
-				ctx,
-				meta_v1.ListOptions{
-					Limit:    10,
-					Continue: continueID,
-				})
-			if err != nil {
-				log.WithError(err).Debug("Unable to list CCNPs")
-				return
-			}
-			nCNPs += len(ccnpList.Items)
-			continueID = ccnpList.Continue
-
-			for _, cnp := range ccnpList.Items {
-				if len(cnp.Status.Nodes) == 0 {
-					continue
-				}
-
-				if err := rateLimit.Wait(ctx); err != nil {
-					log.WithError(err).Debug("Error while rate limiting CCNP PATCH requests")
-					return
-				}
-
-				_, err = clientset.CiliumV2().CiliumClusterwideNetworkPolicies().Patch(ctx,
-					cnp.Name, types.JSONPatchType, body, meta_v1.PatchOptions{}, "status")
-
-				if err != nil {
-					if errors.IsInvalid(err) {
-						// An "Invalid" error may be returned if /status/nodes path does not exist.
-						// In that case, we simply ignore it, since there are no updates to clean up.
-						continue
-					}
-					log.WithError(err).Debug("Unable to PATCH while clearing status nodes in CCNP")
-				}
-				nGcCNPs++
-			}
-		} else {
-			if err := rateLimit.Wait(ctx); err != nil {
-				log.WithError(err).Debug("Error while rate limiting CNP List requests")
-				return
-			}
-
-			cnpList, err := clientset.CiliumV2().CiliumNetworkPolicies(core_v1.NamespaceAll).List(
-				ctx,
-				meta_v1.ListOptions{
-					Limit:    10,
-					Continue: continueID,
-				})
-			if err != nil {
-				log.WithError(err).Debug("Unable to list CNPs")
-				return
-			}
-			nCNPs += len(cnpList.Items)
-			continueID = cnpList.Continue
-
-			for _, cnp := range cnpList.Items {
-				if len(cnp.Status.Nodes) == 0 {
-					continue
-				}
-
-				namespace := utils.ExtractNamespace(&cnp.ObjectMeta)
-
-				if err := rateLimit.Wait(ctx); err != nil {
-					log.WithError(err).Debug("Error while rate limiting CNP PATCH requests")
-					return
-				}
-
-				_, err = clientset.CiliumV2().CiliumNetworkPolicies(namespace).Patch(ctx,
-					cnp.Name, types.JSONPatchType, body, meta_v1.PatchOptions{}, "status")
-				if err != nil {
-					if errors.IsInvalid(err) {
-						// An "Invalid" error may be returned if /status/nodes path does not exist.
-						// In that case, we simply ignore it, since there are no updates to clean up.
-						continue
-					}
-					log.WithError(err).Debug("Unable to PATCH while clearing status nodes in CNP")
-				}
-				nGcCNPs++
-			}
-		}
-
-		if continueID == "" {
-			break
-		}
-	}
-
-	if clusterwide {
-		log.Infof("Garbage collected status/nodes in Cilium Clusterwide Network Policies found=%d, gc=%d", nCNPs, nGcCNPs)
-	} else {
-		log.Infof("Garbage collected status/nodes in Cilium Network Policies found=%d, gc=%d", nCNPs, nGcCNPs)
-	}
 }

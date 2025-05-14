@@ -14,7 +14,7 @@ ifdef ARCH
   # Default to multi-arch builds, always create the builder for all the platforms we support
   DOCKER_PLATFORMS := linux/arm64,linux/amd64
   DOCKER_BUILDER := $(shell docker buildx ls | grep -E -e "[a-zA-Z0-9-]+ \*" | cut -d ' ' -f1)
-  ifeq ($(DOCKER_BUILDER),default)
+  ifneq (,$(filter $(DOCKER_BUILDER),default desktop-linux))
     DOCKER_BUILDKIT_DRIVER :=
     ifdef DOCKER_BUILDKIT_IMAGE
       DOCKER_BUILDKIT_DRIVER := --driver docker-container --driver-opt image=$(DOCKER_BUILDKIT_IMAGE)
@@ -34,7 +34,10 @@ else
     endif
   endif
 endif
+DOCKER_EXISTS := $(shell command -v docker 2>/dev/null)
+ifdef DOCKER_EXISTS
 DOCKER_BUILDER := $(shell docker buildx ls | grep -E -e "[a-zA-Z0-9-]+ \*" | cut -d ' ' -f1)
+endif
 
 ##@ Docker Images
 .PHONY: builder-info
@@ -49,7 +52,7 @@ GIT_IGNORE_FILES := $(shell find . -not -path "./vendor*" -name .gitignore -prin
 	@echo "/hack" > $@
 	@echo ".git" >> $@
 	@echo "/Makefile.docker" >> $@
-	@echo $(dir $(GIT_IGNORE_FILES)) | tr ' ' '\n' | xargs -P1 -n1 -I {DIR} sed \
+	@echo $(dir $(GIT_IGNORE_FILES)) | tr ' ' '\n' | xargs -P1 -I {DIR} -n1 sed \
 		-e '# Remove lines with white space, comments and files that must be passed to docker, "$$" due to make. #' \
 			-e '/^[[:space:]]*$$/d' -e '/^#/d' -e '/GIT_VERSION/d' \
 		-e '# Apply pattern in all directories if it contains no "/", keep "!" up front. #' \
@@ -89,12 +92,7 @@ endif
 	$(QUIET) $(CONTAINER_ENGINE) buildx build -f $(subst %,$$*,$(2)) \
 		$(DOCKER_BUILD_FLAGS) $(DOCKER_FLAGS) \
 		$(if $(BASE_IMAGE),--build-arg BASE_IMAGE=$(BASE_IMAGE),) \
-		--build-arg NOSTRIP=$${NOSTRIP} \
-		--build-arg NOOPT=${NOOPT} \
-		--build-arg LOCKDEBUG=${LOCKDEBUG} \
-		--build-arg RACE=${RACE}\
-		--build-arg V=${V} \
-		--build-arg LIBNETWORK_PLUGIN=${LIBNETWORK_PLUGIN} \
+		--build-arg MODIFIERS="NOSTRIP=$${NOSTRIP} NOOPT=${NOOPT} LOCKDEBUG=${LOCKDEBUG} RACE=${RACE} V=${V} LIBNETWORK_PLUGIN=${LIBNETWORK_PLUGIN} ${ADDITIONAL_MODIFIERS}" \
 		--build-arg CILIUM_SHA=$(firstword $(GIT_VERSION)) \
 		--build-arg OPERATOR_VARIANT=$(IMAGE_NAME) \
 		--build-arg DEBUG_HOLD=$(DEBUG_HOLD) \

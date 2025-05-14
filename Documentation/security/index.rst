@@ -9,6 +9,13 @@
 Securing Networks with Cilium
 -----------------------------
 
+.. note::
+
+    The 2022 security audits for Cilium are available:
+    
+    - :download:`Cilium Security Audit 2022 <audits/CiliumSecurityAudit2022.pdf>`
+    - :download:`Cilium Fuzzing Audit 2022 <audits/CiliumFuzzingAudit2022.pdf>`
+  
 .. toctree::
    :maxdepth: 2
    :glob:
@@ -19,8 +26,6 @@ Securing Networks with Cilium
    kafka
    grpc
    elasticsearch
-   cassandra
-   memcached
    aws
    policy-creation
    host-firewall

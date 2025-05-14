@@ -9,6 +9,7 @@ package endpoint
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -38,6 +39,12 @@ func (o *PutEndpointIDReader) ReadResponse(response runtime.ClientResponse, cons
 			return nil, err
 		}
 		return nil, result
+	case 403:
+		result := NewPutEndpointIDForbidden()
+		if err := result.readResponse(response, consumer, o.formats); err != nil {
+			return nil, err
+		}
+		return nil, result
 	case 409:
 		result := NewPutEndpointIDExists()
 		if err := result.readResponse(response, consumer, o.formats); err != nil {
@@ -57,7 +64,7 @@ func (o *PutEndpointIDReader) ReadResponse(response runtime.ClientResponse, cons
 		}
 		return nil, result
 	default:
-		return nil, runtime.NewAPIError("response status code does not match any response statuses defined for this endpoint in the swagger spec", response, response.Code())
+		return nil, runtime.NewAPIError("[PUT /endpoint/{id}] PutEndpointID", response, response.Code())
 	}
 }
 
@@ -72,6 +79,7 @@ PutEndpointIDCreated describes a response with status code 201, with default hea
 Created
 */
 type PutEndpointIDCreated struct {
+	Payload *models.Endpoint
 }
 
 // IsSuccess returns true when this put endpoint Id created response has a 2xx status code
@@ -99,15 +107,33 @@ func (o *PutEndpointIDCreated) IsCode(code int) bool {
 	return code == 201
 }
 
+// Code gets the status code for the put endpoint Id created response
+func (o *PutEndpointIDCreated) Code() int {
+	return 201
+}
+
 func (o *PutEndpointIDCreated) Error() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdCreated ", 201)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdCreated %s", 201, payload)
 }
 
 func (o *PutEndpointIDCreated) String() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdCreated ", 201)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdCreated %s", 201, payload)
+}
+
+func (o *PutEndpointIDCreated) GetPayload() *models.Endpoint {
+	return o.Payload
 }
 
 func (o *PutEndpointIDCreated) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
+
+	o.Payload = new(models.Endpoint)
+
+	// response payload
+	if err := consumer.Consume(response.Body(), o.Payload); err != nil && err != io.EOF {
+		return err
+	}
 
 	return nil
 }
@@ -151,12 +177,19 @@ func (o *PutEndpointIDInvalid) IsCode(code int) bool {
 	return code == 400
 }
 
+// Code gets the status code for the put endpoint Id invalid response
+func (o *PutEndpointIDInvalid) Code() int {
+	return 400
+}
+
 func (o *PutEndpointIDInvalid) Error() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdInvalid  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdInvalid %s", 400, payload)
 }
 
 func (o *PutEndpointIDInvalid) String() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdInvalid  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdInvalid %s", 400, payload)
 }
 
 func (o *PutEndpointIDInvalid) GetPayload() models.Error {
@@ -169,6 +202,62 @@ func (o *PutEndpointIDInvalid) readResponse(response runtime.ClientResponse, con
 	if err := consumer.Consume(response.Body(), &o.Payload); err != nil && err != io.EOF {
 		return err
 	}
+
+	return nil
+}
+
+// NewPutEndpointIDForbidden creates a PutEndpointIDForbidden with default headers values
+func NewPutEndpointIDForbidden() *PutEndpointIDForbidden {
+	return &PutEndpointIDForbidden{}
+}
+
+/*
+PutEndpointIDForbidden describes a response with status code 403, with default header values.
+
+Forbidden
+*/
+type PutEndpointIDForbidden struct {
+}
+
+// IsSuccess returns true when this put endpoint Id forbidden response has a 2xx status code
+func (o *PutEndpointIDForbidden) IsSuccess() bool {
+	return false
+}
+
+// IsRedirect returns true when this put endpoint Id forbidden response has a 3xx status code
+func (o *PutEndpointIDForbidden) IsRedirect() bool {
+	return false
+}
+
+// IsClientError returns true when this put endpoint Id forbidden response has a 4xx status code
+func (o *PutEndpointIDForbidden) IsClientError() bool {
+	return true
+}
+
+// IsServerError returns true when this put endpoint Id forbidden response has a 5xx status code
+func (o *PutEndpointIDForbidden) IsServerError() bool {
+	return false
+}
+
+// IsCode returns true when this put endpoint Id forbidden response a status code equal to that given
+func (o *PutEndpointIDForbidden) IsCode(code int) bool {
+	return code == 403
+}
+
+// Code gets the status code for the put endpoint Id forbidden response
+func (o *PutEndpointIDForbidden) Code() int {
+	return 403
+}
+
+func (o *PutEndpointIDForbidden) Error() string {
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdForbidden", 403)
+}
+
+func (o *PutEndpointIDForbidden) String() string {
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdForbidden", 403)
+}
+
+func (o *PutEndpointIDForbidden) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	return nil
 }
@@ -211,12 +300,17 @@ func (o *PutEndpointIDExists) IsCode(code int) bool {
 	return code == 409
 }
 
+// Code gets the status code for the put endpoint Id exists response
+func (o *PutEndpointIDExists) Code() int {
+	return 409
+}
+
 func (o *PutEndpointIDExists) Error() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdExists ", 409)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdExists", 409)
 }
 
 func (o *PutEndpointIDExists) String() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdExists ", 409)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdExists", 409)
 }
 
 func (o *PutEndpointIDExists) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
@@ -262,12 +356,17 @@ func (o *PutEndpointIDTooManyRequests) IsCode(code int) bool {
 	return code == 429
 }
 
+// Code gets the status code for the put endpoint Id too many requests response
+func (o *PutEndpointIDTooManyRequests) Code() int {
+	return 429
+}
+
 func (o *PutEndpointIDTooManyRequests) Error() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdTooManyRequests ", 429)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdTooManyRequests", 429)
 }
 
 func (o *PutEndpointIDTooManyRequests) String() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdTooManyRequests ", 429)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdTooManyRequests", 429)
 }
 
 func (o *PutEndpointIDTooManyRequests) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
@@ -314,12 +413,19 @@ func (o *PutEndpointIDFailed) IsCode(code int) bool {
 	return code == 500
 }
 
+// Code gets the status code for the put endpoint Id failed response
+func (o *PutEndpointIDFailed) Code() int {
+	return 500
+}
+
 func (o *PutEndpointIDFailed) Error() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdFailed  %+v", 500, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdFailed %s", 500, payload)
 }
 
 func (o *PutEndpointIDFailed) String() string {
-	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdFailed  %+v", 500, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[PUT /endpoint/{id}][%d] putEndpointIdFailed %s", 500, payload)
 }
 
 func (o *PutEndpointIDFailed) GetPayload() models.Error {

@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_DBG__
-#define __LIB_DBG__
+#pragma once
 
 /* Trace types */
 enum {
@@ -60,11 +59,11 @@ enum {
 				 */
 	DBG_CT_LOOKUP4_2,       /* arg1: (nexthdr << 8) | flags
 				 * arg2: direction
-				 * arg3: unused
+				 * arg3: scope
 				 */
 	DBG_CT_CREATED4,        /* arg1: (unused << 16) | rev_nat_index
 				 * arg2: src sec-id
-				 * arg3: lb address
+				 * arg3: unused
 				 */
 	DBG_CT_LOOKUP6_1,       /* arg1: saddr (last 4 bytes)
 				 * arg2: daddr (last 4 bytes)
@@ -72,7 +71,7 @@ enum {
 				 */
 	DBG_CT_LOOKUP6_2,       /* arg1: (nexthdr << 8) | flags
 				 * arg2: direction
-				 * arg3: unused
+				 * arg3: scope
 				 */
 	DBG_CT_CREATED6,        /* arg1: (unused << 16) | rev_nat_index
 				 * arg2: src sec-id
@@ -123,6 +122,7 @@ enum {
 				 * arg2: daddr (last 4 bytes for IPv6)
 				 * arg3: proxy port (in host byte order)
 				 */
+	DBG_SKIP_POLICY,	/**/
 };
 
 /* Capture types */
@@ -149,6 +149,21 @@ enum {
 #include "events.h"
 #endif
 
+#include "notify.h"
+
+struct debug_msg {
+	NOTIFY_COMMON_HDR
+	__u32		arg1;
+	__u32		arg2;
+	__u32		arg3;
+};
+
+struct debug_capture_msg {
+	NOTIFY_CAPTURE_HDR
+	__u32		arg1;
+	__u32		arg2;
+};
+
 #ifdef DEBUG
 #include "common.h"
 #include "utils.h"
@@ -173,12 +188,6 @@ enum {
 				     ##__VA_ARGS__);		\
 		})
 
-struct debug_msg {
-	NOTIFY_COMMON_HDR
-	__u32		arg1;
-	__u32		arg2;
-	__u32		arg3;
-};
 
 static __always_inline void cilium_dbg(struct __ctx_buff *ctx, __u8 type,
 				       __u32 arg1, __u32 arg2)
@@ -189,7 +198,7 @@ static __always_inline void cilium_dbg(struct __ctx_buff *ctx, __u8 type,
 		.arg2	= arg2,
 	};
 
-	ctx_event_output(ctx, &EVENTS_MAP, BPF_F_CURRENT_CPU,
+	ctx_event_output(ctx, &cilium_events, BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 }
 
@@ -203,15 +212,10 @@ static __always_inline void cilium_dbg3(struct __ctx_buff *ctx, __u8 type,
 		.arg3	= arg3,
 	};
 
-	ctx_event_output(ctx, &EVENTS_MAP, BPF_F_CURRENT_CPU,
+	ctx_event_output(ctx, &cilium_events, BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 }
 
-struct debug_capture_msg {
-	NOTIFY_CAPTURE_HDR
-	__u32		arg1;
-	__u32		arg2;
-};
 
 static __always_inline void cilium_dbg_capture2(struct __ctx_buff *ctx, __u8 type,
 						__u32 arg1, __u32 arg2)
@@ -220,12 +224,12 @@ static __always_inline void cilium_dbg_capture2(struct __ctx_buff *ctx, __u8 typ
 	__u64 cap_len = min_t(__u64, TRACE_PAYLOAD_LEN, ctx_len);
 	struct debug_capture_msg msg = {
 		__notify_common_hdr(CILIUM_NOTIFY_DBG_CAPTURE, type),
-		__notify_pktcap_hdr(ctx_len, (__u16)cap_len),
+		__notify_pktcap_hdr((__u32)ctx_len, (__u16)cap_len, NOTIFY_CAPTURE_VER),
 		.arg1	= arg1,
 		.arg2	= arg2,
 	};
 
-	ctx_event_output(ctx, &EVENTS_MAP,
+	ctx_event_output(ctx, &cilium_events,
 			 (cap_len << 32) | BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 }
@@ -266,4 +270,3 @@ void cilium_dbg_capture2(struct __ctx_buff *ctx __maybe_unused,
 }
 
 #endif
-#endif /* __LIB_DBG__ */

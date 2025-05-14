@@ -6,19 +6,13 @@
 #include <bpf/ctx/xdp.h>
 #include "pktgen.h"
 
-/* Set ETH_HLEN to 14 to indicate that the packet has a 14 byte ethernet header */
-#define ETH_HLEN 14
-
 /* Enable code paths under test */
 #define ENABLE_IPV4
 #define ENABLE_NODEPORT
 #define ENABLE_NODEPORT_ACCELERATION
 
-#define DISABLE_LOOPBACK_LB
-
-/* Skip ingress policy checks, not needed to validate hairpin flow */
+/* Skip ingress policy checks */
 #define USE_BPF_PROG_FOR_INGRESS_POLICY
-#undef FORCE_LOCAL_POLICY_EVAL_AT_SOURCE
 
 #define CLIENT_IP		v4_ext_one
 #define CLIENT_PORT		__bpf_htons(111)
@@ -43,13 +37,32 @@ static volatile const __u8 *node_mac = mac_three;
 static volatile const __u8 *local_backend_mac = mac_four;
 static volatile const __u8 *remote_backend_mac = mac_five;
 
-static __be16 nat_source_port;
-static bool fail_fib;
+#include <bpf/compiler.h>
+#include <bpf/helpers.h>
+#include <bpf/loader.h>
+#include <bpf/section.h>
+#include <linux/bpf.h>
+#include <linux/types.h>
+
+struct mock_settings {
+	__be16 nat_source_port;
+	bool fail_fib;
+};
+
+struct {
+	__uint(type, BPF_MAP_TYPE_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, sizeof(struct mock_settings));
+	__uint(max_entries, 1);
+} settings_map __section_maps_btf;
 
 long mock_fib_lookup(__maybe_unused void *ctx, struct bpf_fib_lookup *params,
 		     __maybe_unused int plen, __maybe_unused __u32 flags)
 {
-	if (fail_fib)
+	__u32 key = 0;
+	struct mock_settings *settings = map_lookup_elem(&settings_map, &key);
+
+	if (settings && settings->fail_fib)
 		return BPF_FIB_LKUP_RET_NO_NEIGH;
 
 	params->ifindex = 0;
@@ -66,6 +79,10 @@ long mock_fib_lookup(__maybe_unused void *ctx, struct bpf_fib_lookup *params,
 }
 
 #include <bpf_xdp.c>
+
+#include "lib/endpoint.h"
+#include "lib/ipcache.h"
+#include "lib/lb.h"
 
 #define FROM_NETDEV	0
 
@@ -89,35 +106,17 @@ int nodeport_local_backend_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
 	struct tcphdr *l4;
-	struct ethhdr *l2;
-	struct iphdr *l3;
 	void *data;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)client_mac, (__u8 *)lb_mac);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->saddr = CLIENT_IP;
-	l3->daddr = FRONTEND_IP_LOCAL;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)client_mac, (__u8 *)lb_mac,
+					  CLIENT_IP, FRONTEND_IP_LOCAL,
+					  CLIENT_PORT, FRONTEND_PORT);
 	if (!l4)
 		return TEST_ERROR;
-
-	l4->source = CLIENT_PORT;
-	l4->dest = FRONTEND_PORT;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
 	if (!data)
@@ -134,75 +133,17 @@ int nodeport_local_backend_setup(struct __ctx_buff *ctx)
 {
 	__u16 revnat_id = 1;
 
-	/* Register a fake LB backend matching our packet. */
-	struct lb4_key lb_svc_key = {
-		.address = FRONTEND_IP_LOCAL,
-		.dport = FRONTEND_PORT,
-		.scope = LB_LOOKUP_SCOPE_EXT,
-	};
-	/* Create a service with only one backend */
-	struct lb4_service lb_svc_value = {
-		.count = 1,
-		.flags = SVC_FLAG_ROUTABLE,
-		.rev_nat_index = revnat_id,
-	};
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-	/* We need to register both in the external and internal scopes for the
-	 * packet to be redirected to a neighboring node
-	 */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_INT;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* A backend between 1 and .count is chosen, since we have only one backend
-	 * it is always backend_slot 1. Point it to backend_id 124.
-	 */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_EXT;
-	lb_svc_key.backend_slot = 1;
-	lb_svc_value.backend_id = 124;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* Insert a reverse NAT entry for the above service */
-	struct lb4_reverse_nat revnat_value = {
-		.address = FRONTEND_IP_LOCAL,
-		.port = FRONTEND_PORT,
-	};
-	map_update_elem(&LB4_REVERSE_NAT_MAP, &revnat_id, &revnat_value, BPF_ANY);
-
-	/* Create backend id 124 which contains the IP and port to send the
-	 * packet to.
-	 */
-	struct lb4_backend backend = {
-		.address = BACKEND_IP_LOCAL,
-		.port = BACKEND_PORT,
-		.proto = IPPROTO_TCP,
-		.flags = BE_STATE_ACTIVE,
-	};
-	map_update_elem(&LB4_BACKEND_MAP, &lb_svc_value.backend_id, &backend, BPF_ANY);
+	lb_v4_add_service(FRONTEND_IP_LOCAL, FRONTEND_PORT, IPPROTO_TCP, 1, revnat_id);
+	lb_v4_add_backend(FRONTEND_IP_LOCAL, FRONTEND_PORT, 1, 124,
+			  BACKEND_IP_LOCAL, BACKEND_PORT, IPPROTO_TCP, 0);
 
 	/* add local backend */
-	struct endpoint_info ep_value = {};
-
-	memcpy(&ep_value.mac, (__u8 *)local_backend_mac, ETH_ALEN);
-	memcpy(&ep_value.node_mac, (__u8 *)node_mac, ETH_ALEN);
-
-	struct endpoint_key ep_key = {
-		.family = ENDPOINT_KEY_IPV4,
-		.ip4 = BACKEND_IP_LOCAL,
-	};
-	map_update_elem(&ENDPOINTS_MAP, &ep_key, &ep_value, BPF_ANY);
-
-	struct ipcache_key cache_key = {
-		.lpm_key.prefixlen = 32,
-		.family = ENDPOINT_KEY_IPV4,
-		.ip4 = BACKEND_IP_LOCAL,
-	};
-	struct remote_endpoint_info cache_value = {
-		.sec_identity = 112233,
-	};
-	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
+	endpoint_v4_add_entry(BACKEND_IP_LOCAL, 0, 0, 0, 0, 0,
+			      (__u8 *)local_backend_mac, (__u8 *)node_mac);
+	ipcache_v4_add_entry(BACKEND_IP_LOCAL, 0, 112233, 0, 0);
 
 	/* Jump into the entrypoint */
-	tail_call_static(ctx, &entry_call_map, FROM_NETDEV);
+	tail_call_static(ctx, entry_call_map, FROM_NETDEV);
 	/* Fail if we didn't jump */
 	return TEST_ERROR;
 }
@@ -257,11 +198,17 @@ int nodeport_local_backend_check(const struct __ctx_buff *ctx)
 	if (l3->daddr != BACKEND_IP_LOCAL)
 		test_fatal("dst IP hasn't been NATed to local backend IP");
 
+	if (l3->check != bpf_htons(0x4112))
+		test_fatal("L3 checksum is invalid: %x", bpf_htons(l3->check));
+
 	if (l4->source != CLIENT_PORT)
 		test_fatal("src port has changed");
 
 	if (l4->dest != BACKEND_PORT)
 		test_fatal("dst TCP port hasn't been NATed to backend port");
+
+	if (l4->check != bpf_htons(0xd7d0))
+		test_fatal("L4 checksum is invalid: %x", bpf_htons(l4->check));
 
 	test_finish();
 }
@@ -275,35 +222,17 @@ int nodeport_nat_fwd_pktgen(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
 	struct tcphdr *l4;
-	struct ethhdr *l2;
-	struct iphdr *l3;
 	void *data;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)client_mac, (__u8 *)lb_mac);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->saddr = CLIENT_IP;
-	l3->daddr = FRONTEND_IP_REMOTE;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)client_mac, (__u8 *)lb_mac,
+					  CLIENT_IP, FRONTEND_IP_REMOTE,
+					  CLIENT_PORT, FRONTEND_PORT);
 	if (!l4)
 		return TEST_ERROR;
-
-	l4->source = CLIENT_PORT;
-	l4->dest = FRONTEND_PORT;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
 	if (!data)
@@ -320,63 +249,14 @@ int nodeport_nat_fwd_setup(struct __ctx_buff *ctx)
 {
 	__u16 revnat_id = 1;
 
-	/* Register a fake LB backend matching our packet. */
-	struct lb4_key lb_svc_key = {
-		.address = FRONTEND_IP_REMOTE,
-		.dport = FRONTEND_PORT,
-		.scope = LB_LOOKUP_SCOPE_EXT,
-	};
-	/* Create a service with only one backend */
-	struct lb4_service lb_svc_value = {
-		.count = 1,
-		.flags = SVC_FLAG_ROUTABLE,
-		.rev_nat_index = revnat_id,
-	};
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-	/* We need to register both in the external and internal scopes for the
-	 * packet to be redirected to a neighboring node
-	 */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_INT;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
+	lb_v4_add_service(FRONTEND_IP_REMOTE, FRONTEND_PORT, IPPROTO_TCP, 1, revnat_id);
+	lb_v4_add_backend(FRONTEND_IP_REMOTE, FRONTEND_PORT, 1, 124,
+			  BACKEND_IP_REMOTE, BACKEND_PORT, IPPROTO_TCP, 0);
 
-	/* A backend between 1 and .count is chosen, since we have only one backend
-	 * it is always backend_slot 1. Point it to backend_id 124.
-	 */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_EXT;
-	lb_svc_key.backend_slot = 1;
-	lb_svc_value.backend_id = 124;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-
-	/* Insert a reverse NAT entry for the above service */
-	struct lb4_reverse_nat revnat_value = {
-		.address = FRONTEND_IP_REMOTE,
-		.port = FRONTEND_PORT,
-	};
-	map_update_elem(&LB4_REVERSE_NAT_MAP, &revnat_id, &revnat_value, BPF_ANY);
-
-	/* Create backend id 124 which contains the IP and port to send the
-	 * packet to.
-	 */
-	struct lb4_backend backend = {
-		.address = BACKEND_IP_REMOTE,
-		.port = BACKEND_PORT,
-		.proto = IPPROTO_TCP,
-		.flags = BE_STATE_ACTIVE,
-	};
-	map_update_elem(&LB4_BACKEND_MAP, &lb_svc_value.backend_id, &backend, BPF_ANY);
-
-	struct ipcache_key cache_key = {
-		.lpm_key.prefixlen = 32,
-		.family = ENDPOINT_KEY_IPV4,
-		.ip4 = BACKEND_IP_REMOTE,
-	};
-	struct remote_endpoint_info cache_value = {
-		.sec_identity = 112233,
-	};
-	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
+	ipcache_v4_add_entry(BACKEND_IP_REMOTE, 0, 112233, 0, 0);
 
 	/* Jump into the entrypoint */
-	tail_call_static(ctx, &entry_call_map, FROM_NETDEV);
+	tail_call_static(ctx, entry_call_map, FROM_NETDEV);
 	/* Fail if we didn't jump */
 	return TEST_ERROR;
 }
@@ -389,6 +269,7 @@ int nodeport_nat_fwd_check(__maybe_unused const struct __ctx_buff *ctx)
 	struct tcphdr *l4;
 	struct ethhdr *l2;
 	struct iphdr *l3;
+	__u32 key = 0;
 
 	test_init();
 
@@ -425,13 +306,19 @@ int nodeport_nat_fwd_check(__maybe_unused const struct __ctx_buff *ctx)
 	if (l3->daddr != BACKEND_IP_REMOTE)
 		test_fatal("dst IP hasn't been NATed to remote backend IP");
 
+	if (l3->check != bpf_htons(0xa711))
+		test_fatal("L3 checksum is invalid: %x", bpf_htons(l3->check));
+
 	if (l4->source == CLIENT_PORT)
 		test_fatal("src port hasn't been NATed");
 
 	if (l4->dest != BACKEND_PORT)
 		test_fatal("dst port hasn't been NATed to backend port");
 
-	nat_source_port = l4->source;
+	struct mock_settings *settings = map_lookup_elem(&settings_map, &key);
+
+	if (settings)
+		settings->nat_source_port = l4->source;
 
 	test_finish();
 }
@@ -440,35 +327,24 @@ static __always_inline int build_reply(struct __ctx_buff *ctx)
 {
 	struct pktgen builder;
 	struct tcphdr *l4;
-	struct ethhdr *l2;
-	struct iphdr *l3;
 	void *data;
+	__u16 nat_source_port = 0;
+	__u32 key = 0;
+
+	struct mock_settings *settings = map_lookup_elem(&settings_map, &key);
+
+	if (settings && settings->nat_source_port)
+		nat_source_port = settings->nat_source_port;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)remote_backend_mac, (__u8 *)lb_mac);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->saddr = BACKEND_IP_REMOTE;
-	l3->daddr = LB_IP;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)remote_backend_mac, (__u8 *)lb_mac,
+					  BACKEND_IP_REMOTE, LB_IP,
+					  BACKEND_PORT, nat_source_port);
 	if (!l4)
 		return TEST_ERROR;
-
-	l4->source = BACKEND_PORT;
-	l4->dest = nat_source_port;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
 	if (!data)
@@ -523,11 +399,17 @@ static __always_inline int check_reply(const struct __ctx_buff *ctx)
 	if (l3->daddr != CLIENT_IP)
 		test_fatal("dst IP hasn't been RevNATed to client IP");
 
+	if (l3->check != bpf_htons(0x4ca9))
+		test_fatal("L3 checksum is invalid: %x", bpf_htons(l3->check));
+
 	if (l4->source != FRONTEND_PORT)
 		test_fatal("src port hasn't been RevNATed to frontend port");
 
 	if (l4->dest != CLIENT_PORT)
 		test_fatal("dst port hasn't been RevNATed to client port");
+
+	if (l4->check != bpf_htons(0x01a8))
+		test_fatal("L4 checksum is invalid: %x", bpf_htons(l4->check));
 
 	test_finish();
 }
@@ -545,7 +427,7 @@ SETUP("xdp", "xdp_nodeport_nat_fwd_reply")
 int nodeport_nat_fwd_reply_setup(struct __ctx_buff *ctx)
 {
 	/* Jump into the entrypoint */
-	tail_call_static(ctx, &entry_call_map, FROM_NETDEV);
+	tail_call_static(ctx, entry_call_map, FROM_NETDEV);
 	/* Fail if we didn't jump */
 	return TEST_ERROR;
 }
@@ -569,10 +451,14 @@ int nodepoirt_nat_fwd_reply_no_fib_pktgen(struct __ctx_buff *ctx)
 SETUP("xdp", "xdp_nodeport_nat_fwd_reply_no_fib")
 int nodeport_nat_fwd_reply_no_fib_setup(struct __ctx_buff *ctx)
 {
-	fail_fib = 1;
+	__u32 key = 0;
+	struct mock_settings *settings = map_lookup_elem(&settings_map, &key);
+
+	if (settings)
+		settings->fail_fib = true;
 
 	/* Jump into the entrypoint */
-	tail_call_static(ctx, &entry_call_map, FROM_NETDEV);
+	tail_call_static(ctx, entry_call_map, FROM_NETDEV);
 	/* Fail if we didn't jump */
 	return TEST_ERROR;
 }

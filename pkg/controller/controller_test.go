@@ -5,33 +5,49 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type ControllerSuite struct{}
-
-var _ = Suite(&ControllerSuite{})
-
-func (b *ControllerSuite) TestUpdateRemoveController(c *C) {
+func TestUpdateRemoveController(t *testing.T) {
 	mngr := NewManager()
 	mngr.UpdateController("test", ControllerParams{})
-	c.Assert(mngr.RemoveController("test"), IsNil)
-	c.Assert(mngr.RemoveController("not-exist"), Not(IsNil))
+	require.NoError(t, mngr.RemoveController("test"))
+	require.Error(t, mngr.RemoveController("not-exits"))
 }
 
-func (b *ControllerSuite) TestStopFunc(c *C) {
+func TestCreateController(t *testing.T) {
+	var iterations atomic.Uint32
+	mngr := NewManager()
+	created := mngr.CreateController("test", ControllerParams{
+		DoFunc: func(ctx context.Context) error {
+			iterations.Add(1)
+			return nil
+		},
+	})
+	require.True(t, created)
+
+	// Second creation is a no-op.
+	created = mngr.CreateController("test", ControllerParams{
+		DoFunc: func(ctx context.Context) error {
+			iterations.Add(1)
+			return nil
+		},
+	})
+	require.False(t, created)
+
+	require.NoError(t, mngr.RemoveControllerAndWait("test"))
+	require.Equal(t, uint32(1), iterations.Load())
+}
+
+func TestStopFunc(t *testing.T) {
 	stopFuncRan := false
 	waitChan := make(chan struct{})
 
@@ -45,24 +61,24 @@ func (b *ControllerSuite) TestStopFunc(c *C) {
 			return nil
 		},
 	})
-	c.Assert(mngr.RemoveController("test"), IsNil)
+	require.NoError(t, mngr.RemoveController("test"))
 	select {
 	case <-waitChan:
 	case <-time.After(2 * time.Second):
-		c.Error("StopFunc did not run")
+		t.Error("StopFunc did not run")
 	}
-	c.Assert(stopFuncRan, Equals, true)
+	require.True(t, stopFuncRan)
 }
 
-func (b *ControllerSuite) TestSelfExit(c *C) {
-	var iterations uint32
+func TestSelfExit(t *testing.T) {
+	var iterations atomic.Uint32
 	waitChan := make(chan bool)
 
 	mngr := Manager{}
 	mngr.UpdateController("test", ControllerParams{
 		RunInterval: 100 * time.Millisecond,
 		DoFunc: func(ctx context.Context) error {
-			atomic.AddUint32(&iterations, 1)
+			iterations.Add(1)
 			return NewExitReason("test exit")
 		},
 		StopFunc: func(ctx context.Context) error {
@@ -72,10 +88,10 @@ func (b *ControllerSuite) TestSelfExit(c *C) {
 	})
 	select {
 	case <-waitChan:
-		c.Error("Controller exited")
+		t.Error("Controller exited")
 	case <-time.After(time.Second):
 	}
-	c.Assert(atomic.LoadUint32(&iterations), Equals, uint32(1))
+	require.Equal(t, uint32(1), iterations.Load())
 
 	// The controller is inactive, and waiting for the next update or stop.
 	// A controller will only stop when explicitly removed and stopped.
@@ -83,11 +99,11 @@ func (b *ControllerSuite) TestSelfExit(c *C) {
 	select {
 	case <-waitChan:
 	case <-time.After(time.Second):
-		c.Error("Controller did not exit")
+		t.Error("Controller did not exit")
 	}
 }
 
-func (b *ControllerSuite) TestRemoveAll(c *C) {
+func TestRemoveAll(t *testing.T) {
 	mngr := NewManager()
 	// create
 	mngr.UpdateController("test1", ControllerParams{})
@@ -104,7 +120,7 @@ type testObj struct {
 	cnt int
 }
 
-func (b *ControllerSuite) TestRunController(c *C) {
+func TestRunController(t *testing.T) {
 	mngr := NewManager()
 	o := &testObj{}
 
@@ -124,21 +140,20 @@ func (b *ControllerSuite) TestRunController(c *C) {
 
 	for n := 0; ctrl.GetSuccessCount() < 2; n++ {
 		if n > 100 {
-			c.Fatalf("time out while waiting for controller to succeed, last error: %s", ctrl.GetLastError())
+			t.Fatalf("time out while waiting for controller to succeed, last error: %s", ctrl.GetLastError())
 		}
 
 		time.Sleep(time.Duration(100) * time.Millisecond)
 	}
 
-	c.Assert(GetGlobalStatus(), Not(IsNil))
-
-	c.Assert(ctrl.GetSuccessCount(), Not(Equals), 0)
-	c.Assert(ctrl.GetFailureCount(), Equals, 2)
-	c.Assert(ctrl.GetLastError(), IsNil)
-	c.Assert(mngr.RemoveController("test"), IsNil)
+	require.NotNil(t, GetGlobalStatus())
+	require.NotEqual(t, 0, ctrl.GetSuccessCount())
+	require.Equal(t, 2, ctrl.GetFailureCount())
+	require.NoError(t, ctrl.GetLastError())
+	require.NoError(t, mngr.RemoveController("test"))
 }
 
-func (b *ControllerSuite) TestCancellation(c *C) {
+func TestCancellation(t *testing.T) {
 	mngr := NewManager()
 
 	started := make(chan struct{})
@@ -157,7 +172,7 @@ func (b *ControllerSuite) TestCancellation(c *C) {
 	select {
 	case <-started:
 	case <-time.After(time.Minute):
-		c.Fatalf("timeout while waiting for controller to start")
+		t.Fatalf("timeout while waiting for controller to start")
 	}
 
 	mngr.RemoveAll()
@@ -166,32 +181,117 @@ func (b *ControllerSuite) TestCancellation(c *C) {
 	select {
 	case <-cancelled:
 	case <-time.After(time.Minute):
-		c.Fatalf("timeout while waiting for controller to be cancelled")
+		t.Fatalf("timeout while waiting for controller to be cancelled")
 	}
 }
 
-func (b *ControllerSuite) TestWaitForTermination(c *C) {
+// terminationChannel returns a channel that is closed after the controller has
+// been terminated
+func (m *Manager) terminationChannel(name string) chan struct{} {
+	if c := m.lookup(name); c != nil {
+		return c.terminated
+	}
+
+	c := make(chan struct{})
+	close(c)
+	return c
+}
+
+func TestWaitForTermination(t *testing.T) {
 	mngr := NewManager()
 	mngr.UpdateController("test1", ControllerParams{})
 	mngr.UpdateController("test1", ControllerParams{})
 
 	// Ensure that the channel does not get closed while the controller is
 	// still running
-	c.Assert(testutils.WaitUntil(func() bool {
+	require.NoError(t, testutils.WaitUntil(func() bool {
 		select {
-		case <-mngr.TerminationChannel("test1"):
+		case <-mngr.terminationChannel("test1"):
 			return false
 		default:
 			return true
 		}
-	}, 20*time.Millisecond), IsNil)
+	}, 20*time.Millisecond))
 
-	c.Assert(mngr.RemoveControllerAndWait("test1"), IsNil)
+	require.NoError(t, mngr.RemoveControllerAndWait("test1"))
 
 	// The controller must have been terminated already due to AndWait above
 	select {
-	case <-mngr.TerminationChannel("test1"):
+	case <-mngr.terminationChannel("test1"):
 	default:
-		c.Fail()
+		t.Fail()
 	}
+}
+
+type testEvent struct {
+	name          string
+	doFunc        ControllerFunc
+	result        int32
+	waitToExecute bool
+	start         chan struct{}
+	complete      chan struct{}
+}
+
+func TestConcurrentControllerUpdate(t *testing.T) {
+	var (
+		result        atomic.Int32
+		waitToExecute = make(chan struct{})
+	)
+
+	events := make([]testEvent, 3)
+	for i := range len(events) {
+		// wait on the first function so we can apply multiple updates
+		// while the inner doFunc is blocked.
+		wait := i == 0
+		name := fmt.Sprintf("func%d", i)
+		complete := make(chan struct{})
+		start := make(chan struct{})
+		events[i] = testEvent{
+			name: name,
+			doFunc: func(ctx context.Context) error {
+				t.Log("Running " + name)
+				close(start)
+				if events[i].waitToExecute {
+					<-waitToExecute
+				}
+				result.Store(int32(i))
+				close(complete)
+				return nil
+			},
+			result:        int32(i),
+			waitToExecute: wait,
+			start:         start,
+			complete:      complete,
+		}
+	}
+
+	t.Log("Executing the first update")
+	mngr := NewManager()
+	mngr.UpdateController("test", ControllerParams{
+		DoFunc: events[0].doFunc,
+	})
+	<-events[0].start
+
+	t.Log("Applying subsequent updates while the controller is executing")
+	for i := 1; i < len(events); i++ {
+		mngr.UpdateController("test", ControllerParams{
+			DoFunc: events[i].doFunc,
+		})
+	}
+
+	t.Log("Completing the first execution")
+	close(waitToExecute)
+	<-events[0].complete
+
+	t.Log("Waiting for a later function to complete")
+	err := errors.New("Intermediate updates should have been elided")
+	select {
+	case <-events[1].complete:
+	case <-events[2].complete:
+		err = nil
+	}
+
+	require.NoError(t, err)
+	require.NoError(t, mngr.RemoveControllerAndWait("test"))
+	require.Equal(t, result.Load(), events[len(events)-1].result)
 }

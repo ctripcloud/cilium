@@ -6,31 +6,21 @@
 package v1
 
 import (
-	"net/http"
+	http "net/http"
 
-	v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
-	"github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned/scheme"
+	networkingv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
+	scheme "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned/scheme"
 	rest "k8s.io/client-go/rest"
 )
 
 type NetworkingV1Interface interface {
 	RESTClient() rest.Interface
-	IngressesGetter
-	IngressClassesGetter
 	NetworkPoliciesGetter
 }
 
 // NetworkingV1Client is used to interact with features provided by the networking.k8s.io group.
 type NetworkingV1Client struct {
 	restClient rest.Interface
-}
-
-func (c *NetworkingV1Client) Ingresses(namespace string) IngressInterface {
-	return newIngresses(c, namespace)
-}
-
-func (c *NetworkingV1Client) IngressClasses() IngressClassInterface {
-	return newIngressClasses(c)
 }
 
 func (c *NetworkingV1Client) NetworkPolicies(namespace string) NetworkPolicyInterface {
@@ -42,9 +32,7 @@ func (c *NetworkingV1Client) NetworkPolicies(namespace string) NetworkPolicyInte
 // where httpClient was generated with rest.HTTPClientFor(c).
 func NewForConfig(c *rest.Config) (*NetworkingV1Client, error) {
 	config := *c
-	if err := setConfigDefaults(&config); err != nil {
-		return nil, err
-	}
+	setConfigDefaults(&config)
 	httpClient, err := rest.HTTPClientFor(&config)
 	if err != nil {
 		return nil, err
@@ -56,9 +44,7 @@ func NewForConfig(c *rest.Config) (*NetworkingV1Client, error) {
 // Note the http client provided takes precedence over the configured transport values.
 func NewForConfigAndClient(c *rest.Config, h *http.Client) (*NetworkingV1Client, error) {
 	config := *c
-	if err := setConfigDefaults(&config); err != nil {
-		return nil, err
-	}
+	setConfigDefaults(&config)
 	client, err := rest.RESTClientForConfigAndClient(&config, h)
 	if err != nil {
 		return nil, err
@@ -81,17 +67,15 @@ func New(c rest.Interface) *NetworkingV1Client {
 	return &NetworkingV1Client{c}
 }
 
-func setConfigDefaults(config *rest.Config) error {
-	gv := v1.SchemeGroupVersion
+func setConfigDefaults(config *rest.Config) {
+	gv := networkingv1.SchemeGroupVersion
 	config.GroupVersion = &gv
 	config.APIPath = "/apis"
-	config.NegotiatedSerializer = scheme.Codecs.WithoutConversion()
+	config.NegotiatedSerializer = rest.CodecFactoryForGeneratedClient(scheme.Scheme, scheme.Codecs).WithoutConversion()
 
 	if config.UserAgent == "" {
 		config.UserAgent = rest.DefaultKubernetesUserAgent()
 	}
-
-	return nil
 }
 
 // RESTClient returns a RESTClient that is used to communicate

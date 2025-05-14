@@ -3,24 +3,23 @@
 
 package linux_defaults
 
+import (
+	"golang.org/x/sys/unix"
+)
+
 // Linux specific constants used in Linux datapath
 const (
 	// RouteTableIPSec is the default table ID to use for IPSec routing rules
 	RouteTableIPSec = 200
 
-	// RouteTableWireguard is the default table ID to use for Wireguard routing
-	// rules
-	RouteTableWireguard = 201
-
 	// RouteTableVtep is the default table ID to use for VTEP routing rules
 	RouteTableVtep = 202
 
-	// RouteTableEgressGatewayInterfacesOffset is the offset for the per-ENI
-	// egress gateway routing tables.
-	// Each ENI interface will have its own table starting with this offset. It
-	// is 300 because it is highly unlikely to collide with the main routing
-	// table which is between 253-255. See ip-route(8).
-	RouteTableEgressGatewayInterfacesOffset = 300
+	// RouteTableToProxy is the default table ID to use routing rules to the proxy.
+	RouteTableToProxy = 2004
+
+	// RouteTableFromProxy is the default table ID to use routing rules from the proxy.
+	RouteTableFromProxy = 2005
 
 	// RouteTableInterfacesOffset is the offset for the per-ENI routing tables.
 	// Each ENI interface will have its own table starting with this offset. It
@@ -28,16 +27,24 @@ const (
 	// table which is between 253-255. See ip-route(8).
 	RouteTableInterfacesOffset = 10
 
+	// MarkProxyToWorld is the default mark to use to indicate that a packet
+	// from proxy needs to be sent to the world.
+	MarkProxyToWorld = 0x800
+
 	// RouteMarkDecrypt is the default route mark to use to indicate datapath
 	// needs to decrypt a packet.
-	RouteMarkDecrypt = 0x0D00
+	RouteMarkDecrypt = MagicMarkDecrypt
 
 	// RouteMarkEncrypt is the default route mark to use to indicate datapath
 	// needs to encrypt a packet.
-	RouteMarkEncrypt = 0x0E00
+	RouteMarkEncrypt = MagicMarkEncrypt
 
 	// RouteMarkMask is the mask required for the route mark value
 	RouteMarkMask = 0xF00
+
+	// OutputMarkMask is the mask to use in output-mark of XFRM states. It is
+	// used to clear the node ID and the SPI from the packet mark.
+	OutputMarkMask = 0xFFFFFF00
 
 	// RouteMarkToProxy is the default route mark to use to indicate
 	// datapath needs to send the packet to the proxy.
@@ -57,22 +64,28 @@ const (
 	// RouterMarkNodePort
 	MaskMultinodeNodeport = 0x80
 
-	// IPSecProtocolID IP protocol ID for IPSec defined in RFC4303
-	RouteProtocolIPSec = 50
+	// RTProto is the protocol we install our fib rules and routes with. Use the
+	// kernel proto to make sure systemd-networkd doesn't interfere with these
+	// rules (see networkd config directive ManageForeignRoutingPolicyRules, set
+	// to 'yes' by default).
+	RTProto = unix.RTPROT_KERNEL
 
-	// RulePriorityWireguard is the priority of the rule used for routing packets to Wireguard device for encryption
-	RulePriorityWireguard = 1
+	// RulePriorityToProxyIngress is the priority of the routing rule installed by
+	// the proxy package for redirecting inbound packets to the proxy.
+	RulePriorityToProxyIngress = 9
 
-	// RulePriorityEgressGateway is the priority used in IP routes added by the manager.
-	// This value was picked as it's lower than the ones used by Cilium
-	// (RulePriorityEgressv2 = 111) or the AWS CNI (10) to install the IP
-	// rules for routing EP traffic to the correct ENI interface
-	RulePriorityEgressGateway = 8
+	// RulePriorityFromProxy is the priority of the routing rule installed by
+	// the proxy package for redirecting packets from the proxy.
+	RulePriorityFromProxy = 10
 
 	// RulePriorityIngress is the priority of the rule used for ingress routing
 	// of endpoints. This priority is after encryption and proxy rules, and
 	// before the local table priority.
 	RulePriorityIngress = 20
+
+	// RulePriorityLocalLookup is the priority for the local lookup rule which is
+	// moved on init from 0
+	RulePriorityLocalLookup = 100
 
 	// RulePriorityEgress is the priority of the rule used for egress routing
 	// of endpoints. This priority is after the local table priority.
@@ -102,16 +115,19 @@ const (
 	// IPsecMarkMaskNodeID is the mask used for the node ID.
 	IPsecMarkMaskNodeID = 0xFFFF0000
 
-	// IPsecOldMarkMaskOut is the mask that was previously used. It can be
-	// removed in Cilium v1.15.
-	IPsecOldMarkMaskOut = 0xFF00
+	// IPsecMarkBitMask is the mask used for the encrypt and decrypt bits.
+	IPsecMarkBitMask = 0x0F00
 
 	// IPsecMarkMask is the mask required for the IPsec SPI, node ID, and encrypt/decrypt bits
-	IPsecMarkMaskOut = IPsecOldMarkMaskOut | IPsecMarkMaskNodeID
+	IPsecMarkMaskOut = 0xFF00 | IPsecMarkMaskNodeID
 
-	// IPsecMarkMaskIn is the mask required for IPsec to lookup encrypt/decrypt bits
-	IPsecMarkMaskIn = 0x0F00
+	// IPsecMarkMaskIn is the mask required for the IPsec node ID and encrypt/decrypt bits
+	IPsecMarkMaskIn = IPsecMarkBitMask | IPsecMarkMaskNodeID
 
 	// IPsecFwdPriority is the priority of the fwd rules placed by IPsec
 	IPsecFwdPriority = 0x0B9F
+
+	// IPsecXFRMMarkSPIShift defines how many bits the SPI is shifted when
+	// encoded in a XfrmMark
+	IPsecXFRMMarkSPIShift = 12
 )

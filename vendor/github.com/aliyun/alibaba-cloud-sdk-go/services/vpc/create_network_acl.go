@@ -71,13 +71,22 @@ func (client *Client) CreateNetworkAclWithCallback(request *CreateNetworkAclRequ
 // CreateNetworkAclRequest is the request struct for api CreateNetworkAcl
 type CreateNetworkAclRequest struct {
 	*requests.RpcRequest
-	ResourceOwnerId      requests.Integer `position:"Query" name:"ResourceOwnerId"`
-	ClientToken          string           `position:"Query" name:"ClientToken"`
-	Description          string           `position:"Query" name:"Description"`
-	ResourceOwnerAccount string           `position:"Query" name:"ResourceOwnerAccount"`
-	NetworkAclName       string           `position:"Query" name:"NetworkAclName"`
-	OwnerId              requests.Integer `position:"Query" name:"OwnerId"`
-	VpcId                string           `position:"Query" name:"VpcId"`
+	ResourceOwnerId      requests.Integer       `position:"Query" name:"ResourceOwnerId"`
+	ClientToken          string                 `position:"Query" name:"ClientToken"`
+	Description          string                 `position:"Query" name:"Description"`
+	Tag                  *[]CreateNetworkAclTag `position:"Query" name:"Tag"  type:"Repeated"`
+	DryRun               requests.Boolean       `position:"Query" name:"DryRun"`
+	ResourceOwnerAccount string                 `position:"Query" name:"ResourceOwnerAccount"`
+	OwnerAccount         string                 `position:"Query" name:"OwnerAccount"`
+	NetworkAclName       string                 `position:"Query" name:"NetworkAclName"`
+	OwnerId              requests.Integer       `position:"Query" name:"OwnerId"`
+	VpcId                string                 `position:"Query" name:"VpcId"`
+}
+
+// CreateNetworkAclTag is a repeated param struct in CreateNetworkAclRequest
+type CreateNetworkAclTag struct {
+	Key   string `name:"Key"`
+	Value string `name:"Value"`
 }
 
 // CreateNetworkAclResponse is the response struct for api CreateNetworkAcl

@@ -1,5 +1,5 @@
 .. only:: not (epub or latex or html)
-  
+
     WARNING: You are looking at unreleased Cilium documentation.
     Please use the official rendered version released here:
     https://docs.cilium.io
@@ -9,9 +9,10 @@
 Integration Testing
 ===================
 
-Cilium uses the standard `go test <https://golang.org/pkg/testing/>`__ framework
-in combination with `gocheck <http://labix.org/gocheck>`__ for richer testing
-functionality.
+Cilium uses the standard `go test <https://golang.org/pkg/testing/>`__ framework.
+All new tests must use `the standard test framework`_.
+
+.. _the standard test framework: https://github.com/cilium/cilium/issues/16860
 
 .. _integration_testing_prerequisites:
 
@@ -52,15 +53,6 @@ You can then ``cd`` into the package subject to testing and invoke go test:
     $ cd pkg/kvstore
     $ go test
 
-
-If you need more verbose output, you can pass in the ``-check.v`` and
-``-check.vv`` arguments:
-
-.. code-block:: shell-session
-
-    $ cd pkg/kvstore
-    $ go test -check.v -check.vv
-
 Integration tests have some prerequisites like
 :ref:`integration_testing_prerequisites`, you can use the following command to
 automatically set up the prerequisites, run the unit tests and tear down the
@@ -87,7 +79,7 @@ There are a few ways to run privileged tests.
 
     .. code-block:: shell-session
 
-        $ sudo make tests-privileged TESTPKGS="./pkg/datapath/linux ./pkg/maps/..." 
+        $ sudo make tests-privileged TESTPKGS="./pkg/datapath/linux ./pkg/maps/..."
 
 3. Set the ``PRIVILEGED_TESTS`` environment variable and run ``go test``
    directly. This only escalates privileges when executing the test binaries,
@@ -96,16 +88,6 @@ There are a few ways to run privileged tests.
     .. code-block:: shell-session
 
         $ PRIVILEGED_TESTS=true go test -exec "sudo -E" ./pkg/ipam
-
-Running individual tests
-^^^^^^^^^^^^^^^^^^^^^^^^
-
-Due to the use of gocheck, the standard ``go test -run`` will not work,
-instead, the ``-check.f`` argument has to be specified:
-
-.. code-block:: shell-session
-
-    $ go test -check.f TestParallelAllocation
 
 Automatically run unit tests on code changes
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

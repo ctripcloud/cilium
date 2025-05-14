@@ -10,25 +10,31 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/checker"
-	linuxDatapath "github.com/cilium/cilium/pkg/datapath/linux"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	"github.com/cilium/cilium/pkg/identity"
+	"github.com/cilium/cilium/pkg/identity/identitymanager"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/mac"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
+	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/policy"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
 
-func (ds *EndpointSuite) createEndpoints() ([]*Endpoint, map[uint16]*Endpoint) {
+func (s *EndpointSuite) createEndpoints(t testing.TB) ([]*Endpoint, map[uint16]*Endpoint) {
 	epsWanted := []*Endpoint{
-		ds.endpointCreator(256, identity.NumericIdentity(1256)),
-		ds.endpointCreator(257, identity.NumericIdentity(1257)),
-		ds.endpointCreator(258, identity.NumericIdentity(1258)),
-		ds.endpointCreator(259, identity.NumericIdentity(1259)),
+		s.endpointCreator(t, 256, identity.NumericIdentity(1256)),
+		s.endpointCreator(t, 257, identity.NumericIdentity(1257)),
+		s.endpointCreator(t, 258, identity.NumericIdentity(1258)),
+		s.endpointCreator(t, 259, identity.NumericIdentity(1259)),
 	}
 	epsMap := map[uint16]*Endpoint{
 		epsWanted[0].ID: epsWanted[0],
@@ -43,7 +49,8 @@ func getStrID(id uint16) string {
 	return fmt.Sprintf("%05d", id)
 }
 
-func (ds *EndpointSuite) endpointCreator(id uint16, secID identity.NumericIdentity) *Endpoint {
+func (s *EndpointSuite) endpointCreator(t testing.TB, id uint16, secID identity.NumericIdentity) *Endpoint {
+	logger := hivetest.Logger(t)
 	strID := getStrID(id)
 	b := make([]byte, 2)
 	binary.LittleEndian.PutUint16(b, id)
@@ -56,10 +63,13 @@ func (ds *EndpointSuite) endpointCreator(id uint16, secID identity.NumericIdenti
 	}
 	identity.Sanitize()
 
-	repo := ds.GetPolicyRepository()
-	repo.GetPolicyCache().LocalEndpointIdentityAdded(identity)
+	model := newTestEndpointModel(int(id), StateReady)
+	ep, err := NewEndpointFromChangeModel(context.TODO(), nil, &MockEndpointBuildQueue{}, nil, s.orchestrator, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+	require.NoError(t, err)
 
-	ep := NewEndpointWithState(ds, ds, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), id, StateReady)
+	ep.Start(uint16(model.ID))
+	t.Cleanup(ep.Stop)
+
 	// Random network ID and docker endpoint ID with 59 hex chars + 5 strID = 64 hex chars
 	ep.dockerNetworkID = "603e047d2268a57f5a5f93f7f9e1263e9207e348a06654bf64948def001" + strID
 	ep.dockerEndpointID = "93529fda8c401a071d21d6bd46fdf5499b9014dcb5a35f2e3efaa8d8002" + strID
@@ -70,43 +80,48 @@ func (ds *EndpointSuite) endpointCreator(id uint16, secID identity.NumericIdenti
 	ep.ifIndex = 1
 	ep.nodeMAC = []byte{0x02, 0xff, 0xf2, 0x12, 0x0, 0x0}
 	ep.SecurityIdentity = identity
-	ep.OpLabels = labels.NewOpLabels()
+	ep.labels = labels.NewOpLabels()
+	ep.NetNsCookie = 1234
 	return ep
 }
 
-func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
-	// For this test, the real linux datapath is necessary to properly
-	// serialize config files to disk and test the restore.
-	oldDatapath := ds.datapath
-	defer func() {
-		ds.datapath = oldDatapath
-	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+func TestReadEPsFromDirNames(t *testing.T) {
+	logger := hivetest.Logger(t)
+	s := setupEndpointSuite(t)
+	epsWanted, _ := s.createEndpoints(t)
+	tmpDir := t.TempDir()
 
-	epsWanted, _ := ds.createEndpoints()
-	tmpDir, err := os.MkdirTemp("", "cilium-tests")
-	defer func() {
-		os.RemoveAll(tmpDir)
-	}()
+	const unsupportedTestOption = "unsupported-test-only-option-xyz"
 
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() {
+		os.Chdir(cwd)
+	}()
 	os.Chdir(tmpDir)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	epsNames := []string{}
 	for _, ep := range epsWanted {
-		c.Assert(ep, NotNil)
+		require.NotNil(t, ep)
 
 		fullDirName := filepath.Join(tmpDir, ep.DirectoryPath())
 		err := os.MkdirAll(fullDirName, 0777)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
+
+		// Add an unsupported option and see that it is removed on "restart"
+		ep.Options.SetValidated(unsupportedTestOption, option.OptionEnabled)
 
 		err = ep.writeHeaderfile(fullDirName)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
+
+		// Remove unsupported option so that equality check works after restore
+		ep.Options.Delete(unsupportedTestOption)
 
 		switch ep.ID {
 		case 256, 257:
 			failedDir := filepath.Join(tmpDir, ep.FailedDirectoryPath())
 			err := os.Rename(fullDirName, failedDir)
-			c.Assert(err, IsNil)
+			require.NoError(t, err)
 			epsNames = append(epsNames, ep.FailedDirectoryPath())
 
 			// create one failed and the other non failed directory for ep 256.
@@ -115,14 +130,14 @@ func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 				// "256_next_fail" and with one is in the "256" directory.
 				ep.nodeMAC = []byte{0x02, 0xff, 0xf2, 0x12, 0xc1, 0xc1}
 				err = ep.writeHeaderfile(failedDir)
-				c.Assert(err, IsNil)
+				require.NoError(t, err)
 			}
 		default:
 			epsNames = append(epsNames, ep.DirectoryPath())
 		}
 	}
-	eps := ReadEPsFromDirNames(context.TODO(), ds, ds, ds, tmpDir, epsNames)
-	c.Assert(len(eps), Equals, len(epsWanted))
+	eps := ReadEPsFromDirNames(context.TODO(), logger, &fakeParser{orchestrator: s.orchestrator, policyRepo: s.repo}, tmpDir, epsNames)
+	require.Len(t, eps, len(epsWanted))
 
 	sort.Slice(epsWanted, func(i, j int) bool { return epsWanted[i].ID < epsWanted[j].ID })
 	restoredEPs := make([]*Endpoint, 0, len(eps))
@@ -131,7 +146,7 @@ func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 	}
 	sort.Slice(restoredEPs, func(i, j int) bool { return restoredEPs[i].ID < restoredEPs[j].ID })
 
-	c.Assert(len(restoredEPs), Equals, len(epsWanted))
+	require.Len(t, restoredEPs, len(epsWanted))
 	for i, restoredEP := range restoredEPs {
 		// We probably shouldn't modify these, but the status will
 		// naturally differ between the wanted endpoint and the version
@@ -140,58 +155,55 @@ func (ds *EndpointSuite) TestReadEPsFromDirNames(c *C) {
 		restoredEP.status = nil
 		wanted := epsWanted[i]
 		wanted.status = nil
-		c.Assert(restoredEP.String(), checker.DeepEquals, wanted.String())
+		require.Equal(t, wanted.String(), restoredEP.String())
 	}
 }
 
-func (ds *EndpointSuite) TestReadEPsFromDirNamesWithRestoreFailure(c *C) {
-	// For this test, the real linux datapath is necessary to properly
-	// serialize config files to disk and test the restore.
-	oldDatapath := ds.datapath
-	defer func() {
-		ds.datapath = oldDatapath
-	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
+func TestReadEPsFromDirNamesWithRestoreFailure(t *testing.T) {
+	logger := hivetest.Logger(t)
+	s := setupEndpointSuite(t)
 
-	eps, _ := ds.createEndpoints()
+	eps, _ := s.createEndpoints(t)
 	ep := eps[0]
-	c.Assert(ep, NotNil)
-	tmpDir, err := os.MkdirTemp("", "cilium-tests")
-	defer func() {
-		os.RemoveAll(tmpDir)
-	}()
+	require.NotNil(t, ep)
+	tmpDir := t.TempDir()
 
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+	defer func() {
+		os.Chdir(cwd)
+	}()
 	os.Chdir(tmpDir)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	fullDirName := filepath.Join(tmpDir, ep.DirectoryPath())
 	err = os.MkdirAll(fullDirName, 0777)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	err = ep.writeHeaderfile(fullDirName)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	nextDir := filepath.Join(tmpDir, ep.NextDirectoryPath())
 	err = os.MkdirAll(nextDir, 0777)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// Change endpoint a little bit so we know which endpoint is in
 	// "${EPID}_next" and with one is in the "${EPID}" directory.
 	tmpNodeMAC := ep.nodeMAC
 	ep.nodeMAC = []byte{0x02, 0xff, 0xf2, 0x12, 0xc1, 0xc1}
 	err = ep.writeHeaderfile(nextDir)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	ep.nodeMAC = tmpNodeMAC
 
 	epNames := []string{
 		ep.DirectoryPath(), ep.NextDirectoryPath(),
 	}
 
-	epResult := ReadEPsFromDirNames(context.TODO(), ds, ds, ds, tmpDir, epNames)
-	c.Assert(len(epResult), Equals, 1)
+	epResult := ReadEPsFromDirNames(context.TODO(), logger, &fakeParser{orchestrator: s.orchestrator, policyRepo: s.repo}, tmpDir, epNames)
+	require.Len(t, epResult, 1)
 
 	restoredEP := epResult[ep.ID]
-	c.Assert(restoredEP.String(), checker.DeepEquals, ep.String())
+	require.Equal(t, ep.String(), restoredEP.String())
 
 	// Check that the directory for failed restore was removed.
 	fileExists := func(fileName string) bool {
@@ -200,55 +212,54 @@ func (ds *EndpointSuite) TestReadEPsFromDirNamesWithRestoreFailure(c *C) {
 			return true
 		}
 		if !os.IsNotExist(err) {
-			c.Assert(err, NotNil)
+			require.Error(t, err)
 		}
 		return false
 	}
-	c.Assert(fileExists(nextDir), checker.Equals, false)
-	c.Assert(fileExists(fullDirName), checker.Equals, true)
+	require.False(t, fileExists(nextDir))
+	require.True(t, fileExists(fullDirName))
 }
 
-func (ds *EndpointSuite) BenchmarkReadEPsFromDirNames(c *C) {
-	c.StopTimer()
+func BenchmarkReadEPsFromDirNames(b *testing.B) {
+	logger := hivetest.Logger(b)
+	s := setupEndpointSuite(b)
 
 	// For this benchmark, the real linux datapath is necessary to properly
 	// serialize config files to disk and benchmark the restore.
-	oldDatapath := ds.datapath
-	defer func() {
-		ds.datapath = oldDatapath
-	}()
-	ds.datapath = linuxDatapath.NewDatapath(linuxDatapath.DatapathConfiguration{}, nil, nil)
 
-	epsWanted, _ := ds.createEndpoints()
-	tmpDir, err := os.MkdirTemp("", "cilium-tests")
-	defer func() {
-		os.RemoveAll(tmpDir)
-	}()
+	epsWanted, _ := s.createEndpoints(b)
+	tmpDir := b.TempDir()
 
+	cwd, err := os.Getwd()
+	require.NoError(b, err)
+	defer func() {
+		os.Chdir(cwd)
+	}()
 	os.Chdir(tmpDir)
-	c.Assert(err, IsNil)
+	require.NoError(b, err)
 	epsNames := []string{}
 	for _, ep := range epsWanted {
-		c.Assert(ep, NotNil)
+		require.NotNil(b, ep)
 
 		fullDirName := filepath.Join(tmpDir, ep.DirectoryPath())
 		err := os.MkdirAll(fullDirName, 0777)
-		c.Assert(err, IsNil)
+		require.NoError(b, err)
 
 		err = ep.writeHeaderfile(fullDirName)
-		c.Assert(err, IsNil)
+		require.NoError(b, err)
 
 		epsNames = append(epsNames, ep.DirectoryPath())
 	}
-	c.StartTimer()
 
-	for i := 0; i < c.N; i++ {
-		eps := ReadEPsFromDirNames(context.TODO(), ds, ds, ds, tmpDir, epsNames)
-		c.Assert(len(eps), Equals, len(epsWanted))
+	for b.Loop() {
+		eps := ReadEPsFromDirNames(context.TODO(), logger, &fakeParser{orchestrator: s.orchestrator, policyRepo: s.repo}, tmpDir, epsNames)
+		require.Len(b, eps, len(epsWanted))
 	}
 }
 
-func (ds *EndpointSuite) TestPartitionEPDirNamesByRestoreStatus(c *C) {
+func TestPartitionEPDirNamesByRestoreStatus(t *testing.T) {
+	setupEndpointSuite(t)
+
 	eptsDirNames := []string{
 		"4", "12", "12_next", "3_next", "5_next_fail", "5",
 	}
@@ -261,10 +272,21 @@ func (ds *EndpointSuite) TestPartitionEPDirNamesByRestoreStatus(c *C) {
 
 	complete, incomplete := partitionEPDirNamesByRestoreStatus(eptsDirNames)
 
-	sort.Strings(complete)
-	sort.Strings(completeWanted)
-	sort.Strings(incomplete)
-	sort.Strings(incompleteWanted)
-	c.Assert(complete, checker.DeepEquals, completeWanted)
-	c.Assert(incomplete, checker.DeepEquals, incompleteWanted)
+	slices.Sort(complete)
+	slices.Sort(completeWanted)
+	slices.Sort(incomplete)
+	slices.Sort(incompleteWanted)
+	require.Equal(t, completeWanted, complete)
+	require.Equal(t, incompleteWanted, incomplete)
 }
+
+type fakeParser struct {
+	orchestrator datapath.Orchestrator
+	policyRepo   policy.PolicyRepository
+}
+
+func (f *fakeParser) ParseEndpoint(epJSON []byte) (*Endpoint, error) {
+	return ParseEndpoint(nil, nil, nil, f.orchestrator, nil, nil, nil, nil, nil, nil, f.policyRepo, nil, nil, nil, nil, nil, epJSON)
+}
+
+var _ EndpointParser = &fakeParser{}

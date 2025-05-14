@@ -5,9 +5,9 @@ package queue
 
 import (
 	"container/heap"
-	"time"
 
 	observerpb "github.com/cilium/cilium/api/v1/observer"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // PriorityQueue is a priority queue of observerpb.GetFlowsResponse. It
@@ -87,12 +87,12 @@ func (h minHeap) Swap(i, j int) {
 	}
 }
 
-func (h *minHeap) Push(x interface{}) {
+func (h *minHeap) Push(x any) {
 	resp := x.(*observerpb.GetFlowsResponse)
 	*h = append(*h, resp)
 }
 
-func (h *minHeap) Pop() interface{} {
+func (h *minHeap) Pop() any {
 	old := *h
 	n := len(old)
 	if n == 0 {

@@ -5,19 +5,19 @@ package k8s
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 
 	"github.com/cilium/cilium/pkg/annotation"
 	"github.com/cilium/cilium/pkg/cidr"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	"github.com/cilium/cilium/pkg/labelsfilter"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/node/addressing"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/source"
-
-	"github.com/sirupsen/logrus"
 )
 
 // ParseNodeAddressType converts a Kubernetes NodeAddressType to a Cilium
@@ -36,12 +36,18 @@ func ParseNodeAddressType(k8sAddress slim_corev1.NodeAddressType) (addressing.Ad
 	return convertedAddr, err
 }
 
+type nodeAddressGroup struct {
+	typ    slim_corev1.NodeAddressType
+	family slim_corev1.IPFamily
+}
+
 // ParseNode parses a kubernetes node to a cilium node
-func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node {
-	scopedLog := log.WithFields(logrus.Fields{
-		logfields.NodeName:  k8sNode.Name,
-		logfields.K8sNodeID: k8sNode.UID,
-	})
+func ParseNode(logger *slog.Logger, k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node {
+	addrGroups := make(map[nodeAddressGroup]struct{})
+	scopedLog := logger.With(
+		logfields.NodeName, k8sNode.Name,
+		logfields.K8sNodeID, k8sNode.UID,
+	)
 	addrs := []nodeTypes.Address{}
 	for _, addr := range k8sNode.Status.Addresses {
 		// We only care about this address types,
@@ -56,19 +62,39 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 		if addr.Address == "" {
 			continue
 		}
+		addrGroup := nodeAddressGroup{
+			typ: addr.Type,
+		}
 		ip := net.ParseIP(addr.Address)
-		if ip == nil {
-			scopedLog.WithFields(logrus.Fields{
-				logfields.IPAddr: addr.Address,
-				"type":           addr.Type,
-			}).Warn("Ignoring invalid node IP")
+		switch {
+		case ip != nil && ip.To4() != nil:
+			addrGroup.family = slim_corev1.IPv4Protocol
+		case ip != nil && ip.To16() != nil:
+			addrGroup.family = slim_corev1.IPv6Protocol
+		default:
+			scopedLog.Warn(
+				"Ignoring invalid node IP",
+				logfields.IPAddr, addr.Address,
+				logfields.Type, addr.Type,
+			)
 			continue
 		}
+		_, groupFound := addrGroups[addrGroup]
+		if groupFound {
+			scopedLog.Warn(
+				"Detected multiple IPs of the same address type and family, Cilium will only consider the first IP in the Node resource",
+				logfields.Type, addr.Type,
+			)
+			continue
+		}
+		addrGroups[addrGroup] = struct{}{}
 
 		addressType, err := ParseNodeAddressType(addr.Type)
-
 		if err != nil {
-			scopedLog.WithError(err).Warn("invalid address type for node")
+			scopedLog.Warn(
+				"invalid address type for node",
+				logfields.Error, err,
+			)
 		}
 
 		na := nodeTypes.Address{
@@ -86,11 +112,19 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	if len(k8sNode.Spec.PodCIDRs) != 0 {
 		if len(k8sNode.Spec.PodCIDRs) > 2 {
-			scopedLog.WithField("podCIDR", k8sNode.Spec.PodCIDRs).Errorf("Invalid PodCIDRs expected 1 or 2 PodCIDRs, received %d", len(k8sNode.Spec.PodCIDRs))
+			scopedLog.Error(
+				"Invalid PodCIDRs expected 1 or 2 PodCIDRs",
+				logfields.PodCIDRs, k8sNode.Spec.PodCIDRs,
+				logfields.LenIPs, len(k8sNode.Spec.PodCIDRs),
+			)
 		} else {
 			for _, podCIDR := range k8sNode.Spec.PodCIDRs {
 				if allocCIDR, err := cidr.ParseCIDR(podCIDR); err != nil {
-					scopedLog.WithError(err).WithField("podCIDR", k8sNode.Spec.PodCIDR).Warn("Invalid PodCIDR value for node")
+					scopedLog.Warn(
+						"Invalid PodCIDR value for node",
+						logfields.Error, err,
+						logfields.PodCIDRs, k8sNode.Spec.PodCIDRs,
+					)
 				} else {
 					if allocCIDR.IP.To4() != nil {
 						newNode.IPv4AllocCIDR = allocCIDR
@@ -102,7 +136,11 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 		}
 	} else if len(k8sNode.Spec.PodCIDR) != 0 {
 		if allocCIDR, err := cidr.ParseCIDR(k8sNode.Spec.PodCIDR); err != nil {
-			scopedLog.WithError(err).WithField(logfields.V4Prefix, k8sNode.Spec.PodCIDR).Warn("Invalid PodCIDR value for node")
+			scopedLog.Warn(
+				"Invalid PodCIDR value for node",
+				logfields.Error, err,
+				logfields.V4Prefix, k8sNode.Spec.PodCIDR,
+			)
 		} else {
 			if allocCIDR.IP.To4() != nil {
 				newNode.IPv4AllocCIDR = allocCIDR
@@ -112,8 +150,14 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 		}
 	}
 
-	newNode.Labels = k8sNode.GetLabels()
-	newNode.Annotations = k8sNode.GetAnnotations()
+	newNode.Labels = labelsfilter.FilterLabelsByRegex(option.Config.ExcludeNodeLabelPatterns, k8sNode.GetLabels())
+	newNode.Annotations = make(map[string]string)
+	// Propagate only Cilium specific annotations.
+	for key, value := range k8sNode.GetAnnotations() {
+		if annotation.CiliumPrefixRegex.MatchString(key) {
+			newNode.Annotations[key] = value
+		}
+	}
 
 	if !option.Config.AnnotateK8sNode {
 		return newNode
@@ -124,21 +168,32 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	k8sNodeAddHostIP := func(key string, alias string) {
 		if ciliumInternalIP, ok := annotation.Get(k8sNode, key, alias); !ok || ciliumInternalIP == "" {
-			scopedLog.Debugf("Missing %s (or %s). Annotation required when IPSec Enabled", key, alias)
+			scopedLog.Debug(
+				"Annotation required when IPSec Enabled. Missing key or its alias.",
+				logfields.Key, key,
+				logfields.Alias, alias,
+			)
 		} else if ip := net.ParseIP(ciliumInternalIP); ip == nil {
-			scopedLog.Debugf("ParseIP %s error", ciliumInternalIP)
+			scopedLog.Debug(
+				"Parse IP error",
+				logfields.IPAddr, ciliumInternalIP,
+			)
 		} else {
 			na := nodeTypes.Address{
 				Type: addressing.NodeCiliumInternalIP,
 				IP:   ip,
 			}
 			addrs = append(addrs, na)
-			scopedLog.Debugf("Add NodeCiliumInternalIP: %s", ip)
+			scopedLog.Debug(
+				"Add NodeCiliumInternalIP",
+				logfields.IPAddr, ip,
+			)
 		}
 	}
 
 	k8sNodeAddHostIP(annotation.CiliumHostIP, annotation.CiliumHostIPAlias)
 	k8sNodeAddHostIP(annotation.CiliumHostIPv6, annotation.CiliumHostIPv6Alias)
+	newNode.IPAddresses = addrs
 
 	if key, ok := annotation.Get(k8sNode, annotation.CiliumEncryptionKey, annotation.CiliumEncryptionKeyAlias); ok {
 		if u, err := strconv.ParseUint(key, 10, 8); err == nil {
@@ -151,11 +206,17 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 	// In case it's invalid or empty then we fall back to our annotations.
 	if newNode.IPv4AllocCIDR == nil {
 		if ipv4CIDR, ok := annotation.Get(k8sNode, annotation.V4CIDRName, annotation.V4CIDRNameAlias); !ok || ipv4CIDR == "" {
-			scopedLog.Debug("Empty IPv4 CIDR annotation in node")
+			scopedLog.Debug(
+				"Empty IPv4 CIDR annotation in node",
+			)
 		} else {
 			allocCIDR, err := cidr.ParseCIDR(ipv4CIDR)
 			if err != nil {
-				scopedLog.WithError(err).WithField(logfields.V4Prefix, ipv4CIDR).Error("BUG, invalid IPv4 annotation CIDR in node")
+				scopedLog.Error(
+					"BUG, invalid IPv4 annotation CIDR in node",
+					logfields.Error, err,
+					logfields.V4Prefix, ipv4CIDR,
+				)
 			} else {
 				newNode.IPv4AllocCIDR = allocCIDR
 			}
@@ -164,11 +225,17 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	if newNode.IPv6AllocCIDR == nil {
 		if ipv6CIDR, ok := annotation.Get(k8sNode, annotation.V6CIDRName, annotation.V6CIDRNameAlias); !ok || ipv6CIDR == "" {
-			scopedLog.Debug("Empty IPv6 CIDR annotation in node")
+			scopedLog.Debug(
+				"Empty IPv6 CIDR annotation in node",
+			)
 		} else {
 			allocCIDR, err := cidr.ParseCIDR(ipv6CIDR)
 			if err != nil {
-				scopedLog.WithError(err).WithField(logfields.V6Prefix, ipv6CIDR).Error("BUG, invalid IPv6 annotation CIDR in node")
+				scopedLog.Error(
+					"BUG, invalid IPv6 annotation CIDR in node",
+					logfields.Error, err,
+					logfields.V6Prefix, ipv6CIDR,
+				)
 			} else {
 				newNode.IPv6AllocCIDR = allocCIDR
 			}
@@ -177,9 +244,14 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	if newNode.IPv4HealthIP == nil {
 		if healthIP, ok := annotation.Get(k8sNode, annotation.V4HealthName, annotation.V4HealthNameAlias); !ok || healthIP == "" {
-			scopedLog.Debug("Empty IPv4 health endpoint annotation in node")
+			scopedLog.Debug(
+				"Empty IPv4 health endpoint annotation in node",
+			)
 		} else if ip := net.ParseIP(healthIP); ip == nil {
-			scopedLog.WithField(logfields.V4HealthIP, healthIP).Error("BUG, invalid IPv4 health endpoint annotation in node")
+			scopedLog.Error(
+				"BUG, invalid IPv4 health endpoint annotation in node",
+				logfields.V4HealthIP, healthIP,
+			)
 		} else {
 			newNode.IPv4HealthIP = ip
 		}
@@ -187,9 +259,14 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	if newNode.IPv6HealthIP == nil {
 		if healthIP, ok := annotation.Get(k8sNode, annotation.V6HealthName, annotation.V6HealthNameAlias); !ok || healthIP == "" {
-			scopedLog.Debug("Empty IPv6 health endpoint annotation in node")
+			scopedLog.Debug(
+				"Empty IPv6 health endpoint annotation in node",
+			)
 		} else if ip := net.ParseIP(healthIP); ip == nil {
-			scopedLog.WithField(logfields.V6HealthIP, healthIP).Error("BUG, invalid IPv6 health endpoint annotation in node")
+			scopedLog.Error(
+				"BUG, invalid IPv6 health endpoint annotation in node",
+				logfields.V6HealthIP, healthIP,
+			)
 		} else {
 			newNode.IPv6HealthIP = ip
 		}
@@ -197,9 +274,14 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	if newNode.IPv4IngressIP == nil {
 		if ingressIP, ok := annotation.Get(k8sNode, annotation.V4IngressName, annotation.V4IngressNameAlias); !ok || ingressIP == "" {
-			scopedLog.Debug("Empty IPv4 Ingress annotation in node")
+			scopedLog.Debug(
+				"Empty IPv4 Ingress annotation in node",
+			)
 		} else if ip := net.ParseIP(ingressIP); ip == nil {
-			scopedLog.WithField(logfields.V4IngressIP, ingressIP).Error("BUG, invalid IPv4 Ingress annotation in node")
+			scopedLog.Error(
+				"BUG, invalid IPv4 Ingress annotation in node",
+				logfields.V4IngressIP, ingressIP,
+			)
 		} else {
 			newNode.IPv4IngressIP = ip
 		}
@@ -207,9 +289,14 @@ func ParseNode(k8sNode *slim_corev1.Node, source source.Source) *nodeTypes.Node 
 
 	if newNode.IPv6IngressIP == nil {
 		if ingressIP, ok := annotation.Get(k8sNode, annotation.V6IngressName, annotation.V6IngressNameAlias); !ok || ingressIP == "" {
-			scopedLog.Debug("Empty IPv6 Ingress annotation in node")
+			scopedLog.Debug(
+				"Empty IPv6 Ingress annotation in node",
+			)
 		} else if ip := net.ParseIP(ingressIP); ip == nil {
-			scopedLog.WithField(logfields.V6IngressIP, ingressIP).Error("BUG, invalid IPv6 Ingress annotation in node")
+			scopedLog.Error(
+				"BUG, invalid IPv6 Ingress annotation in node",
+				logfields.V6IngressIP, ingressIP,
+			)
 		} else {
 			newNode.IPv6IngressIP = ip
 		}

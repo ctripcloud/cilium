@@ -24,6 +24,7 @@ import (
 	"sigs.k8s.io/gateway-api/conformance/utils/http"
 	"sigs.k8s.io/gateway-api/conformance/utils/kubernetes"
 	"sigs.k8s.io/gateway-api/conformance/utils/suite"
+	"sigs.k8s.io/gateway-api/pkg/features"
 )
 
 func init() {
@@ -33,12 +34,17 @@ func init() {
 var HTTPRouteHeaderMatching = suite.ConformanceTest{
 	ShortName:   "HTTPRouteHeaderMatching",
 	Description: "A single HTTPRoute with header matching for different backends",
-	Manifests:   []string{"tests/httproute-header-matching.yaml"},
+	Features: []features.FeatureName{
+		features.SupportGateway,
+		features.SupportHTTPRoute,
+	},
+	Manifests: []string{"tests/httproute-header-matching.yaml"},
 	Test: func(t *testing.T, suite *suite.ConformanceTestSuite) {
 		ns := "gateway-conformance-infra"
 		routeNN := types.NamespacedName{Name: "header-matching", Namespace: ns}
 		gwNN := types.NamespacedName{Name: "same-namespace", Namespace: ns}
 		gwAddr := kubernetes.GatewayAndHTTPRoutesMustBeAccepted(t, suite.Client, suite.TimeoutConfig, suite.ControllerName, kubernetes.NewGatewayRef(gwNN), routeNN)
+		kubernetes.HTTPRouteMustHaveResolvedRefsConditionsTrue(t, suite.Client, suite.TimeoutConfig, routeNN, gwNN)
 
 		testCases := []http.ExpectedResponse{{
 			Request:   http.Request{Path: "/", Headers: map[string]string{"Version": "one"}},

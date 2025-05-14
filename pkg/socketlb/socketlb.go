@@ -6,6 +6,7 @@ package socketlb
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -13,10 +14,8 @@ import (
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/cgroups"
-	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/sysctl"
 )
 
 const (
@@ -37,8 +36,6 @@ const (
 )
 
 var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, Subsystem)
-
 	cgroupProgs = []string{
 		Connect4, SendMsg4, RecvMsg4, GetPeerName4,
 		PostBind4, PreBind4, Connect6, SendMsg6,
@@ -56,42 +53,24 @@ func cgroupLinkPath() string {
 // options have changed.
 // It expects bpf_sock.c to be compiled previously, so that bpf_sock.o is present
 // in the Runtime dir.
-func Enable() (err error) {
+func Enable(logger *slog.Logger, sysctl sysctl.Sysctl) error {
 	if err := os.MkdirAll(cgroupLinkPath(), 0777); err != nil {
 		return fmt.Errorf("create bpffs link directory: %w", err)
 	}
 
-	spec, err := bpf.LoadCollectionSpec(filepath.Join(option.Config.StateDir, "bpf_sock.o"))
+	spec, err := bpf.LoadCollectionSpec(logger, filepath.Join(option.Config.StateDir, "bpf_sock.o"))
 	if err != nil {
 		return fmt.Errorf("failed to load collection spec for bpf_sock.o: %w", err)
 	}
 
-	if err := bpf.StartBPFFSMigration(bpf.TCGlobalsPath(), spec); err != nil {
-		return fmt.Errorf("failed to start bpffs map migration: %w", err)
-	}
-
-	// This captures named return variable err.
-	defer func() {
-		if err != nil {
-			log.WithError(err).Debug("Reverting bpffs map migration")
-			if e := bpf.FinalizeBPFFSMigration(bpf.TCGlobalsPath(), spec, true); e != nil {
-				log.WithError(e).Error("Could not revert bpffs map migration")
-				return
-			}
-		}
-
-		log.Debug("Finalizing bpffs map migration")
-		if e := bpf.FinalizeBPFFSMigration(bpf.TCGlobalsPath(), spec, false); e != nil {
-			log.WithError(e).Error("Could not finalize bpffs map migration")
-		}
-	}()
-
-	coll, err := bpf.LoadCollection(spec, ebpf.CollectionOptions{
-		Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
+	coll, commit, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
+		CollectionOptions: ebpf.CollectionOptions{
+			Maps: ebpf.MapOptions{PinPath: bpf.TCGlobalsPath()},
+		},
 	})
 	var ve *ebpf.VerifierError
 	if errors.As(err, &ve) {
-		if _, err := fmt.Fprintf(os.Stderr, "Verifier error: %s\nVerifier log: %v\n", err, ve); err != nil {
+		if _, err := fmt.Fprintf(os.Stderr, "Verifier error: %s\nVerifier log: %+v\n", err, ve); err != nil {
 			return fmt.Errorf("writing verifier log to stderr: %w", err)
 		}
 	}
@@ -125,7 +104,7 @@ func Enable() (err error) {
 	}
 
 	// v6 will be non-nil if v6 support is compiled out.
-	_, v6 := sysctl.ReadInt("net.ipv6.conf.all.forwarding")
+	_, v6 := sysctl.ReadInt([]string{"net", "ipv6", "conf", "all", "forwarding"})
 
 	if option.Config.EnableIPv6 ||
 		(option.Config.EnableIPv4 && v6 == nil) {
@@ -148,23 +127,27 @@ func Enable() (err error) {
 
 	for p, s := range enabled {
 		if s {
-			if err := attachCgroup(coll, p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
+			if err := attachCgroup(logger, coll, p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
 				return fmt.Errorf("cgroup attach: %w", err)
 			}
 			continue
 		}
-		if err := detachCgroup(p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
+		if err := detachCgroup(logger, p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
 			return fmt.Errorf("cgroup detach: %w", err)
 		}
+	}
+
+	if err := commit(); err != nil {
+		return fmt.Errorf("committing bpf pins: %w", err)
 	}
 
 	return nil
 }
 
 // Disable detaches all bpf programs for socketlb.
-func Disable() error {
+func Disable(logger *slog.Logger) error {
 	for _, p := range cgroupProgs {
-		if err := detachCgroup(p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
+		if err := detachCgroup(logger, p, cgroups.GetCgroupRoot(), cgroupLinkPath()); err != nil {
 			return fmt.Errorf("detach cgroup: %w", err)
 		}
 	}

@@ -6,17 +6,18 @@ package store
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/util/rand"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/kvstore"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/option"
-	"github.com/cilium/cilium/pkg/rand"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
@@ -25,65 +26,16 @@ const (
 	sharedKeyDeleteDelay = time.Second
 )
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type StoreSuite struct{}
-
-func (s *StoreSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-}
-
-type StoreEtcdSuite struct {
-	StoreSuite
-}
-
-var _ = Suite(&StoreEtcdSuite{})
-
-func (e *StoreEtcdSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-}
-
-func (e *StoreEtcdSuite) SetUpTest(c *C) {
-	kvstore.SetupDummy("etcd")
-}
-
-func (e *StoreEtcdSuite) TearDownTest(c *C) {
-	kvstore.Client().DeletePrefix(context.TODO(), testPrefix)
-	kvstore.Client().Close(context.TODO())
-}
-
-type StoreConsulSuite struct {
-	StoreSuite
-}
-
-var _ = Suite(&StoreConsulSuite{})
-
-func (e *StoreConsulSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-}
-
-func (e *StoreConsulSuite) SetUpTest(c *C) {
-	kvstore.SetupDummy("consul")
-}
-
-func (e *StoreConsulSuite) TearDownTest(c *C) {
-	kvstore.Client().DeletePrefix(context.TODO(), testPrefix)
-	kvstore.Client().Close(context.TODO())
-	time.Sleep(sharedKeyDeleteDelay + 5*time.Second)
-}
-
 type TestType struct {
 	Name string
 }
 
 var _ = TestType{}
 
-func (t *TestType) GetKeyName() string          { return t.Name }
-func (t *TestType) DeepKeyCopy() LocalKey       { return &TestType{Name: t.Name} }
-func (t *TestType) Marshal() ([]byte, error)    { return json.Marshal(t) }
-func (t *TestType) Unmarshal(data []byte) error { return json.Unmarshal(data, t) }
+func (t *TestType) GetKeyName() string                    { return t.Name }
+func (t *TestType) DeepKeyCopy() LocalKey                 { return &TestType{Name: t.Name} }
+func (t *TestType) Marshal() ([]byte, error)              { return json.Marshal(t) }
+func (t *TestType) Unmarshal(_ string, data []byte) error { return json.Unmarshal(data, t) }
 
 type opCounter struct {
 	deleted int
@@ -136,57 +88,47 @@ func newTestType() Key {
 	return &t
 }
 
-func (s *StoreSuite) TestStoreCreation(c *C) {
+func TestStoreCreation(t *testing.T) {
+	testutils.IntegrationTest(t)
+	client := kvstore.SetupDummy(t, "etcd")
+
 	// Missing Prefix must result in error
-	store, err := JoinSharedStore(Configuration{})
-	c.Assert(err, ErrorMatches, "prefix must be specified")
-	c.Assert(store, IsNil)
+	store, err := JoinSharedStore(hivetest.Logger(t), Configuration{})
+	require.ErrorContains(t, err, "prefix must be specified")
+	require.Nil(t, store)
 
 	// Missing KeyCreator must result in error
-	store, err = JoinSharedStore(Configuration{Prefix: rand.RandomString()})
-	c.Assert(err, ErrorMatches, "KeyCreator must be specified")
-	c.Assert(store, IsNil)
+	store, err = JoinSharedStore(hivetest.Logger(t), Configuration{Prefix: rand.String(12)})
+	require.ErrorContains(t, err, "KeyCreator must be specified")
+	require.Nil(t, store)
 
-	// Basic creation should result in default values
-	store, err = JoinSharedStore(Configuration{Prefix: rand.RandomString(), KeyCreator: newTestType})
-	c.Assert(err, IsNil)
-	c.Assert(store, Not(IsNil))
-	c.Assert(store.conf.SynchronizationInterval, Equals, option.Config.KVstorePeriodicSync)
-	store.Close(context.TODO())
+	// Missing Backend must result in error
+	store, err = JoinSharedStore(hivetest.Logger(t), Configuration{Prefix: rand.String(12), KeyCreator: newTestType})
+	require.ErrorContains(t, err, "backend must be specified")
+	require.Nil(t, store)
 
 	// Test with kvstore client specified
-	store, err = JoinSharedStore(Configuration{Prefix: rand.RandomString(), KeyCreator: newTestType, Backend: kvstore.Client()})
-	c.Assert(err, IsNil)
-	c.Assert(store, Not(IsNil))
-	c.Assert(store.conf.SynchronizationInterval, Equals, option.Config.KVstorePeriodicSync)
+	store, err = JoinSharedStore(hivetest.Logger(t), Configuration{Prefix: rand.String(12), KeyCreator: newTestType, Backend: client})
+	require.NoError(t, err)
+	require.NotNil(t, store)
+	require.Equal(t, option.Config.KVstorePeriodicSync, store.conf.SynchronizationInterval)
 	store.Close(context.TODO())
 }
 
-func expect(check func() bool) error {
-	start := time.Now()
-	for {
-		if check() {
-			return nil
-		}
+func TestStoreOperations(t *testing.T) {
+	testutils.IntegrationTest(t)
+	client := kvstore.SetupDummy(t, "etcd")
 
-		if time.Since(start) > sharedKeyDeleteDelay+5*time.Second {
-			return fmt.Errorf("timeout while waiting for expected value")
-		}
-
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
-func (s *StoreSuite) TestStoreOperations(c *C) {
 	// Basic creation should result in default values
-	store, err := JoinSharedStore(Configuration{
-		Prefix:               rand.RandomString(),
+	store, err := JoinSharedStore(hivetest.Logger(t), Configuration{
+		Backend:              client,
+		Prefix:               rand.String(12),
 		KeyCreator:           newTestType,
 		Observer:             &observer{},
 		SharedKeyDeleteDelay: sharedKeyDeleteDelay,
 	})
-	c.Assert(err, IsNil)
-	c.Assert(store, Not(IsNil))
+	require.NoError(t, err)
+	require.NotNil(t, store)
 	defer store.Close(context.TODO())
 
 	localKey1 := initTestType("local1")
@@ -194,136 +136,146 @@ func (s *StoreSuite) TestStoreOperations(c *C) {
 	localKey3 := initTestType("local3")
 
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey1)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey2)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// due to the short sync interval, it is possible that multiple updates
 	// have occurred, make the test reliable by succeeding on at lest one
 	// update
-	c.Assert(expect(func() bool { return localKey1.updated() >= 1 }), IsNil)
-	c.Assert(expect(func() bool { return localKey2.updated() >= 1 }), IsNil)
-	c.Assert(expect(func() bool { return localKey3.updated() == 0 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey1.updated(), 1) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey2.updated(), 1) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 0, localKey3.updated()) }, timeout, tick)
 
 	store.DeleteLocalKey(context.TODO(), &localKey1)
 	// localKey1 will be deleted 2 times, one from local key and other from
 	// the kvstore watcher
-	c.Assert(expect(func() bool { return localKey1.deleted() == 2 }), IsNil)
-	c.Assert(expect(func() bool { return localKey2.deleted() == 0 }), IsNil)
-	c.Assert(expect(func() bool { return localKey3.deleted() == 0 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 2, localKey1.deleted()) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 0, localKey2.deleted()) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 0, localKey3.deleted()) }, timeout, tick)
 
 	store.DeleteLocalKey(context.TODO(), &localKey3)
 	// localKey3 won't be deleted because it was never added
-	c.Assert(expect(func() bool { return localKey3.deleted() == 0 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 0, localKey3.deleted()) }, timeout, tick)
 
 	store.DeleteLocalKey(context.TODO(), &localKey2)
-	c.Assert(expect(func() bool { return localKey1.deleted() == 2 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 2, localKey1.deleted()) }, timeout, tick)
 	// localKey2 will be deleted 2 times, one from local key and other from
 	// the kvstore watcher
-	c.Assert(expect(func() bool { return localKey2.deleted() == 2 }), IsNil)
-	c.Assert(expect(func() bool { return localKey3.deleted() == 0 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 2, localKey2.deleted()) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 0, localKey3.deleted()) }, timeout, tick)
 }
 
-func (s *StoreSuite) TestStorePeriodicSync(c *C) {
+func TestStorePeriodicSync(t *testing.T) {
+	testutils.IntegrationTest(t)
+	client := kvstore.SetupDummy(t, "etcd")
+
 	// Create a store with a very short periodic sync interval
-	store, err := JoinSharedStore(Configuration{
-		Prefix:                  rand.RandomString(),
+	store, err := JoinSharedStore(hivetest.Logger(t), Configuration{
+		Backend:                 client,
+		Prefix:                  rand.String(12),
 		KeyCreator:              newTestType,
 		SynchronizationInterval: 10 * time.Millisecond,
 		SharedKeyDeleteDelay:    defaults.NodeDeleteDelay,
 		Observer:                &observer{},
 	})
-	c.Assert(err, IsNil)
-	c.Assert(store, Not(IsNil))
+	require.NoError(t, err)
+	require.NotNil(t, store)
 	defer store.Close(context.TODO())
 
 	localKey1 := initTestType("local1")
 	localKey2 := initTestType("local2")
 
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey1)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey2)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	c.Assert(expect(func() bool { return localKey1.updated() >= 1 }), IsNil)
-	c.Assert(expect(func() bool { return localKey2.updated() >= 1 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey1.updated(), 1) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey2.updated(), 1) }, timeout, tick)
 
 	store.DeleteLocalKey(context.TODO(), &localKey1)
 	store.DeleteLocalKey(context.TODO(), &localKey2)
 
-	c.Assert(expect(func() bool { return localKey1.deleted() == 1 }), IsNil)
-	c.Assert(expect(func() bool { return localKey2.deleted() == 1 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 1, localKey1.deleted()) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.Equal(c, 1, localKey2.deleted()) }, timeout, tick)
 }
 
-func (s *StoreSuite) TestStoreLocalKeyProtection(c *C) {
-	store, err := JoinSharedStore(Configuration{
-		Prefix:                  rand.RandomString(),
+func TestStoreLocalKeyProtection(t *testing.T) {
+	testutils.IntegrationTest(t)
+	client := kvstore.SetupDummy(t, "etcd")
+
+	store, err := JoinSharedStore(hivetest.Logger(t), Configuration{
+		Backend:                 client,
+		Prefix:                  rand.String(12),
 		KeyCreator:              newTestType,
 		SynchronizationInterval: time.Hour, // ensure that periodic sync does not interfer
 		Observer:                &observer{},
 	})
-	c.Assert(err, IsNil)
-	c.Assert(store, Not(IsNil))
+	require.NoError(t, err)
+	require.NotNil(t, store)
 	defer store.Close(context.TODO())
 
 	localKey1 := initTestType("local1")
 
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey1)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	c.Assert(expect(func() bool { return localKey1.updated() >= 1 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey1.updated(), 1) }, timeout, tick)
 	// delete all keys
-	kvstore.Client().DeletePrefix(context.TODO(), store.conf.Prefix)
-	time.Sleep(10 * time.Millisecond)
-	c.Assert(expect(func() bool {
-		v, err := kvstore.Client().Get(context.TODO(), store.keyPath(&localKey1))
-		return err == nil && v != nil
-	}), IsNil)
+	client.DeletePrefix(context.TODO(), store.conf.Prefix)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		v, err := client.Get(context.TODO(), store.keyPath(&localKey1))
+		assert.NoError(c, err)
+		assert.NotNil(c, v)
+	}, timeout, tick)
 }
 
-func setupStoreCollaboration(c *C, storePrefix, keyPrefix string) *SharedStore {
-	store, err := JoinSharedStore(Configuration{
+func setupStoreCollaboration(t *testing.T, client kvstore.BackendOperations, storePrefix, keyPrefix string) *SharedStore {
+	store, err := JoinSharedStore(hivetest.Logger(t), Configuration{
+		Backend:                 client,
 		Prefix:                  storePrefix,
 		KeyCreator:              newTestType,
 		SynchronizationInterval: time.Second,
 		Observer:                &observer{},
 	})
-	c.Assert(err, IsNil)
-	c.Assert(store, Not(IsNil))
+	require.NoError(t, err)
+	require.NotNil(t, store)
 
 	localKey1 := initTestType(keyPrefix + "-local1")
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey1)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	localKey2 := initTestType(keyPrefix + "-local2")
 	err = store.UpdateLocalKeySync(context.TODO(), &localKey2)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// wait until local keys was inserted and until the kvstore has confirmed the
-	c.Assert(expect(func() bool { return localKey1.updated() >= 1 }), IsNil)
-	c.Assert(expect(func() bool { return localKey2.updated() >= 1 }), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey1.updated(), 1) }, timeout, tick)
+	require.EventuallyWithT(t, func(c *assert.CollectT) { assert.GreaterOrEqual(c, localKey2.updated(), 1) }, timeout, tick)
 
-	c.Assert(len(store.getLocalKeys()), Equals, 2)
+	require.Len(t, store.getLocalKeys(), 2)
 
 	return store
 }
 
-func (s *StoreSuite) TestStoreCollaboration(c *C) {
-	storePrefix := rand.RandomString()
+func TestStoreCollaboration(t *testing.T) {
+	testutils.IntegrationTest(t)
+	client := kvstore.SetupDummy(t, "etcd")
 
-	collab1 := setupStoreCollaboration(c, storePrefix, rand.RandomString())
+	storePrefix := rand.String(12)
+
+	collab1 := setupStoreCollaboration(t, client, storePrefix, rand.String(12))
 	defer collab1.Close(context.TODO())
 
-	collab2 := setupStoreCollaboration(c, storePrefix, rand.RandomString())
+	collab2 := setupStoreCollaboration(t, client, storePrefix, rand.String(12))
 	defer collab2.Close(context.TODO())
 
-	c.Assert(expect(func() bool {
-		totalKeys := len(collab1.getLocalKeys()) + len(collab2.getLocalKeys())
-		keys1, keys2 := collab1.getSharedKeys(), collab2.getSharedKeys()
-
-		log.Debugf("totalKeys %d == keys1 %d == keys2 %d", totalKeys, len(keys1), len(keys2))
-		return len(keys1) == totalKeys && len(keys1) == len(keys2)
-	}), IsNil)
+	require.EventuallyWithT(t, func(c *assert.CollectT) {
+		all := append(collab1.getLocalKeys(), collab2.getLocalKeys()...)
+		assert.ElementsMatch(c, collab1.getSharedKeys(), all)
+		assert.ElementsMatch(c, collab2.getSharedKeys(), all)
+	}, timeout, tick)
 }
 
 // getLocalKeys returns all local keys

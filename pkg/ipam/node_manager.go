@@ -8,10 +8,9 @@ package ipam
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"sort"
-	"time"
 
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/semaphore"
 
 	"github.com/cilium/cilium/pkg/backoff"
@@ -21,8 +20,12 @@ import (
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
+
+var ipamNodeIntervalControllerGroup = controller.NewGroup("ipam-node-interval-refresh")
 
 // CiliumNodeGetterUpdater defines the interface used to interact with the k8s
 // apiserver to retrieve and update the CiliumNode custom resource
@@ -55,7 +58,7 @@ type NodeOperations interface {
 	// (AllocationAction.EmptyInterfaceSlots > 0). This function must
 	// create the interface *and* allocate up to
 	// AllocationAction.MaxIPsToAllocate.
-	CreateInterface(ctx context.Context, allocation *AllocationAction, scopedLog *logrus.Entry) (int, string, error)
+	CreateInterface(ctx context.Context, allocation *AllocationAction, scopedLog *slog.Logger) (int, string, error)
 
 	// ResyncInterfacesAndIPs is called to synchronize the latest list of
 	// interfaces and IPs associated with the node. This function is called
@@ -64,21 +67,23 @@ type NodeOperations interface {
 	// It returns all available ip in node and remaining available interfaces
 	// that can either be allocated or have not yet exhausted the instance specific quota of addresses
 	// and error occurred during execution.
-	ResyncInterfacesAndIPs(ctx context.Context, scopedLog *logrus.Entry) (ipamTypes.AllocationMap, ipamStats.InterfaceStats, error)
+	ResyncInterfacesAndIPs(ctx context.Context, scopedLog *slog.Logger) (ipamTypes.AllocationMap, ipamStats.InterfaceStats, error)
 
 	// PrepareIPAllocation is called to calculate the number of IPs that
 	// can be allocated on the node and whether a new network interface
 	// must be attached to the node.
-	PrepareIPAllocation(scopedLog *logrus.Entry) (*AllocationAction, error)
+	PrepareIPAllocation(scopedLog *slog.Logger) (*AllocationAction, error)
 
 	// AllocateIPs is called after invoking PrepareIPAllocation and needs
 	// to perform the actual allocation.
 	AllocateIPs(ctx context.Context, allocation *AllocationAction) error
 
+	AllocateStaticIP(ctx context.Context, staticIPTags ipamTypes.Tags) (string, error)
+
 	// PrepareIPRelease is called to calculate whether any IP excess needs
 	// to be resolved. It behaves identical to PrepareIPAllocation but
 	// indicates a need to release IPs.
-	PrepareIPRelease(excessIPs int, scopedLog *logrus.Entry) *ReleaseAction
+	PrepareIPRelease(excessIPs int, scopedLog *slog.Logger) *ReleaseAction
 
 	// ReleaseIPs is called after invoking PrepareIPRelease and needs to
 	// perform the release of IPs.
@@ -119,6 +124,10 @@ type AllocationImplementation interface {
 	// also called when the IPAM layer detects that state got out of sync.
 	Resync(ctx context.Context) time.Time
 
+	// InstanceSync is called to sync the state of the specified instance with
+	// external APIs or systems.
+	InstanceSync(ctx context.Context, instanceID string) time.Time
+
 	// HasInstance returns whether the instance is in instances
 	HasInstance(instanceID string) bool
 
@@ -142,6 +151,7 @@ type MetricsAPI interface {
 	SetAvailableIPsPerSubnet(subnetID string, availabilityZone string, available int)
 	SetNodes(category string, nodes int)
 	IncResyncCount()
+	ObserveBackgroundSync(status string, duration time.Duration)
 	PoolMaintainerTrigger() trigger.MetricsObserver
 	K8sSyncTrigger() trigger.MetricsObserver
 	ResyncTrigger() trigger.MetricsObserver
@@ -151,6 +161,7 @@ type MetricsNodeAPI interface {
 	SetIPAvailable(node string, cap int)
 	SetIPUsed(node string, used int)
 	SetIPNeeded(node string, needed int)
+	DeleteNode(node string)
 }
 
 // nodeMap is a mapping of node names to ENI nodes
@@ -158,12 +169,12 @@ type nodeMap map[string]*Node
 
 // NodeManager manages all nodes with ENIs
 type NodeManager struct {
+	logger             *slog.Logger
 	mutex              lock.RWMutex
 	nodes              nodeMap
 	instancesAPI       AllocationImplementation
 	k8sAPI             CiliumNodeGetterUpdater
 	metricsAPI         MetricsAPI
-	resyncTrigger      *trigger.Trigger
 	parallelWorkers    int64
 	releaseExcessIPs   bool
 	stableInstancesAPI bool
@@ -179,13 +190,14 @@ func (n *NodeManager) ClusterSizeDependantInterval(baseInterval time.Duration) t
 }
 
 // NewNodeManager returns a new NodeManager
-func NewNodeManager(instancesAPI AllocationImplementation, k8sAPI CiliumNodeGetterUpdater, metrics MetricsAPI,
+func NewNodeManager(logger *slog.Logger, instancesAPI AllocationImplementation, k8sAPI CiliumNodeGetterUpdater, metrics MetricsAPI,
 	parallelWorkers int64, releaseExcessIPs bool, prefixDelegation bool) (*NodeManager, error) {
 	if parallelWorkers < 1 {
 		parallelWorkers = 1
 	}
 
 	mngr := &NodeManager{
+		logger:           logger,
 		nodes:            nodeMap{},
 		instancesAPI:     instancesAPI,
 		k8sAPI:           k8sAPI,
@@ -195,21 +207,6 @@ func NewNodeManager(instancesAPI AllocationImplementation, k8sAPI CiliumNodeGett
 		prefixDelegation: prefixDelegation,
 	}
 
-	resyncTrigger, err := trigger.NewTrigger(trigger.Parameters{
-		Name:            "ipam-node-manager-resync",
-		MinInterval:     10 * time.Millisecond,
-		MetricsObserver: metrics.ResyncTrigger(),
-		TriggerFunc: func(reasons []string) {
-			if syncTime, ok := mngr.instancesAPIResync(context.TODO()); ok {
-				mngr.Resync(context.TODO(), syncTime)
-			}
-		},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("unable to initialize resync trigger: %s", err)
-	}
-
-	mngr.resyncTrigger = resyncTrigger
 	// Assume readiness, the initial blocking resync in Start() will update
 	// the readiness
 	mngr.SetInstancesAPIReadiness(true)
@@ -240,10 +237,16 @@ func (n *NodeManager) Start(ctx context.Context) error {
 		mngr := controller.NewManager()
 		mngr.UpdateController("ipam-node-interval-refresh",
 			controller.ControllerParams{
+				Group:       ipamNodeIntervalControllerGroup,
 				RunInterval: time.Minute,
 				DoFunc: func(ctx context.Context) error {
-					if syncTime, ok := n.instancesAPIResync(ctx); ok {
+					start := time.Now()
+					syncTime, ok := n.instancesAPIResync(ctx)
+					if ok {
+						n.metricsAPI.ObserveBackgroundSync(success, time.Since(start))
 						n.Resync(ctx, syncTime)
+					} else {
+						n.metricsAPI.ObserveBackgroundSync(failed, time.Since(start))
 					}
 					return nil
 				},
@@ -281,38 +284,30 @@ func (n *NodeManager) GetNames() (allNodeNames []string) {
 	return
 }
 
-func (n *NodeManager) Create(resource *v2.CiliumNode) bool {
-	return n.Update(resource)
-}
-
-// Update is called whenever a CiliumNode resource has been updated in the
-// Kubernetes apiserver
-//
-// This is only used for testing.
-func (n *NodeManager) Update(resource *v2.CiliumNode) (nodeSynced bool) {
-	nodeSynced = true
+// Upsert is called whenever a CiliumNode resource has been updated in the
+// Kubernetes apiserver. The CiliumNode will be created if it didn't exist before.
+func (n *NodeManager) Upsert(resource *v2.CiliumNode) {
 	n.mutex.Lock()
+	defer n.mutex.Unlock()
 	node, ok := n.nodes[resource.Name]
-	defer func() {
-		n.mutex.Unlock()
-		if nodeSynced {
-			nodeSynced = node.UpdatedResource(resource)
-		}
-	}()
 	if !ok {
 		node = &Node{
-			name:                resource.Name,
-			manager:             n,
-			ipsMarkedForRelease: make(map[string]time.Time),
-			ipReleaseStatus:     make(map[string]string),
-			logLimiter:          logging.NewLimiter(10*time.Second, 3), // 1 log / 10 secs, burst of 3
+			rootLogger: n.logger,
+			name:       resource.Name,
+			manager:    n,
+			logLimiter: logging.NewLimiter(10*time.Second, 3), // 1 log / 10 secs, burst of 3
+			ipv4Alloc: ipAllocAttrs{
+				ipsMarkedForRelease: make(map[string]time.Time),
+				ipReleaseStatus:     make(map[string]string),
+			},
 		}
+		node.logger.Store(node.rootLogger.With(fieldName, resource.Name))
 
 		ctx, cancel := context.WithCancel(context.Background())
 		// InstanceAPI is stale and the instances API is stable then do resync instancesAPI to sync instances
 		if !n.instancesAPI.HasInstance(resource.InstanceID()) && n.stableInstancesAPI {
-			if syncTime := n.instancesAPI.Resync(ctx); syncTime.IsZero() {
-				node.logger().Warning("Failed to resync the instances from the API after new node was found")
+			if syncTime := n.instancesAPI.InstanceSync(ctx, resource.InstanceID()); syncTime.IsZero() {
+				node.logger.Load().Warn("Failed to resync the instance from the API after new node was found")
 				n.stableInstancesAPI = false
 			} else {
 				n.stableInstancesAPI = true
@@ -334,15 +329,15 @@ func (n *NodeManager) Update(resource *v2.CiliumNode) (nodeSynced bool) {
 			MetricsObserver: n.metricsAPI.PoolMaintainerTrigger(),
 			TriggerFunc: func(reasons []string) {
 				if err := node.MaintainIPPool(ctx); err != nil {
-					node.logger().WithError(err).Warning("Unable to maintain ip pool of node")
+					node.logger.Load().Warn("Unable to maintain ip pool of node", logfields.Error, err)
 					backoff.Wait(ctx)
 				}
 			},
 			ShutdownFunc: cancel,
 		})
 		if err != nil {
-			node.logger().WithError(err).Error("Unable to create pool-maintainer trigger")
-			return false
+			node.logger.Load().Error("Unable to create pool-maintainer trigger", logfields.Error, err)
+			return
 		}
 
 		retry, err := trigger.NewTrigger(trigger.Parameters{
@@ -351,8 +346,8 @@ func (n *NodeManager) Update(resource *v2.CiliumNode) (nodeSynced bool) {
 			TriggerFunc: func(reasons []string) { poolMaintainer.Trigger() },
 		})
 		if err != nil {
-			node.logger().WithError(err).Error("Unable to create pool-maintainer-retry trigger")
-			return false
+			node.logger.Load().Error("Unable to create pool-maintainer-retry trigger", logfields.Error, err)
+			return
 		}
 		node.retry = retry
 
@@ -366,17 +361,36 @@ func (n *NodeManager) Update(resource *v2.CiliumNode) (nodeSynced bool) {
 		})
 		if err != nil {
 			poolMaintainer.Shutdown()
-			node.logger().WithError(err).Error("Unable to create k8s-sync trigger")
-			return false
+			node.logger.Load().Error("Unable to create k8s-sync trigger", logfields.Error, err)
+			return
 		}
+
+		instanceSync, err := trigger.NewTrigger(trigger.Parameters{
+			Name:            fmt.Sprintf("ipam-node-instance-sync-%s", resource.Name),
+			MinInterval:     10 * time.Millisecond,
+			MetricsObserver: n.metricsAPI.ResyncTrigger(),
+			TriggerFunc: func(reasons []string) {
+				if syncTime, ok := node.instanceAPISync(ctx, resource.InstanceID()); ok {
+					node.manager.Resync(ctx, syncTime)
+				}
+			},
+		})
+		if err != nil {
+			poolMaintainer.Shutdown()
+			k8sSync.Shutdown()
+			node.logger.Load().Error("Unable to create instance-sync trigger", logfields.Error, err)
+			return
+		}
+		node.instanceSync = instanceSync
 
 		node.poolMaintainer = poolMaintainer
 		node.k8sSync = k8sSync
 		n.nodes[node.name] = node
-		log.WithField(fieldName, resource.Name).Info("Discovered new CiliumNode custom resource")
+		node.logger.Load().Info("Discovered new CiliumNode custom resource", fieldName, resource.Name)
 	}
-
-	return
+	// Update the resource in the node while holding the lock, otherwise resyncs can be
+	// triggered prior to the update being applied.
+	node.UpdatedResource(resource)
 }
 
 // Delete is called after a CiliumNode resource has been deleted via the
@@ -385,6 +399,9 @@ func (n *NodeManager) Delete(resource *v2.CiliumNode) {
 	n.mutex.Lock()
 
 	if node, ok := n.nodes[resource.Name]; ok {
+		// Stop target_node metrics related to this node being emitted.
+		n.metricsAPI.DeleteNode(node.name)
+
 		if node.poolMaintainer != nil {
 			node.poolMaintainer.Shutdown()
 		}
@@ -393,6 +410,9 @@ func (n *NodeManager) Delete(resource *v2.CiliumNode) {
 		}
 		if node.retry != nil {
 			node.retry.Shutdown()
+		}
+		if node.instanceSync != nil {
+			node.instanceSync.Shutdown()
 		}
 	}
 
@@ -416,19 +436,18 @@ func (n *NodeManager) Get(nodeName string) *Node {
 	return node
 }
 
-// GetNodesByIPWatermark returns all nodes that require addresses to be
+// GetNodesByIPWatermarkLocked returns all nodes that require addresses to be
 // allocated or released, sorted by the number of addresses needed to be operated
 // in descending order. Number of addresses to be released is negative value
 // so that nodes with IP deficit are resolved first
-func (n *NodeManager) GetNodesByIPWatermark() []*Node {
-	n.mutex.RLock()
+// The caller must hold the NodeManager lock
+func (n *NodeManager) GetNodesByIPWatermarkLocked() []*Node {
 	list := make([]*Node, len(n.nodes))
 	index := 0
 	for _, node := range n.nodes {
 		list[index] = node
 		index++
 	}
-	n.mutex.RUnlock()
 
 	sort.Slice(list, func(i, j int) bool {
 		valuei := list[i].GetNeededAddresses()
@@ -446,12 +465,16 @@ func (n *NodeManager) GetNodesByIPWatermark() []*Node {
 
 type resyncStats struct {
 	mutex               lock.Mutex
+	ipv4                ipResyncStats
+	emptyInterfaceSlots int
+}
+
+type ipResyncStats struct {
 	totalUsed           int
 	totalAvailable      int
 	totalNeeded         int
 	remainingInterfaces int
 	interfaceCandidates int
-	emptyInterfaceSlots int
 	nodes               int
 	nodesAtCapacity     int
 	nodesInDeficit      int
@@ -460,7 +483,7 @@ type resyncStats struct {
 
 func (n *NodeManager) resyncNode(ctx context.Context, node *Node, stats *resyncStats, syncTime time.Time) {
 	node.updateLastResync(syncTime)
-	node.recalculate()
+	node.recalculate(ctx)
 	allocationNeeded := node.allocationNeeded()
 	releaseNeeded := node.releaseNeeded()
 	if allocationNeeded || releaseNeeded {
@@ -471,31 +494,31 @@ func (n *NodeManager) resyncNode(ctx context.Context, node *Node, stats *resyncS
 	nodeStats := node.Stats()
 
 	stats.mutex.Lock()
-	stats.totalUsed += nodeStats.UsedIPs
+	stats.ipv4.totalUsed += nodeStats.IPv4.UsedIPs
 	// availableOnNode is the number of available IPs on the node at this
 	// current moment. It does not take into account the number of IPs that
 	// can be allocated in the future.
-	availableOnNode := nodeStats.AvailableIPs - nodeStats.UsedIPs
-	stats.totalAvailable += availableOnNode
-	stats.totalNeeded += nodeStats.NeededIPs
-	stats.remainingInterfaces += nodeStats.RemainingInterfaces
-	stats.interfaceCandidates += nodeStats.InterfaceCandidates
+	availableOnNode := nodeStats.IPv4.AvailableIPs - nodeStats.IPv4.UsedIPs
+	stats.ipv4.totalAvailable += availableOnNode
+	stats.ipv4.totalNeeded += nodeStats.IPv4.NeededIPs
+	stats.ipv4.remainingInterfaces += nodeStats.IPv4.RemainingInterfaces
+	stats.ipv4.interfaceCandidates += nodeStats.IPv4.InterfaceCandidates
 	stats.emptyInterfaceSlots += nodeStats.EmptyInterfaceSlots
-	stats.nodes++
+	stats.ipv4.nodes++
 
-	stats.nodeCapacity = nodeStats.Capacity
+	stats.ipv4.nodeCapacity = nodeStats.IPv4.Capacity
 
 	// Set per Node metrics.
-	n.metricsAPI.SetIPAvailable(node.name, stats.nodeCapacity)
-	n.metricsAPI.SetIPUsed(node.name, nodeStats.UsedIPs)
-	n.metricsAPI.SetIPNeeded(node.name, nodeStats.NeededIPs)
+	n.metricsAPI.SetIPAvailable(node.name, nodeStats.IPv4.Capacity)
+	n.metricsAPI.SetIPUsed(node.name, nodeStats.IPv4.UsedIPs)
+	n.metricsAPI.SetIPNeeded(node.name, nodeStats.IPv4.NeededIPs)
 
 	if allocationNeeded {
-		stats.nodesInDeficit++
+		stats.ipv4.nodesInDeficit++
 	}
 
-	if nodeStats.RemainingInterfaces == 0 && availableOnNode == 0 {
-		stats.nodesAtCapacity++
+	if nodeStats.IPv4.RemainingInterfaces == 0 && availableOnNode == 0 {
+		stats.ipv4.nodesAtCapacity++
 	}
 
 	stats.mutex.Unlock()
@@ -508,12 +531,14 @@ func (n *NodeManager) resyncNode(ctx context.Context, node *Node, stats *resyncS
 // watermarks. Any updates to the node resource are synchronized to the
 // Kubernetes apiserver.
 func (n *NodeManager) Resync(ctx context.Context, syncTime time.Time) {
+	n.mutex.Lock()
+	defer n.mutex.Unlock()
 	n.metricsAPI.IncResyncCount()
 
 	stats := resyncStats{}
 	sem := semaphore.NewWeighted(n.parallelWorkers)
 
-	for _, node := range n.GetNodesByIPWatermark() {
+	for _, node := range n.GetNodesByIPWatermarkLocked() {
 		err := sem.Acquire(ctx, 1)
 		if err != nil {
 			continue
@@ -528,15 +553,15 @@ func (n *NodeManager) Resync(ctx context.Context, syncTime time.Time) {
 	// complete and thus blocks until all nodes are synced
 	sem.Acquire(ctx, n.parallelWorkers)
 
-	n.metricsAPI.SetAllocatedIPs("used", stats.totalUsed)
-	n.metricsAPI.SetAllocatedIPs("available", stats.totalAvailable)
-	n.metricsAPI.SetAllocatedIPs("needed", stats.totalNeeded)
-	n.metricsAPI.SetAvailableInterfaces(stats.remainingInterfaces)
-	n.metricsAPI.SetInterfaceCandidates(stats.interfaceCandidates)
+	n.metricsAPI.SetAllocatedIPs("used", stats.ipv4.totalUsed)
+	n.metricsAPI.SetAllocatedIPs("available", stats.ipv4.totalAvailable)
+	n.metricsAPI.SetAllocatedIPs("needed", stats.ipv4.totalNeeded)
+	n.metricsAPI.SetAvailableInterfaces(stats.ipv4.remainingInterfaces)
+	n.metricsAPI.SetInterfaceCandidates(stats.ipv4.interfaceCandidates)
 	n.metricsAPI.SetEmptyInterfaceSlots(stats.emptyInterfaceSlots)
-	n.metricsAPI.SetNodes("total", stats.nodes)
-	n.metricsAPI.SetNodes("in-deficit", stats.nodesInDeficit)
-	n.metricsAPI.SetNodes("at-capacity", stats.nodesAtCapacity)
+	n.metricsAPI.SetNodes("total", stats.ipv4.nodes)
+	n.metricsAPI.SetNodes("in-deficit", stats.ipv4.nodesInDeficit)
+	n.metricsAPI.SetNodes("at-capacity", stats.ipv4.nodesAtCapacity)
 
 	for poolID, quota := range n.instancesAPI.GetPoolQuota() {
 		n.metricsAPI.SetAvailableIPsPerSubnet(string(poolID), quota.AvailabilityZone, quota.AvailableIPs)

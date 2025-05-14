@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_PROXY_H_
-#define __LIB_PROXY_H_
+#pragma once
 
 #include "conntrack.h"
 
@@ -28,7 +27,7 @@ assign_socket_tcp(struct __ctx_buff *ctx,
 	if (established && sk->state == BPF_TCP_LISTEN)
 		goto release;
 
-	dbg_ctx = sk->family << 16 | ctx->protocol;
+	dbg_ctx = READ_ONCE(sk)->family << 16 | ctx->protocol;
 	result = sk_assign(ctx, sk, 0);
 	cilium_dbg(ctx, DBG_SK_ASSIGN, -result, dbg_ctx);
 	if (result == 0)
@@ -50,11 +49,14 @@ assign_socket_udp(struct __ctx_buff *ctx,
 	struct bpf_sock *sk;
 	__u32 dbg_ctx;
 
+	if (established)
+		goto out;
+
 	sk = sk_lookup_udp(ctx, tuple, len, BPF_F_CURRENT_NETNS, 0);
 	if (!sk)
 		goto out;
 
-	dbg_ctx = sk->family << 16 | ctx->protocol;
+	dbg_ctx = READ_ONCE(sk)->family << 16 | ctx->protocol;
 	result = sk_assign(ctx, sk, 0);
 	cilium_dbg(ctx, DBG_SK_ASSIGN, -result, dbg_ctx);
 	if (result == 0)
@@ -211,7 +213,7 @@ __ctx_redirect_to_proxy(struct __ctx_buff *ctx, void *tuple __maybe_unused,
 #endif
 		ctx->mark = MARK_MAGIC_TO_PROXY | proxy_port << 16;
 
-	cilium_dbg(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port, 0);
+	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port);
 
 #ifdef ENABLE_TPROXY
 	if (proxy_port && !from_host) {
@@ -233,7 +235,6 @@ __ctx_redirect_to_proxy(struct __ctx_buff *ctx, void *tuple __maybe_unused,
 #endif /* ENABLE_IPV6 */
 	}
 #endif /* ENABLE_TPROXY */
-	ctx_change_type(ctx, PACKET_HOST); /* Required for ingress packets from overlay */
 	return result;
 }
 
@@ -268,18 +269,15 @@ ctx_redirect_to_proxy6(struct __ctx_buff *ctx, void *tuple __maybe_unused,
 static __always_inline int						\
 NAME(struct __ctx_buff *ctx, struct PREFIX ## _ct_tuple *tuple)		\
 {									\
-	int err, l4_off;						\
+	int err;							\
 									\
-	err = PREFIX ## _extract_tuple(ctx, tuple, &l4_off);		\
-	if (err != CTX_ACT_OK)						\
+	err = PREFIX ## _extract_tuple(ctx, tuple);			\
+	if (err < 0)							\
 		return err;						\
-									\
-	if (ctx_load_bytes(ctx, l4_off, &tuple->dport, 4) < 0)		\
-		return DROP_CT_INVALID_HDR;				\
 									\
 	__ ## PREFIX ## _ct_tuple_reverse(tuple);			\
 									\
-	return CTX_ACT_OK;						\
+	return 0;							\
 }
 
 #ifdef ENABLE_IPV4
@@ -288,25 +286,12 @@ IP_TUPLE_EXTRACT_FN(extract_tuple4, ipv4)
 #ifdef ENABLE_IPV6
 IP_TUPLE_EXTRACT_FN(extract_tuple6, ipv6)
 #endif /* ENABLE_IPV6 */
-#endif /* ENABLE_TPROXY */
 
-/**
- * ctx_redirect_to_proxy_first() applies changes to the context to forward
- * the packet towards the proxy. It is designed to run as the first function
- * that accesses the context from the current BPF program.
- */
 static __always_inline int
-ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
+ctx_redirect_to_proxy_first_tproxy(struct __ctx_buff *ctx, __be16 proxy_port)
 {
 	int ret = CTX_ACT_OK;
-#if defined(ENABLE_TPROXY)
 	__u16 proto;
-#ifdef ENABLE_IPV4
-	__be32 ipv4_localhost = bpf_htonl(INADDR_LOOPBACK);
-#endif
-#ifdef ENABLE_IPV6
-	union v6addr ipv6_localhost = { .addr[15] = 1,};
-#endif
 
 	/**
 	 * For reply traffic to egress proxy for a local endpoint, we skip the
@@ -317,15 +302,15 @@ ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
 	 * See ct_state.proxy_redirect usage in bpf_lxc.c for more info.
 	 */
 	if (!proxy_port)
-		goto mark;
+		return CTX_ACT_OK;
 
 	if (!validate_ethertype(ctx, &proto))
 		return DROP_UNSUPPORTED_L2;
 
-	ret = DROP_UNKNOWN_L3;
 	switch (proto) {
 #ifdef ENABLE_IPV6
 	case bpf_htons(ETH_P_IPV6): {
+		union v6addr ipv6_localhost = { .addr[15] = 1,};
 		struct ipv6_ct_tuple tuple;
 
 		ret = extract_tuple6(ctx, &tuple);
@@ -337,6 +322,7 @@ ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
 #endif /* ENABLE_IPV6 */
 #ifdef ENABLE_IPV4
 	case bpf_htons(ETH_P_IP): {
+		__be32 ipv4_localhost = bpf_htonl(INADDR_LOOPBACK);
 		struct ipv4_ct_tuple tuple;
 
 		ret = extract_tuple4(ctx, &tuple);
@@ -348,44 +334,83 @@ ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
 	}
 #endif /* ENABLE_IPV4 */
 	default:
-		goto out;
+		ret = DROP_UNKNOWN_L3;
+		break;
 	}
+
+	return ret;
+}
 #endif /* ENABLE_TPROXY */
 
-mark: __maybe_unused;
-	cilium_dbg(ctx, DBG_CAPTURE_PROXY_POST, proxy_port, 0);
+/**
+ * ctx_redirect_to_proxy_first() applies changes to the context to forward
+ * the packet towards the proxy. It is designed to run as the first function
+ * that accesses the context from the current BPF program.
+ */
+static __always_inline int
+ctx_redirect_to_proxy_first(struct __ctx_buff *ctx, __be16 proxy_port)
+{
+	int ret = CTX_ACT_OK;
+
+#if defined(ENABLE_TPROXY)
+	ret = ctx_redirect_to_proxy_first_tproxy(ctx, proxy_port);
+	if (IS_ERR(ret))
+		return ret;
+#endif /* ENABLE_TPROXY */
+
+	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_POST, proxy_port);
 	ctx->mark = MARK_MAGIC_TO_PROXY | (proxy_port << 16);
 	ctx_change_type(ctx, PACKET_HOST);
-
-out: __maybe_unused;
 	return ret;
 }
 
 /**
- * tc_index_skip_ingress_proxy - returns true if packet originates from ingress proxy
+ * ctx_redirect_to_proxy_host_egress() redirects a host packet to proxy.
+ * It is intended to be invoked solely from egress. It does not use BPF-based
+ * tproxy because the bpf_sk_assign() helper is only valid on tc ingress path.
+ * The packet is redirected to cilium-host interface to avoid setting sysctl
+ * allow_local = 1 on the physical netdev, which would otherwise be required
+ * for packets hairpinned back into it to pass the fib_validate_source check.
  */
-static __always_inline bool tc_index_skip_ingress_proxy(struct __ctx_buff *ctx)
+static __always_inline int
+ctx_redirect_to_proxy_host_egress(struct __ctx_buff *ctx, __be16 proxy_port)
 {
-	volatile __u32 tc_index = ctx->tc_index;
-#ifdef DEBUG
-	if (tc_index & TC_INDEX_F_SKIP_INGRESS_PROXY)
-		cilium_dbg(ctx, DBG_SKIP_PROXY, tc_index, 0);
-#endif
+	union macaddr mac = CILIUM_HOST_MAC;
 
-	return tc_index & TC_INDEX_F_SKIP_INGRESS_PROXY;
+	ctx->mark = MARK_MAGIC_TO_PROXY | proxy_port << 16;
+
+	cilium_dbg_capture(ctx, DBG_CAPTURE_PROXY_PRE, proxy_port);
+
+	if (eth_store_daddr(ctx, (__u8 *)&mac, 0) < 0)
+		return DROP_WRITE_ERROR;
+
+	return ctx_redirect(ctx, CILIUM_HOST_IFINDEX, BPF_F_INGRESS);
 }
 
 /**
- * tc_index_skip_egress_proxy - returns true if packet originates from egress proxy
+ * tc_index_from_ingress_proxy - returns true if packet originates from ingress proxy
  */
-static __always_inline bool tc_index_skip_egress_proxy(struct __ctx_buff *ctx)
+static __always_inline bool tc_index_from_ingress_proxy(struct __ctx_buff *ctx)
 {
 	volatile __u32 tc_index = ctx->tc_index;
 #ifdef DEBUG
-	if (tc_index & TC_INDEX_F_SKIP_EGRESS_PROXY)
+	if (tc_index & TC_INDEX_F_FROM_INGRESS_PROXY)
 		cilium_dbg(ctx, DBG_SKIP_PROXY, tc_index, 0);
 #endif
 
-	return tc_index & TC_INDEX_F_SKIP_EGRESS_PROXY;
+	return tc_index & TC_INDEX_F_FROM_INGRESS_PROXY;
 }
-#endif /* __LIB_PROXY_H_ */
+
+/**
+ * tc_index_from_egress_proxy - returns true if packet originates from egress proxy
+ */
+static __always_inline bool tc_index_from_egress_proxy(struct __ctx_buff *ctx)
+{
+	volatile __u32 tc_index = ctx->tc_index;
+#ifdef DEBUG
+	if (tc_index & TC_INDEX_F_FROM_EGRESS_PROXY)
+		cilium_dbg(ctx, DBG_SKIP_PROXY, tc_index, 0);
+#endif
+
+	return tc_index & TC_INDEX_F_FROM_EGRESS_PROXY;
+}

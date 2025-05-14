@@ -5,8 +5,9 @@ package api
 
 import (
 	"fmt"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
 	k8sapi "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	"github.com/cilium/cilium/pkg/labels"
@@ -22,99 +23,70 @@ func (s EntitySlice) matches(ctx labels.LabelArray) bool {
 	return s.GetAsEndpointSelectors().Matches(ctx)
 }
 
-func (s *PolicyAPITestSuite) TestEntityMatches(c *C) {
-	InitEntities("cluster1", false)
+func TestEntityMatches(t *testing.T) {
+	InitEntities("cluster1")
 
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("reserved:host")), Equals, true)
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("reserved:host", "id:foo")), Equals, true)
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("reserved:world")), Equals, false)
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("reserved:health")), Equals, false)
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, false)
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("reserved:none")), Equals, false)
-	c.Assert(EntityHost.matches(labels.ParseLabelArray("id=foo")), Equals, false)
+	require.True(t, EntityHost.matches(labels.ParseLabelArray("reserved:host")))
+	require.True(t, EntityHost.matches(labels.ParseLabelArray("reserved:host", "id:foo")))
+	require.False(t, EntityHost.matches(labels.ParseLabelArray("reserved:world")))
+	require.False(t, EntityHost.matches(labels.ParseLabelArray("reserved:health")))
+	require.False(t, EntityHost.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.False(t, EntityHost.matches(labels.ParseLabelArray("reserved:none")))
+	require.False(t, EntityHost.matches(labels.ParseLabelArray("id=foo")))
 
-	c.Assert(EntityAll.matches(labels.ParseLabelArray("reserved:host")), Equals, true)
-	c.Assert(EntityAll.matches(labels.ParseLabelArray("reserved:world")), Equals, true)
-	c.Assert(EntityAll.matches(labels.ParseLabelArray("reserved:health")), Equals, true)
-	c.Assert(EntityAll.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, true)
-	c.Assert(EntityAll.matches(labels.ParseLabelArray("reserved:none")), Equals, true) // in a white-list model, All trumps None
-	c.Assert(EntityAll.matches(labels.ParseLabelArray("id=foo")), Equals, true)
+	require.True(t, EntityAll.matches(labels.ParseLabelArray("reserved:host")))
+	require.True(t, EntityAll.matches(labels.ParseLabelArray("reserved:world")))
+	require.True(t, EntityAll.matches(labels.ParseLabelArray("reserved:health")))
+	require.True(t, EntityAll.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.True(t, EntityAll.matches(labels.ParseLabelArray("reserved:none"))) // in a white-list model, All trumps None
+	require.True(t, EntityAll.matches(labels.ParseLabelArray("id=foo")))
 
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("reserved:host")), Equals, true)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("reserved:init")), Equals, true)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("reserved:health")), Equals, true)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, true)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("reserved:world")), Equals, false)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("reserved:none")), Equals, false)
+	require.True(t, EntityCluster.matches(labels.ParseLabelArray("reserved:host")))
+	require.True(t, EntityCluster.matches(labels.ParseLabelArray("reserved:init")))
+	require.True(t, EntityCluster.matches(labels.ParseLabelArray("reserved:health")))
+	require.True(t, EntityCluster.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.False(t, EntityCluster.matches(labels.ParseLabelArray("reserved:world")))
+	require.False(t, EntityCluster.matches(labels.ParseLabelArray("reserved:none")))
 
 	clusterLabel := fmt.Sprintf("k8s:%s=%s", k8sapi.PolicyLabelCluster, "cluster1")
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray(clusterLabel, "id=foo")), Equals, true)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray(clusterLabel, "id=foo", "id=bar")), Equals, true)
-	c.Assert(EntityCluster.matches(labels.ParseLabelArray("id=foo")), Equals, false)
+	require.True(t, EntityCluster.matches(labels.ParseLabelArray(clusterLabel, "id=foo")))
+	require.True(t, EntityCluster.matches(labels.ParseLabelArray(clusterLabel, "id=foo", "id=bar")))
+	require.False(t, EntityCluster.matches(labels.ParseLabelArray("id=foo")))
 
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("reserved:host")), Equals, false)
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("reserved:world")), Equals, true)
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("reserved:health")), Equals, false)
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, false)
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("reserved:none")), Equals, false)
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("id=foo")), Equals, false)
-	c.Assert(EntityWorld.matches(labels.ParseLabelArray("id=foo", "id=bar")), Equals, false)
+	require.False(t, EntityWorld.matches(labels.ParseLabelArray("reserved:host")))
+	require.True(t, EntityWorld.matches(labels.ParseLabelArray("reserved:world")))
+	require.False(t, EntityWorld.matches(labels.ParseLabelArray("reserved:health")))
+	require.False(t, EntityWorld.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.False(t, EntityWorld.matches(labels.ParseLabelArray("reserved:none")))
+	require.False(t, EntityWorld.matches(labels.ParseLabelArray("id=foo")))
+	require.False(t, EntityWorld.matches(labels.ParseLabelArray("id=foo", "id=bar")))
 
-	c.Assert(EntityNone.matches(labels.ParseLabelArray("reserved:host")), Equals, false)
-	c.Assert(EntityNone.matches(labels.ParseLabelArray("reserved:world")), Equals, false)
-	c.Assert(EntityNone.matches(labels.ParseLabelArray("reserved:health")), Equals, false)
-	c.Assert(EntityNone.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, false)
-	c.Assert(EntityNone.matches(labels.ParseLabelArray("reserved:init")), Equals, false)
-	c.Assert(EntityNone.matches(labels.ParseLabelArray("id=foo")), Equals, false)
-	c.Assert(EntityNone.matches(labels.ParseLabelArray(clusterLabel, "id=foo", "id=bar")), Equals, false)
+	require.False(t, EntityNone.matches(labels.ParseLabelArray("reserved:host")))
+	require.False(t, EntityNone.matches(labels.ParseLabelArray("reserved:world")))
+	require.False(t, EntityNone.matches(labels.ParseLabelArray("reserved:health")))
+	require.False(t, EntityNone.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.False(t, EntityNone.matches(labels.ParseLabelArray("reserved:init")))
+	require.False(t, EntityNone.matches(labels.ParseLabelArray("id=foo")))
+	require.False(t, EntityNone.matches(labels.ParseLabelArray(clusterLabel, "id=foo", "id=bar")))
 
 }
 
-func (s *PolicyAPITestSuite) TestEntitySliceMatches(c *C) {
-	InitEntities("cluster1", false)
+func TestEntitySliceMatches(t *testing.T) {
+	InitEntities("cluster1")
 
 	slice := EntitySlice{EntityHost, EntityWorld}
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:host")), Equals, true)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:world")), Equals, true)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:health")), Equals, false)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, false)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:none")), Equals, false)
-	c.Assert(slice.matches(labels.ParseLabelArray("id=foo")), Equals, false)
+	require.True(t, slice.matches(labels.ParseLabelArray("reserved:host")))
+	require.True(t, slice.matches(labels.ParseLabelArray("reserved:world")))
+	require.False(t, slice.matches(labels.ParseLabelArray("reserved:health")))
+	require.False(t, slice.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.False(t, slice.matches(labels.ParseLabelArray("reserved:none")))
+	require.False(t, slice.matches(labels.ParseLabelArray("id=foo")))
 
 	slice = EntitySlice{EntityHost, EntityHealth}
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:host")), Equals, true)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:world")), Equals, false)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:health")), Equals, true)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:unmanaged")), Equals, false)
-	c.Assert(slice.matches(labels.ParseLabelArray("reserved:none")), Equals, false)
-	c.Assert(slice.matches(labels.ParseLabelArray("id=foo")), Equals, false)
-}
-
-func (s *PolicyAPITestSuite) TestEntityHostAllowsRemoteNode(c *C) {
-	tests := []struct {
-		name                  string
-		treatRemoteNodeAsHost bool
-		expectedMatches       labels.LabelArray
-		expectedNonMatches    labels.LabelArray
-	}{
-		{
-			"host entity selects remote-node identity",
-			true,
-			labels.ParseLabelArray("reserved:remote-node"),
-			labels.ParseLabelArray("reserved:all"),
-		},
-		{
-			"host entity does not select remote-node identity",
-			false,
-			labels.ParseLabelArray("reserved:host"),
-			labels.ParseLabelArray("reserved:remote-node"),
-		},
-	}
-
-	for _, tt := range tests {
-		InitEntities("cluster1", tt.treatRemoteNodeAsHost)
-		hostSelector := EntitySelectorMapping[EntityHost]
-		c.Assert(hostSelector.Matches(tt.expectedMatches), Equals, true, Commentf("Test Name: %s", tt.name))
-		c.Assert(hostSelector.Matches(tt.expectedNonMatches), Equals, false, Commentf("Test Name: %s", tt.name))
-	}
+	require.True(t, slice.matches(labels.ParseLabelArray("reserved:host")))
+	require.False(t, slice.matches(labels.ParseLabelArray("reserved:world")))
+	require.True(t, slice.matches(labels.ParseLabelArray("reserved:health")))
+	require.False(t, slice.matches(labels.ParseLabelArray("reserved:unmanaged")))
+	require.False(t, slice.matches(labels.ParseLabelArray("reserved:none")))
+	require.False(t, slice.matches(labels.ParseLabelArray("id=foo")))
 }

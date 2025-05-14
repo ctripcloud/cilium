@@ -4,25 +4,19 @@
 package client
 
 import (
+	"bytes"
+	"flag"
+	"fmt"
 	"io"
+	"os"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/api/v1/health/models"
-	"github.com/cilium/cilium/pkg/checker"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type ClientTestSuite struct{}
-
-var _ = Suite(&ClientTestSuite{})
-
-func (s *ClientTestSuite) TestConnectivityStatusType(c *C) {
+func TestConnectivityStatusType(t *testing.T) {
 	tests := []struct {
 		cst         ConnectivityStatusType
 		expectedStr string
@@ -45,11 +39,13 @@ func (s *ClientTestSuite) TestConnectivityStatusType(c *C) {
 		},
 	}
 	for _, tc := range tests {
-		c.Assert(tc.cst.String(), Equals, tc.expectedStr)
+		t.Run(tc.expectedStr, func(t *testing.T) {
+			require.Equal(t, tc.expectedStr, tc.cst.String())
+		})
 	}
 }
 
-func (s *ClientTestSuite) TestGetConnectivityStatusType(c *C) {
+func TestGetConnectivityStatusType(t *testing.T) {
 	tests := []struct {
 		cs                 *models.ConnectivityStatus
 		expectedStatusType ConnectivityStatusType
@@ -68,11 +64,13 @@ func (s *ClientTestSuite) TestGetConnectivityStatusType(c *C) {
 		},
 	}
 	for _, tc := range tests {
-		c.Assert(GetConnectivityStatusType(tc.cs), Equals, tc.expectedStatusType)
+		t.Run(tc.expectedStatusType.String(), func(t *testing.T) {
+			require.Equal(t, tc.expectedStatusType, GetConnectivityStatusType(tc.cs))
+		})
 	}
 }
 
-func (s *ClientTestSuite) TestGetPathConnectivityStatusType(c *C) {
+func TestGetPathConnectivityStatusType(t *testing.T) {
 	tests := []struct {
 		cp                 *models.PathStatus
 		expectedStatusType ConnectivityStatusType
@@ -142,11 +140,13 @@ func (s *ClientTestSuite) TestGetPathConnectivityStatusType(c *C) {
 		},
 	}
 	for _, tc := range tests {
-		c.Assert(GetPathConnectivityStatusType(tc.cp), Equals, tc.expectedStatusType)
+		t.Run(tc.expectedStatusType.String(), func(t *testing.T) {
+			require.Equal(t, tc.expectedStatusType, GetPathConnectivityStatusType(tc.cp))
+		})
 	}
 }
 
-func (s *ClientTestSuite) TestFormatNodeStatus(c *C) {
+func TestFormatNodeStatus(t *testing.T) {
 	// This test generates permutations of models.NodeStatus and sees whether
 	// the calls to formatNodeStatus panic; the result of this test being
 	// successful is whether the test does not panic.
@@ -215,8 +215,7 @@ func (s *ClientTestSuite) TestFormatNodeStatus(c *C) {
 		possibleEndpointStatuses = append(possibleEndpointStatuses, hostStatus)
 	}
 
-	printAllOptions := []bool{true, false}
-	succinctOptions := []bool{true, false}
+	allNodesOptions := []bool{true, false}
 	verboseOptions := []bool{true, false}
 	localhostOptions := []bool{true, false}
 
@@ -228,12 +227,10 @@ func (s *ClientTestSuite) TestFormatNodeStatus(c *C) {
 					Host:           hostStatus,
 					Name:           name,
 				}
-				for _, printAllOpt := range printAllOptions {
-					for _, succintOpt := range succinctOptions {
-						for _, verboseOpt := range verboseOptions {
-							for _, localhostOpt := range localhostOptions {
-								formatNodeStatus(w, ns, printAllOpt, succintOpt, verboseOpt, localhostOpt)
-							}
+				for _, allNodesOpt := range allNodesOptions {
+					for _, verboseOpt := range verboseOptions {
+						for _, localhostOpt := range localhostOptions {
+							formatNodeStatus(w, ns, allNodesOpt, verboseOpt, localhostOpt)
 						}
 					}
 				}
@@ -242,13 +239,13 @@ func (s *ClientTestSuite) TestFormatNodeStatus(c *C) {
 	}
 }
 
-func (s *ClientTestSuite) TestGetHostPrimaryAddress(c *C) {
+func TestGetHostPrimaryAddress(t *testing.T) {
 	nilHostNS := &models.NodeStatus{
 		Host: nil,
 	}
 
 	pathStatus := GetHostPrimaryAddress(nilHostNS)
-	c.Assert(pathStatus, IsNil)
+	require.Nil(t, pathStatus)
 
 	nilPrimaryAddressNS := &models.NodeStatus{
 		Host: &models.HostStatus{
@@ -257,7 +254,7 @@ func (s *ClientTestSuite) TestGetHostPrimaryAddress(c *C) {
 	}
 
 	pathStatus = GetHostPrimaryAddress(nilPrimaryAddressNS)
-	c.Assert(pathStatus, IsNil)
+	require.Nil(t, pathStatus)
 
 	primaryAddressNS := &models.NodeStatus{
 		Host: &models.HostStatus{
@@ -266,16 +263,16 @@ func (s *ClientTestSuite) TestGetHostPrimaryAddress(c *C) {
 	}
 
 	pathStatus = GetHostPrimaryAddress(primaryAddressNS)
-	c.Assert(pathStatus, Not(IsNil))
+	require.NotNil(t, pathStatus)
 }
 
-func (s *ClientTestSuite) TestGetPrimaryAddressIP(c *C) {
+func TestGetPrimaryAddressIP(t *testing.T) {
 	nilHostNS := &models.NodeStatus{
 		Host: nil,
 	}
 
 	pathStatus := getPrimaryAddressIP(nilHostNS)
-	c.Assert(pathStatus, Equals, ipUnavailable)
+	require.Equal(t, ipUnavailable, pathStatus)
 
 	nilPrimaryAddressNS := &models.NodeStatus{
 		Host: &models.HostStatus{
@@ -284,7 +281,7 @@ func (s *ClientTestSuite) TestGetPrimaryAddressIP(c *C) {
 	}
 
 	pathStatus = getPrimaryAddressIP(nilPrimaryAddressNS)
-	c.Assert(pathStatus, Equals, ipUnavailable)
+	require.Equal(t, ipUnavailable, pathStatus)
 
 	primaryAddressNS := &models.NodeStatus{
 		Host: &models.HostStatus{
@@ -293,10 +290,10 @@ func (s *ClientTestSuite) TestGetPrimaryAddressIP(c *C) {
 	}
 
 	pathStatus = getPrimaryAddressIP(primaryAddressNS)
-	c.Assert(pathStatus, Equals, "")
+	require.Empty(t, pathStatus)
 }
 
-func (s *ClientTestSuite) TestGetAllEndpointAddresses(c *C) {
+func TestGetAllEndpointAddresses(t *testing.T) {
 	var (
 		primary    = models.PathStatus{IP: "1.1.1.1"}
 		secondary1 = models.PathStatus{IP: "2.2.2.2"}
@@ -328,6 +325,245 @@ func (s *ClientTestSuite) TestGetAllEndpointAddresses(c *C) {
 		},
 	}
 	for _, tc := range tests {
-		c.Assert(GetAllEndpointAddresses(tc.node), checker.DeepEquals, tc.expected)
+		require.Equal(t, tc.expected, GetAllEndpointAddresses(tc.node))
+	}
+}
+
+// used ot update golden files
+var update = flag.Bool("update", false, "update golden files")
+
+func createNodes(healthy int, unhealthy int, unknown int) []*models.NodeStatus {
+
+	nodes := make([]*models.NodeStatus, healthy+unhealthy)
+
+	for i := range healthy {
+		nodes[i] = &models.NodeStatus{
+			Name: fmt.Sprintf("node%d", i),
+			Host: &models.HostStatus{
+				PrimaryAddress: &models.PathStatus{
+					IP: fmt.Sprintf("192.168.1.%d", i),
+					HTTP: &models.ConnectivityStatus{
+						Status:     "",
+						Latency:    10000000,
+						LastProbed: "2023-04-01T12:30:00Z",
+					},
+					Icmp: &models.ConnectivityStatus{
+						Status:     "",
+						Latency:    10000000,
+						LastProbed: "2023-04-01T12:35:00Z",
+					},
+				},
+			},
+			HealthEndpoint: &models.EndpointStatus{
+				PrimaryAddress: &models.PathStatus{
+					IP: fmt.Sprintf("192.168.1.%d", i),
+					HTTP: &models.ConnectivityStatus{
+						Status:     "",
+						Latency:    10000000,
+						LastProbed: "2023-04-01T12:40:00Z",
+					},
+					Icmp: &models.ConnectivityStatus{
+						Status:     "",
+						Latency:    10000000,
+						LastProbed: "2023-04-01T12:45:00Z",
+					},
+				},
+			},
+		}
+	}
+
+	for i := healthy; i < healthy+unhealthy; i++ {
+		nodes[i] = &models.NodeStatus{
+			Name: fmt.Sprintf("node%d", i),
+			Host: &models.HostStatus{
+				PrimaryAddress: &models.PathStatus{
+					IP: fmt.Sprintf("192.168.1.%d", i),
+					HTTP: &models.ConnectivityStatus{
+						Status:     "failed",
+						LastProbed: "2023-04-01T12:30:00Z",
+					},
+					Icmp: &models.ConnectivityStatus{
+						Status:     "failed",
+						LastProbed: "2023-04-01T12:35:00Z",
+					},
+				},
+			},
+			HealthEndpoint: &models.EndpointStatus{
+				PrimaryAddress: &models.PathStatus{
+					IP: fmt.Sprintf("192.168.1.%d", i),
+					HTTP: &models.ConnectivityStatus{
+						Status:     "failed",
+						LastProbed: "2023-04-01T12:40:00Z",
+					},
+					Icmp: &models.ConnectivityStatus{
+						Status:     "failed",
+						LastProbed: "2023-04-01T12:45:00Z",
+					},
+				},
+			},
+		}
+	}
+
+	for i := healthy + unhealthy; i < healthy+unhealthy+unknown; i++ {
+		nodes[i] = &models.NodeStatus{
+			Name: fmt.Sprintf("node%d", i),
+			Host: &models.HostStatus{
+				PrimaryAddress: &models.PathStatus{
+					IP: fmt.Sprintf("192.168.1.%d", i),
+				},
+			},
+			HealthEndpoint: &models.EndpointStatus{
+				PrimaryAddress: &models.PathStatus{
+					IP: fmt.Sprintf("192.168.1.%d", i),
+				},
+			},
+		}
+	}
+	return nodes
+}
+
+func TestFormatHealthStatusResponse(t *testing.T) {
+
+	localNode := &models.SelfStatus{
+		Name: "local",
+	}
+
+	tests := []struct {
+		name       string
+		sr         *models.HealthStatusResponse
+		allNodes   bool
+		verbose    bool
+		maxLines   int
+		wantLines  int
+		wantGolden string
+	}{
+		{
+			name: "all healthy",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(4, 0, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "1m14s",
+			},
+			allNodes:   false,
+			verbose:    false,
+			maxLines:   10,
+			wantGolden: "allHealthy",
+		},
+		{
+			name: "all healthy verbose",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(4, 0, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "1m14s",
+			},
+			allNodes:   false,
+			verbose:    true,
+			maxLines:   10,
+			wantGolden: "allHealthyVerbose",
+		},
+		{
+			name: "all healthy all nodes",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(4, 0, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "1m14s",
+			},
+			allNodes:   true,
+			verbose:    false,
+			maxLines:   10,
+			wantGolden: "allHealthyAllNodes",
+		},
+		{
+			name: "one unhealthy",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(3, 1, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "8m5s",
+			},
+			allNodes:   false,
+			verbose:    false,
+			maxLines:   10,
+			wantGolden: "oneUnhealthy",
+		},
+		{
+			name: "one unhealthy verbose",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(3, 1, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "8m5s",
+			},
+			allNodes:   false,
+			verbose:    true,
+			maxLines:   10,
+			wantGolden: "oneUnhealthyVerbose",
+		},
+		{
+			name: "one unhealthy all nodes",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(3, 1, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "8m5s",
+			},
+			allNodes:   true,
+			verbose:    false,
+			maxLines:   10,
+			wantGolden: "oneUnhealthyAllNodes",
+		},
+		{
+			name: "11 unhealthy",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(0, 11, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "4m15s",
+			},
+			allNodes:   false,
+			verbose:    false,
+			maxLines:   10,
+			wantGolden: "elevenUnhealthy",
+		},
+		{
+			name: "11 healthy all nodes",
+			sr: &models.HealthStatusResponse{
+				Nodes:         createNodes(11, 0, 0),
+				Local:         localNode,
+				Timestamp:     "2023-04-01T12:00:00Z",
+				ProbeInterval: "4m15s",
+			},
+			allNodes:   true,
+			verbose:    false,
+			maxLines:   10,
+			wantGolden: "elevenHealthyAllNodes",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f, err := os.ReadFile("testdata/" + tt.wantGolden + ".golden")
+			if err != nil {
+				t.Fatalf("failed to read golden file: %v", err)
+			}
+
+			w := &bytes.Buffer{}
+			FormatHealthStatusResponse(w, tt.sr, tt.allNodes, tt.verbose, tt.maxLines)
+
+			if *update {
+				t.Log("updating golden file")
+				f, err := os.Create("testdata/" + tt.wantGolden + ".golden")
+				if err != nil {
+					t.Fatalf("failed to create golden file: %v", err)
+				}
+				defer f.Close()
+				f.Write([]byte(w.Bytes()))
+			}
+
+			require.Equal(t, string(f), w.String())
+		})
 	}
 }

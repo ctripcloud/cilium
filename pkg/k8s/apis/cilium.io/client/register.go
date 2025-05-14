@@ -6,23 +6,19 @@ package client
 import (
 	"context"
 	_ "embed"
-	goerrors "errors"
 	"fmt"
-	"time"
+	"log/slog"
 
-	"github.com/sirupsen/logrus"
 	"golang.org/x/sync/errgroup"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
-	v1client "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/typed/apiextensions/v1"
-	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/yaml"
 
 	k8sconst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	k8sconstv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sconstv2alpha1 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	"github.com/cilium/cilium/pkg/k8s/apis/crdhelpers"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/synced"
 	"github.com/cilium/cilium/pkg/logging"
@@ -31,9 +27,6 @@ import (
 )
 
 const (
-	// subsysK8s is the value for logfields.LogSubsys
-	subsysK8s = "k8s"
-
 	// CNPCRDName is the full name of the CNP CRD.
 	CNPCRDName = k8sconstv2.CNPKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 
@@ -48,9 +41,6 @@ const (
 
 	// CNCRDName is the full name of the CN CRD.
 	CNCRDName = k8sconstv2.CNKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
-
-	// CEWCRDName is the full name of the CEW CRD.
-	CEWCRDName = k8sconstv2.CEWKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 
 	// CLRPCRDName is the full name of the CLRP CRD.
 	CLRPCRDName = k8sconstv2.CLRPKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
@@ -67,58 +57,165 @@ const (
 	// CECCRDName is the full name of the CEC CRD.
 	CECCRDName = k8sconstv2.CECKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 
+	// CNCCRDName is the full name of the CiliumNodeConfig CRD.
+	CNCCRDName = k8sconstv2.CNCKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
 	// BGPPCRDName is the full name of the BGPP CRD.
 	BGPPCRDName = k8sconstv2alpha1.BGPPKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
 
-	// LBIPPoolCRDName is the full name of the BGPPool CRD.
-	LBIPPoolCRDName = k8sconstv2alpha1.PoolKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
+	// BGPClusterConfigCRDName is the full name of the BGP Cluster Config CRD.
+	BGPClusterConfigCRDName = k8sconstv2.BGPCCKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
 
-	// CNCCRDName is the full name of the CiliumNodeConfig CRD.
-	CNCCRDName = k8sconstv2alpha1.CNCKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
+	// BGPPeerConfigCRDName is the full name of the BGP PeerConfig CRD.
+	BGPPeerConfigCRDName = k8sconstv2.BGPPCKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
+	// BGPAdvertisementCRDName is the full name of the BGP Advertisement CRD.
+	BGPAdvertisementCRDName = k8sconstv2.BGPAKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
+	// BGPNodeConfigCRDName is the full name of the BGP Node Config CRD.
+	BGPNodeConfigCRDName = k8sconstv2.BGPNCKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
+	// BGPNodeConfigOverrideCRDName is the full name of the BGP Node Config Override CRD.
+	BGPNodeConfigOverrideCRDName = k8sconstv2.BGPNCOKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
+	// LBIPPoolCRDName is the full name of the BGPPool CRD.
+	LBIPPoolCRDName = k8sconstv2.PoolKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
+	// CNCCRDNameAlpha is the full name of the CiliumNodeConfig CRD.
+	// TODO remove me when CNC CRD v2alpha1 will be deprecated.
+	CNCCRDNameAlpha = k8sconstv2alpha1.CNCKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
 
 	// CCGCRDName is the full name of the CiliumCIDRGroup CRD.
-	CCGCRDName = k8sconstv2alpha1.CCGKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
+	CCGCRDName = k8sconstv2.CCGKindDefinition + "/" + k8sconstv2.CustomResourceDefinitionVersion
+
+	// L2AnnouncementCRDName is the full name of the CiliumL2AnnouncementPolicy CRD.
+	L2AnnouncementCRDName = k8sconstv2alpha1.L2AnnouncementKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
+
+	// CPIPCRDName is the full name of the CiliumPodIPPool CRD.
+	CPIPCRDName = k8sconstv2alpha1.CPIPKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
+	// CGCCCRDName is the full name of the CiliumGatewayClassConfig CRD.
+	CGCCCRDName = k8sconstv2alpha1.CGCCKindDefinition + "/" + k8sconstv2alpha1.CustomResourceDefinitionVersion
 )
 
-var (
-	// log is the k8s package logger object.
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, subsysK8s)
+type CRDList struct {
+	Name     string
+	FullName string
+}
 
-	comparableCRDSchemaVersion = versioncheck.MustVersion(k8sconst.CustomResourceDefinitionSchemaVersion)
-)
-
-type crdCreationFn func(clientset apiextensionsclient.Interface) error
+// CustomResourceDefinitionList returns a map of CRDs
+func CustomResourceDefinitionList() map[string]*CRDList {
+	return map[string]*CRDList{
+		synced.CRDResourceName(k8sconstv2.CNPName): {
+			Name:     CNPCRDName,
+			FullName: k8sconstv2.CNPName,
+		},
+		synced.CRDResourceName(k8sconstv2.CCNPName): {
+			Name:     CCNPCRDName,
+			FullName: k8sconstv2.CCNPName,
+		},
+		synced.CRDResourceName(k8sconstv2.CNName): {
+			Name:     CNCRDName,
+			FullName: k8sconstv2.CNName,
+		},
+		synced.CRDResourceName(k8sconstv2.CIDName): {
+			Name:     CIDCRDName,
+			FullName: k8sconstv2.CIDName,
+		},
+		synced.CRDResourceName(k8sconstv2.CEPName): {
+			Name:     CEPCRDName,
+			FullName: k8sconstv2.CEPName,
+		},
+		synced.CRDResourceName(k8sconstv2.CLRPName): {
+			Name:     CLRPCRDName,
+			FullName: k8sconstv2.CLRPName,
+		},
+		synced.CRDResourceName(k8sconstv2.CEGPName): {
+			Name:     CEGPCRDName,
+			FullName: k8sconstv2.CEGPName,
+		},
+		synced.CRDResourceName(k8sconstv2.CNCName): {
+			Name:     CNCCRDName,
+			FullName: k8sconstv2.CNCName,
+		},
+		synced.CRDResourceName(k8sconstv2alpha1.CESName): {
+			Name:     CESCRDName,
+			FullName: k8sconstv2alpha1.CESName,
+		},
+		synced.CRDResourceName(k8sconstv2.CCECName): {
+			Name:     CCECCRDName,
+			FullName: k8sconstv2.CCECName,
+		},
+		synced.CRDResourceName(k8sconstv2.CECName): {
+			Name:     CECCRDName,
+			FullName: k8sconstv2.CECName,
+		},
+		synced.CRDResourceName(k8sconstv2alpha1.BGPPName): {
+			Name:     BGPPCRDName,
+			FullName: k8sconstv2alpha1.BGPPName,
+		},
+		synced.CRDResourceName(k8sconstv2.BGPCCName): {
+			Name:     BGPClusterConfigCRDName,
+			FullName: k8sconstv2.BGPCCName,
+		},
+		synced.CRDResourceName(k8sconstv2.BGPPCName): {
+			Name:     BGPPeerConfigCRDName,
+			FullName: k8sconstv2.BGPPCName,
+		},
+		synced.CRDResourceName(k8sconstv2.BGPAName): {
+			Name:     BGPAdvertisementCRDName,
+			FullName: k8sconstv2.BGPAName,
+		},
+		synced.CRDResourceName(k8sconstv2.BGPNCName): {
+			Name:     BGPNodeConfigCRDName,
+			FullName: k8sconstv2.BGPNCName,
+		},
+		synced.CRDResourceName(k8sconstv2.BGPNCOName): {
+			Name:     BGPNodeConfigOverrideCRDName,
+			FullName: k8sconstv2.BGPNCOName,
+		},
+		synced.CRDResourceName(k8sconstv2.LBIPPoolName): {
+			Name:     LBIPPoolCRDName,
+			FullName: k8sconstv2.LBIPPoolName,
+		},
+		// TODO remove me when CNC v2alpha 1 will be deprecated
+		synced.CRDResourceName(k8sconstv2alpha1.CNCName): {
+			Name:     CNCCRDNameAlpha,
+			FullName: k8sconstv2alpha1.CNCName,
+		},
+		synced.CRDResourceName(k8sconstv2.CCGName): {
+			Name:     CCGCRDName,
+			FullName: k8sconstv2.CCGName,
+		},
+		synced.CRDResourceName(k8sconstv2alpha1.L2AnnouncementName): {
+			Name:     L2AnnouncementCRDName,
+			FullName: k8sconstv2alpha1.L2AnnouncementName,
+		},
+		synced.CRDResourceName(k8sconstv2alpha1.CPIPName): {
+			Name:     CPIPCRDName,
+			FullName: k8sconstv2alpha1.CPIPName,
+		},
+		synced.CRDResourceName(k8sconstv2alpha1.CGCCName): {
+			Name:     CGCCCRDName,
+			FullName: k8sconstv2alpha1.CGCCName,
+		},
+	}
+}
 
 // CreateCustomResourceDefinitions creates our CRD objects in the Kubernetes
 // cluster.
-func CreateCustomResourceDefinitions(clientset apiextensionsclient.Interface) error {
+func CreateCustomResourceDefinitions(logger *slog.Logger, clientset apiextensionsclient.Interface) error {
 	g, _ := errgroup.WithContext(context.Background())
 
-	resourceToCreateFnMapping := map[string]crdCreationFn{
-		synced.CRDResourceName(k8sconstv2.CNPName):            createCRD(CNPCRDName, k8sconstv2.CNPName),
-		synced.CRDResourceName(k8sconstv2.CCNPName):           createCRD(CCNPCRDName, k8sconstv2.CCNPName),
-		synced.CRDResourceName(k8sconstv2.CNName):             createCRD(CNCRDName, k8sconstv2.CNName),
-		synced.CRDResourceName(k8sconstv2.CIDName):            createCRD(CIDCRDName, k8sconstv2.CIDName),
-		synced.CRDResourceName(k8sconstv2.CEPName):            createCRD(CEPCRDName, k8sconstv2.CEPName),
-		synced.CRDResourceName(k8sconstv2.CEWName):            createCRD(CEWCRDName, k8sconstv2.CEWName),
-		synced.CRDResourceName(k8sconstv2.CLRPName):           createCRD(CLRPCRDName, k8sconstv2.CLRPName),
-		synced.CRDResourceName(k8sconstv2.CEGPName):           createCRD(CEGPCRDName, k8sconstv2.CEGPName),
-		synced.CRDResourceName(k8sconstv2alpha1.CESName):      createCRD(CESCRDName, k8sconstv2alpha1.CESName),
-		synced.CRDResourceName(k8sconstv2.CCECName):           createCRD(CCECCRDName, k8sconstv2.CCECName),
-		synced.CRDResourceName(k8sconstv2.CECName):            createCRD(CECCRDName, k8sconstv2.CECName),
-		synced.CRDResourceName(k8sconstv2alpha1.BGPPName):     createCRD(BGPPCRDName, k8sconstv2alpha1.BGPPName),
-		synced.CRDResourceName(k8sconstv2alpha1.LBIPPoolName): createCRD(LBIPPoolCRDName, k8sconstv2alpha1.LBIPPoolName),
-		synced.CRDResourceName(k8sconstv2alpha1.CNCName):      createCRD(CNCCRDName, k8sconstv2alpha1.CNCName),
-		synced.CRDResourceName(k8sconstv2alpha1.CCGName):      createCRD(CCGCRDName, k8sconstv2alpha1.CCGName),
-	}
+	crds := CustomResourceDefinitionList()
+
 	for _, r := range synced.AllCiliumCRDResourceNames() {
-		fn, ok := resourceToCreateFnMapping[r]
-		if !ok {
-			log.Fatalf("Unknown resource %s. Please update pkg/k8s/apis/cilium.io/client to understand this type.", r)
+		if crd, ok := crds[r]; ok {
+			g.Go(func() error {
+				return createCRD(logger, crd.Name, crd.FullName)(clientset)
+			})
+		} else {
+			logging.Fatal(logger, fmt.Sprintf("Unknown resource %s. Please update pkg/k8s/apis/cilium.io/client to understand this type.", r))
 		}
-		g.Go(func() error {
-			return fn(clientset)
-		})
 	}
 
 	return g.Wait()
@@ -140,14 +237,14 @@ var (
 	//go:embed crds/v2/ciliumnodes.yaml
 	crdsCiliumnodes []byte
 
-	//go:embed crds/v2/ciliumexternalworkloads.yaml
-	crdsCiliumexternalworkloads []byte
-
 	//go:embed crds/v2/ciliumlocalredirectpolicies.yaml
 	crdsCiliumlocalredirectpolicies []byte
 
 	//go:embed crds/v2/ciliumegressgatewaypolicies.yaml
 	crdsv2Ciliumegressgatewaypolicies []byte
+
+	//go:embed crds/v2/ciliumnodeconfigs.yaml
+	crdsv2CiliumNodeConfigs []byte
 
 	//go:embed crds/v2alpha1/ciliumendpointslices.yaml
 	crdsv2Alpha1Ciliumendpointslices []byte
@@ -161,27 +258,48 @@ var (
 	//go:embed crds/v2alpha1/ciliumbgppeeringpolicies.yaml
 	crdsv2Alpha1Ciliumbgppeeringpolicies []byte
 
-	//go:embed crds/v2alpha1/ciliumloadbalancerippools.yaml
-	crdsv2Alpha1Ciliumloadbalancerippools []byte
+	//go:embed crds/v2/ciliumbgpclusterconfigs.yaml
+	crdsv2Ciliumbgpclusterconfigs []byte
 
-	//go:embed crds/v2alpha1/ciliumnodeconfigs.yaml
-	crdsv2Alpha1CiliumNodeConfigs []byte
+	//go:embed crds/v2/ciliumbgppeerconfigs.yaml
+	crdsv2Ciliumbgppeerconfigs []byte
 
-	//go:embed crds/v2alpha1/ciliumcidrgroups.yaml
-	crdsv2Alpha1CiliumCIDRGroups []byte
+	//go:embed crds/v2/ciliumbgpadvertisements.yaml
+	crdsv2Ciliumbgpadvertisements []byte
+
+	//go:embed crds/v2/ciliumbgpnodeconfigs.yaml
+	crdsv2Ciliumbgpnodeconfigs []byte
+
+	//go:embed crds/v2/ciliumbgpnodeconfigoverrides.yaml
+	crdsv2Ciliumbgpnodeconfigoverrides []byte
+
+	//go:embed crds/v2/ciliumloadbalancerippools.yaml
+	crdsv2Ciliumloadbalancerippools []byte
+
+	//go:embed crds/v2/ciliumcidrgroups.yaml
+	crdsv2CiliumCIDRGroups []byte
+
+	//go:embed crds/v2alpha1/ciliuml2announcementpolicies.yaml
+	crdsv2Alpha1CiliumL2AnnouncementPolicies []byte
+
+	//go:embed crds/v2alpha1/ciliumpodippools.yaml
+	crdsv2Alpha1CiliumPodIPPools []byte
+
+	//go:embed crds/v2alpha1/ciliumgatewayclassconfigs.yaml
+	crdsv2Alpha1CiliumGatewayClassConfigs []byte
 )
 
 // GetPregeneratedCRD returns the pregenerated CRD based on the requested CRD
 // name. The pregenerated CRDs are generated by the controller-gen tool and
 // serialized into binary form by go-bindata. This function retrieves CRDs from
 // the binary form.
-func GetPregeneratedCRD(crdName string) apiextensionsv1.CustomResourceDefinition {
+func GetPregeneratedCRD(logger *slog.Logger, crdName string) apiextensionsv1.CustomResourceDefinition {
 	var (
 		err      error
 		crdBytes []byte
 	)
 
-	scopedLog := log.WithField("crdName", crdName)
+	logAttr := slog.String("crdName", crdName)
 
 	switch crdName {
 	case CNPCRDName:
@@ -194,8 +312,6 @@ func GetPregeneratedCRD(crdName string) apiextensionsv1.CustomResourceDefinition
 		crdBytes = crdsCiliumidentities
 	case CNCRDName:
 		crdBytes = crdsCiliumnodes
-	case CEWCRDName:
-		crdBytes = crdsCiliumexternalworkloads
 	case CLRPCRDName:
 		crdBytes = crdsCiliumlocalredirectpolicies
 	case CEGPCRDName:
@@ -208,20 +324,43 @@ func GetPregeneratedCRD(crdName string) apiextensionsv1.CustomResourceDefinition
 		crdBytes = crdsv2Ciliumenvoyconfigs
 	case BGPPCRDName:
 		crdBytes = crdsv2Alpha1Ciliumbgppeeringpolicies
+	case BGPClusterConfigCRDName:
+		crdBytes = crdsv2Ciliumbgpclusterconfigs
+	case BGPPeerConfigCRDName:
+		crdBytes = crdsv2Ciliumbgppeerconfigs
+	case BGPAdvertisementCRDName:
+		crdBytes = crdsv2Ciliumbgpadvertisements
+	case BGPNodeConfigCRDName:
+		crdBytes = crdsv2Ciliumbgpnodeconfigs
+	case BGPNodeConfigOverrideCRDName:
+		crdBytes = crdsv2Ciliumbgpnodeconfigoverrides
 	case LBIPPoolCRDName:
-		crdBytes = crdsv2Alpha1Ciliumloadbalancerippools
+		crdBytes = crdsv2Ciliumloadbalancerippools
+	case CNCCRDNameAlpha:
+		crdBytes = crdsv2CiliumNodeConfigs
 	case CNCCRDName:
-		crdBytes = crdsv2Alpha1CiliumNodeConfigs
+		crdBytes = crdsv2CiliumNodeConfigs
 	case CCGCRDName:
-		crdBytes = crdsv2Alpha1CiliumCIDRGroups
+		crdBytes = crdsv2CiliumCIDRGroups
+	case L2AnnouncementCRDName:
+		crdBytes = crdsv2Alpha1CiliumL2AnnouncementPolicies
+	case CPIPCRDName:
+		crdBytes = crdsv2Alpha1CiliumPodIPPools
+	case CGCCCRDName:
+		crdBytes = crdsv2Alpha1CiliumGatewayClassConfigs
 	default:
-		scopedLog.Fatal("Pregenerated CRD does not exist")
+		logging.Fatal(logger, "Pregenerated CRD does not exist", logAttr)
 	}
 
 	ciliumCRD := apiextensionsv1.CustomResourceDefinition{}
 	err = yaml.Unmarshal(crdBytes, &ciliumCRD)
 	if err != nil {
-		scopedLog.WithError(err).Fatal("Error unmarshalling pregenerated CRD")
+		logging.Fatal(
+			logger,
+			"Error unmarshalling pregenerated CRD",
+			slog.Any(logfields.Error, err),
+			logAttr,
+		)
 	}
 
 	return ciliumCRD
@@ -229,60 +368,19 @@ func GetPregeneratedCRD(crdName string) apiextensionsv1.CustomResourceDefinition
 
 // createCRD creates and updates a CRD.
 // It should be called on agent startup but is idempotent and safe to call again.
-func createCRD(crdVersionedName string, crdMetaName string) func(clientset apiextensionsclient.Interface) error {
+func createCRD(logger *slog.Logger, crdVersionedName string, crdMetaName string) func(clientset apiextensionsclient.Interface) error {
 	return func(clientset apiextensionsclient.Interface) error {
-		ciliumCRD := GetPregeneratedCRD(crdVersionedName)
+		ciliumCRD := GetPregeneratedCRD(logger, crdVersionedName)
 
-		return createUpdateCRD(
+		return crdhelpers.CreateUpdateCRD(
+			logger,
 			clientset,
 			constructV1CRD(crdMetaName, ciliumCRD),
-			newDefaultPoller(),
+			crdhelpers.NewDefaultPoller(),
+			k8sconst.CustomResourceDefinitionSchemaVersionKey,
+			versioncheck.MustVersion(k8sconst.CustomResourceDefinitionSchemaVersion),
 		)
 	}
-}
-
-// createUpdateCRD ensures the CRD object is installed into the K8s cluster. It
-// will create or update the CRD and its validation schema as necessary. This
-// function only accepts v1 CRD objects.
-func createUpdateCRD(
-	clientset apiextensionsclient.Interface,
-	crd *apiextensionsv1.CustomResourceDefinition,
-	poller poller,
-) error {
-	scopedLog := log.WithField("name", crd.Name)
-
-	v1CRDClient := clientset.ApiextensionsV1()
-	clusterCRD, err := v1CRDClient.CustomResourceDefinitions().Get(
-		context.TODO(),
-		crd.ObjectMeta.Name,
-		metav1.GetOptions{})
-	if errors.IsNotFound(err) {
-		scopedLog.Info("Creating CRD (CustomResourceDefinition)...")
-
-		clusterCRD, err = v1CRDClient.CustomResourceDefinitions().Create(
-			context.TODO(),
-			crd,
-			metav1.CreateOptions{})
-		// This occurs when multiple agents race to create the CRD. Since another has
-		// created it, it will also update it, hence the non-error return.
-		if errors.IsAlreadyExists(err) {
-			return nil
-		}
-	}
-	if err != nil {
-		return err
-	}
-
-	if err := updateV1CRD(scopedLog, crd, clusterCRD, v1CRDClient, poller); err != nil {
-		return err
-	}
-	if err := waitForV1CRD(scopedLog, clusterCRD, v1CRDClient, poller); err != nil {
-		return err
-	}
-
-	scopedLog.Info("CRD (CustomResourceDefinition) is installed and up-to-date")
-
-	return nil
 }
 
 func constructV1CRD(
@@ -303,163 +401,19 @@ func constructV1CRD(
 				Plural:     template.Spec.Names.Plural,
 				ShortNames: template.Spec.Names.ShortNames,
 				Singular:   template.Spec.Names.Singular,
+				Categories: template.Spec.Names.Categories,
 			},
-			Scope:    template.Spec.Scope,
-			Versions: template.Spec.Versions,
+			Scope:      template.Spec.Scope,
+			Versions:   template.Spec.Versions,
+			Conversion: template.Spec.Conversion, // conversion strategy is needed to support several versions of a same CRD
 		},
 	}
 }
 
-func needsUpdateV1(clusterCRD *apiextensionsv1.CustomResourceDefinition) bool {
-	if clusterCRD.Spec.Versions[0].Schema == nil {
-		// no validation detected
-		return true
-	}
-	v, ok := clusterCRD.Labels[k8sconst.CustomResourceDefinitionSchemaVersionKey]
-	if !ok {
-		// no schema version detected
-		return true
-	}
-
-	clusterVersion, err := versioncheck.Version(v)
-	if err != nil || clusterVersion.LT(comparableCRDSchemaVersion) {
-		// version in cluster is either unparsable or smaller than current version
-		return true
-	}
-
-	return false
-}
-
-func updateV1CRD(
-	scopedLog *logrus.Entry,
-	crd, clusterCRD *apiextensionsv1.CustomResourceDefinition,
-	client v1client.CustomResourceDefinitionsGetter,
-	poller poller,
-) error {
-	scopedLog.Debug("Checking if CRD (CustomResourceDefinition) needs update...")
-
-	if crd.Spec.Versions[0].Schema != nil && needsUpdateV1(clusterCRD) {
-		scopedLog.Info("Updating CRD (CustomResourceDefinition)...")
-
-		// Update the CRD with the validation schema.
-		err := poller.Poll(500*time.Millisecond, 60*time.Second, func() (bool, error) {
-			var err error
-			clusterCRD, err = client.CustomResourceDefinitions().Get(
-				context.TODO(),
-				crd.ObjectMeta.Name,
-				metav1.GetOptions{})
-			if err != nil {
-				return false, err
-			}
-
-			// This seems too permissive but we only get here if the version is
-			// different per needsUpdate above. If so, we want to update on any
-			// validation change including adding or removing validation.
-			if needsUpdateV1(clusterCRD) {
-				scopedLog.Debug("CRD validation is different, updating it...")
-
-				clusterCRD.ObjectMeta.Labels = crd.ObjectMeta.Labels
-				clusterCRD.Spec = crd.Spec
-
-				// Even though v1 CRDs omit this field by default (which also
-				// means it's false) it is still carried over from the previous
-				// CRD. Therefore, we must set this to false explicitly because
-				// the apiserver will carry over the old value (true).
-				clusterCRD.Spec.PreserveUnknownFields = false
-
-				_, err := client.CustomResourceDefinitions().Update(
-					context.TODO(),
-					clusterCRD,
-					metav1.UpdateOptions{})
-				switch {
-				case errors.IsConflict(err): // Occurs as Operators race to update CRDs.
-					scopedLog.WithError(err).
-						Debug("The CRD update was based on an older version, retrying...")
-					return false, nil
-				case err == nil:
-					return true, nil
-				}
-
-				scopedLog.WithError(err).Debug("Unable to update CRD validation")
-
-				return false, err
-			}
-
-			return true, nil
-		})
-		if err != nil {
-			scopedLog.WithError(err).Error("Unable to update CRD")
-			return err
-		}
-	}
-
-	return nil
-}
-
-func waitForV1CRD(
-	scopedLog *logrus.Entry,
-	crd *apiextensionsv1.CustomResourceDefinition,
-	client v1client.CustomResourceDefinitionsGetter,
-	poller poller,
-) error {
-	scopedLog.Debug("Waiting for CRD (CustomResourceDefinition) to be available...")
-
-	err := poller.Poll(500*time.Millisecond, 60*time.Second, func() (bool, error) {
-		for _, cond := range crd.Status.Conditions {
-			switch cond.Type {
-			case apiextensionsv1.Established:
-				if cond.Status == apiextensionsv1.ConditionTrue {
-					return true, nil
-				}
-			case apiextensionsv1.NamesAccepted:
-				if cond.Status == apiextensionsv1.ConditionFalse {
-					err := goerrors.New(cond.Reason)
-					scopedLog.WithError(err).Error("Name conflict for CRD")
-					return false, err
-				}
-			}
-		}
-
-		var err error
-		if crd, err = client.CustomResourceDefinitions().Get(
-			context.TODO(),
-			crd.ObjectMeta.Name,
-			metav1.GetOptions{}); err != nil {
-			return false, err
-		}
-		return false, err
-	})
-	if err != nil {
-		return fmt.Errorf("error occurred waiting for CRD: %w", err)
-	}
-
-	return nil
-}
-
-// poller is an interface that abstracts the polling logic when dealing with
-// CRD changes / updates to the apiserver. The reason this exists is mainly for
-// unit-testing.
-type poller interface {
-	Poll(interval, duration time.Duration, conditionFn func() (bool, error)) error
-}
-
-func newDefaultPoller() defaultPoll {
-	return defaultPoll{}
-}
-
-type defaultPoll struct{}
-
-func (p defaultPoll) Poll(
-	interval, duration time.Duration,
-	conditionFn func() (bool, error),
-) error {
-	return wait.Poll(interval, duration, conditionFn)
-}
-
 // RegisterCRDs registers all CRDs with the K8s apiserver.
-func RegisterCRDs(clientset client.Clientset) error {
-	if err := CreateCustomResourceDefinitions(clientset); err != nil {
-		return fmt.Errorf("Unable to create custom resource definition: %s", err)
+func RegisterCRDs(logger *slog.Logger, clientset client.Clientset) error {
+	if err := CreateCustomResourceDefinitions(logger, clientset); err != nil {
+		return fmt.Errorf("Unable to create custom resource definition: %w", err)
 	}
 
 	return nil

@@ -5,13 +5,13 @@ package v2
 
 import (
 	"encoding/json"
-	"fmt"
+	"testing"
 
+	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/yaml"
 
 	_ "github.com/cilium/proxy/go/envoy/config/listener/v3"
 	_ "github.com/cilium/proxy/go/envoy/extensions/filters/network/http_connection_manager/v3"
-	. "gopkg.in/check.v1"
 )
 
 var (
@@ -37,23 +37,24 @@ var (
             - match:
                 path: "/metrics"
               route:
-                cluster: "envoy-admin"
+                cluster: "/envoy-admin"
                 prefix_rewrite: "/stats/prometheus"
+        use_remote_address: true
+        skip_xff_append: true
         http_filters:
         - name: envoy.filters.http.router
 `)
 )
 
-func (s *CiliumV2Suite) TestParseEnvoySpec(c *C) {
+func TestParseEnvoySpec(t *testing.T) {
 	// option.Config.Debug = true
 	// logging.DefaultLogger.SetLevel(logrus.DebugLevel)
 
 	jsonBytes, err := yaml.YAMLToJSON([]byte(envoySpec))
-	c.Assert(err, IsNil)
-	fmt.Printf("\nJSON spec:\n%s\n", string(jsonBytes))
+	require.NoError(t, err)
 	cec := &CiliumEnvoyConfig{}
 	err = json.Unmarshal(jsonBytes, &cec.Spec)
-	c.Assert(err, IsNil)
-	c.Assert(cec.Spec.Resources, HasLen, 1)
-	c.Assert(cec.Spec.Resources[0].TypeUrl, Equals, "type.googleapis.com/envoy.config.listener.v3.Listener")
+	require.NoError(t, err)
+	require.Len(t, cec.Spec.Resources, 1)
+	require.Equal(t, "type.googleapis.com/envoy.config.listener.v3.Listener", cec.Spec.Resources[0].TypeUrl)
 }

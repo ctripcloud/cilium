@@ -3,6 +3,8 @@
 
 package counter
 
+import "maps"
+
 // Counter tracks references for comparable .
 //
 // No thread safety is provided within this structure, the user is expected to
@@ -31,11 +33,11 @@ func (c Counter[T]) Delete(key T) bool {
 // DeepCopy makes a new copy of the received Counter.
 func (c Counter[T]) DeepCopy() Counter[T] {
 	result := make(Counter[T], len(c))
-	for k, v := range c {
-		result[k] = v
-	}
+	maps.Copy(result, c)
 	return result
 }
 
-// Deprecated. Use Counter[string] instead.
-type StringCounter = Counter[string]
+// Has returns true if the given key has a non-zero refcount.
+func (c Counter[T]) Has(key T) bool {
+	return c[key] > 0
+}

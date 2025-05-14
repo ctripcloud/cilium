@@ -4,7 +4,6 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -12,15 +11,17 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/cilium/hive/cell"
+	"github.com/cilium/hive/hivetest"
 	"github.com/go-openapi/runtime"
 	"go.uber.org/goleak"
 
 	"github.com/cilium/cilium/api/v1/operator/models"
 	"github.com/cilium/cilium/api/v1/operator/server/restapi/metrics"
 	operatorMetrics "github.com/cilium/cilium/operator/metrics"
-	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
+	cellMetric "github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/metrics/metric"
 	"github.com/cilium/cilium/pkg/safeio"
 )
 
@@ -34,6 +35,13 @@ func TestMetricsHandlerWithoutMetrics(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	hive := hive.New(
+		operatorMetrics.Cell,
+		cell.Provide(func() operatorMetrics.SharedConfig {
+			return operatorMetrics.SharedConfig{
+				EnableMetrics: false,
+			}
+		}),
+
 		MetricsHandlerCell,
 
 		// transform GetMetricsHandler in a http.HandlerFunc to use
@@ -51,7 +59,8 @@ func TestMetricsHandlerWithoutMetrics(t *testing.T) {
 		}),
 	)
 
-	if err := hive.Start(context.Background()); err != nil {
+	tlog := hivetest.Logger(t)
+	if err := hive.Start(tlog, t.Context()); err != nil {
 		t.Fatalf("failed to start: %s", err)
 	}
 
@@ -74,7 +83,7 @@ func TestMetricsHandlerWithoutMetrics(t *testing.T) {
 		t.Fatalf("no metrics expected, found %v", metrics)
 	}
 
-	if err := hive.Stop(context.Background()); err != nil {
+	if err := hive.Stop(tlog, t.Context()); err != nil {
 		t.Fatalf("failed to stop: %s", err)
 	}
 }
@@ -89,6 +98,14 @@ func TestMetricsHandlerWithMetrics(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	hive := hive.New(
+		operatorMetrics.Cell,
+		cell.Provide(func() operatorMetrics.SharedConfig {
+			return operatorMetrics.SharedConfig{
+				EnableMetrics: true,
+			}
+		}),
+		cellMetric.Metric(newTestMetrics),
+
 		MetricsHandlerCell,
 
 		// transform GetMetricsHandler in a http.HandlerFunc to use
@@ -100,26 +117,12 @@ func TestMetricsHandlerWithMetrics(t *testing.T) {
 			}
 		}),
 
-		cell.Invoke(func(lc hive.Lifecycle, hf http.HandlerFunc) {
-			lc.Append(hive.Hook{
-				OnStart: func(hive.HookContext) error {
-					// registering the metrics for the operator will start the
-					// prometheus server. To avoid port clashing while testing,
-					// let the kernel pick an available port.
-					operatorOption.Config.OperatorPrometheusServeAddr = "localhost:0"
-
-					// registers metrics for the cilium-operator
-					operatorMetrics.Register()
-
-					// set values for some operator metrics
-					operatorMetrics.IdentityGCSize.
-						WithLabelValues(operatorMetrics.LabelValueOutcomeAlive).
-						Set(float64(12))
-					operatorMetrics.IdentityGCRuns.
-						WithLabelValues(operatorMetrics.LabelValueOutcomeSuccess).
-						Set(float64(15))
-					operatorMetrics.EndpointGCObjects.
-						WithLabelValues(operatorMetrics.LabelValueOutcomeSuccess).
+		cell.Invoke(func(lc cell.Lifecycle, metrics *testMetrics, hf http.HandlerFunc) {
+			lc.Append(cell.Hook{
+				OnStart: func(cell.HookContext) error {
+					// set values for some metrics
+					metrics.MetricA.
+						WithLabelValues("success").
 						Inc()
 
 					req := httptest.NewRequest(http.MethodGet, "http://localhost/metrics", nil)
@@ -127,17 +130,16 @@ func TestMetricsHandlerWithMetrics(t *testing.T) {
 
 					return nil
 				},
-				OnStop: func(ctx hive.HookContext) error {
-					// unregister metrics for cilium-operator
-					operatorMetrics.Unregister()
-
-					return nil
-				},
 			})
 		}),
 	)
 
-	if err := hive.Start(context.Background()); err != nil {
+	// Enabling the metrics for the operator will also start the prometheus server.
+	// To avoid port clashing while testing, let the kernel pick an available port.
+	hive.Viper().Set(operatorMetrics.OperatorPrometheusServeAddr, "localhost:0")
+
+	tlog := hivetest.Logger(t)
+	if err := hive.Start(tlog, t.Context()); err != nil {
 		t.Fatalf("failed to start: %s", err)
 	}
 
@@ -158,36 +160,16 @@ func TestMetricsHandlerWithMetrics(t *testing.T) {
 
 	if err := testMetric(
 		metrics,
-		"cilium_operator_identity_gc_entries",
-		float64(12),
-		map[string]string{
-			operatorMetrics.LabelStatus: operatorMetrics.LabelValueOutcomeAlive,
-		},
-	); err != nil {
-		t.Fatalf("error while inspecting metric: %s", err)
-	}
-	if err := testMetric(
-		metrics,
-		"cilium_operator_identity_gc_runs",
-		float64(15),
-		map[string]string{
-			operatorMetrics.LabelOutcome: operatorMetrics.LabelValueOutcomeSuccess,
-		},
-	); err != nil {
-		t.Fatalf("error while inspecting metric: %s", err)
-	}
-	if err := testMetric(
-		metrics,
-		"cilium_operator_endpoint_gc_objects",
+		"operator_api_metrics_test_metric_a",
 		float64(1),
 		map[string]string{
-			operatorMetrics.LabelOutcome: operatorMetrics.LabelValueOutcomeSuccess,
+			"outcome": "success",
 		},
 	); err != nil {
 		t.Fatalf("error while inspecting metric: %s", err)
 	}
 
-	if err := hive.Stop(context.Background()); err != nil {
+	if err := hive.Stop(tlog, t.Context()); err != nil {
 		t.Fatalf("failed to stop: %s", err)
 	}
 }
@@ -206,4 +188,17 @@ func testMetric(metrics []models.Metric, name string, value float64, labels map[
 		}
 	}
 	return fmt.Errorf("%q not found", name)
+}
+
+type testMetrics struct {
+	MetricA metric.Vec[metric.Counter]
+}
+
+func newTestMetrics() *testMetrics {
+	return &testMetrics{
+		MetricA: metric.NewCounterVec(metric.CounterOpts{
+			Namespace: "operator_api_metrics_test",
+			Name:      "metric_a",
+		}, []string{"outcome"}),
+	}
 }

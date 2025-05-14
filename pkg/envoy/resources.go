@@ -6,12 +6,12 @@ package envoy
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
-	"sort"
+	"slices"
 	"sync"
 
 	envoyAPI "github.com/cilium/proxy/go/cilium/api"
-	"github.com/sirupsen/logrus"
 
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/envoy/xds"
@@ -48,6 +48,9 @@ const (
 	// NetworkPolicyHostsTypeURL is the type URL of NetworkPolicyHosts resources.
 	NetworkPolicyHostsTypeURL = "type.googleapis.com/cilium.NetworkPolicyHosts"
 
+	// HealthCheckSinkPipeTypeURL is the type URL of NetworkPolicyHosts resources.
+	HealthCheckSinkPipeTypeURL = "type.googleapis.com/cilium.health_check.event_sink.pipe"
+
 	// DownstreamTlsContextURL is the type URL of DownstreamTlsContext
 	DownstreamTlsContextURL = "type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.DownstreamTlsContext"
 )
@@ -61,6 +64,7 @@ const (
 type NPHDSCache struct {
 	*xds.Cache
 
+	logger  *slog.Logger
 	ipcache IPCacheEventSource
 }
 
@@ -68,28 +72,25 @@ type IPCacheEventSource interface {
 	AddListener(ipcache.IPIdentityMappingListener)
 }
 
-func newNPHDSCache(ipcache IPCacheEventSource) NPHDSCache {
-	return NPHDSCache{Cache: xds.NewCache(), ipcache: ipcache}
+func newNPHDSCache(logger *slog.Logger, ipcache IPCacheEventSource) NPHDSCache {
+	return NPHDSCache{Cache: xds.NewCache(logger), logger: logger, ipcache: ipcache}
 }
 
-var (
-	observerOnce = sync.Once{}
-)
+var observerOnce = sync.Once{}
+
+func (cache *NPHDSCache) MarkRestorePending() {}
+
+func (cache *NPHDSCache) MarkRestoreCompleted() {}
 
 // HandleResourceVersionAck is required to implement ResourceVersionAckObserver.
 // We use this to start the IP Cache listener on the first ACK so that we only
-// start the IP Cache listener if there is an Envoy node that uses NPHDS (e.g.,
-// Istio node, or host proxy running on kernel w/o LPM bpf map support).
+// start the IP Cache listener if there is an Envoy node that uses NPHDS
+// (e.g. Cilium host proxy running on kernel w/o LPM bpf map support).
 func (cache *NPHDSCache) HandleResourceVersionAck(ackVersion uint64, nackVersion uint64, nodeIP string, resourceNames []string, typeURL string, detail string) {
 	// Start caching for IP/ID mappings on the first indication someone wants them
 	observerOnce.Do(func() {
 		cache.ipcache.AddListener(cache)
 	})
-}
-
-// OnIPIdentityCacheGC is required to implement IPIdentityMappingListener.
-func (cache *NPHDSCache) OnIPIdentityCacheGC() {
-	// We don't have anything to synchronize in this case.
 }
 
 // OnIPIdentityCacheChange pushes modifications to the IP<->Identity mapping
@@ -100,22 +101,25 @@ func (cache *NPHDSCache) OnIPIdentityCacheGC() {
 // IP/ID mappings.
 func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModification, cidrCluster cmtypes.PrefixCluster,
 	oldHostIP, newHostIP net.IP, oldID *ipcache.Identity, newID ipcache.Identity,
-	encryptKey uint8, nodeID uint16, k8sMeta *ipcache.K8sMetadata) {
+	encryptKey uint8, k8sMeta *ipcache.K8sMetadata, endpointFlags uint8,
+) {
 	cidr := cidrCluster.AsIPNet()
 
 	cidrStr := cidr.String()
 	resourceName := newID.ID.StringID()
 
-	scopedLog := log.WithFields(logrus.Fields{
-		logfields.IPAddr:       cidrStr,
-		logfields.Identity:     resourceName,
-		logfields.Modification: modType,
-	})
+	scopedLog := cache.logger.With(
+		logfields.IPAddr, cidrStr,
+		logfields.Identity, resourceName,
+		logfields.Modification, modType,
+	)
 
 	// Look up the current resources for the specified Identity.
 	msg, err := cache.Lookup(NetworkPolicyHostsTypeURL, resourceName)
 	if err != nil {
-		scopedLog.WithError(err).Warning("Can't lookup NPHDS cache")
+		scopedLog.Warn("Can't lookup NPHDS cache",
+			logfields.Error, err,
+		)
 		return
 	}
 
@@ -130,16 +134,20 @@ func (cache *NPHDSCache) OnIPIdentityCacheChange(modType ipcache.CacheModificati
 		// but only if the old ID is different.
 		if oldID != nil && oldID.ID != newID.ID {
 			// Recursive call to delete the 'cidr' from the 'oldID'
-			cache.OnIPIdentityCacheChange(ipcache.Delete, cidrCluster, nil, nil, nil, *oldID, encryptKey, nodeID, k8sMeta)
+			cache.OnIPIdentityCacheChange(ipcache.Delete, cidrCluster, nil, nil, nil, *oldID, encryptKey, k8sMeta, endpointFlags)
 		}
 		err := cache.handleIPUpsert(npHost, resourceName, cidrStr, newID.ID)
 		if err != nil {
-			scopedLog.WithError(err).Warning("NPHSD upsert failed")
+			scopedLog.Warn("NPHSD upsert failed",
+				logfields.Error, err,
+			)
 		}
 	case ipcache.Delete:
 		err := cache.handleIPDelete(npHost, resourceName, cidrStr)
 		if err != nil {
-			scopedLog.WithError(err).Warning("NPHDS delete failed")
+			scopedLog.Warn("NPHDS delete failed",
+				logfields.Error, err,
+			)
 		}
 	}
 }
@@ -153,16 +161,14 @@ func (cache *NPHDSCache) handleIPUpsert(npHost *envoyAPI.NetworkPolicyHosts, ide
 	} else {
 		// Resource already exists, create a copy of it and insert
 		// the new IP address into its HostAddresses list, if not already there.
-		for _, addr := range npHost.HostAddresses {
-			if addr == cidrStr {
-				// IP already exists, nothing to add
-				return nil
-			}
+		if slices.Contains(npHost.HostAddresses, cidrStr) {
+			// IP already exists, nothing to add
+			return nil
 		}
 		hostAddresses = make([]string, 0, len(npHost.HostAddresses)+1)
 		hostAddresses = append(hostAddresses, npHost.HostAddresses...)
 		hostAddresses = append(hostAddresses, cidrStr)
-		sort.Strings(hostAddresses)
+		slices.Sort(hostAddresses)
 	}
 
 	newNpHost := envoyAPI.NetworkPolicyHosts{

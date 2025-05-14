@@ -26,6 +26,9 @@ var (
 	nfsFirewallChecks *bool
 )
 
+// versionRegex determines the semantic version via regexp.
+const versionRegex string = `v?(\d+\.\d+(\.\d+)?\S*)`
+
 func init() {
 	flags := rootCmd.Flags()
 	backportingChecks = flags.Bool("backporting", false, "Run backporting checks")
@@ -57,6 +60,13 @@ func readGoModGoVersion(rootDir string) (*semver.Version, error) {
 func rootCmdRun(cmd *cobra.Command, args []string) {
 	rootDir := goPath() + "/src/github.com/cilium/cilium"
 
+	// $GOPATH is optional to set with a module-based Go setup
+	// If we cannot find src path via `$GOPATH`, just look in
+	// the `make` dir for `go.mod`
+	if _, err := os.Stat(rootDir); os.IsNotExist(err) {
+		rootDir, _ = os.Getwd()
+	}
+
 	minGoVersion, err := readGoModGoVersion(rootDir)
 	if err != nil {
 		panic(fmt.Sprintf("cannot read go version from go.mod: %v", err))
@@ -72,128 +82,110 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 			name:          "make",
 			ifNotFound:    checkError,
 			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`GNU\s+Make\s+(\d+\.\d+\S*)`),
+			versionRegexp: regexp.MustCompile(`GNU\s+Make\s+` + versionRegex),
 		},
 		&binaryCheck{
 			name:          "go",
 			ifNotFound:    checkError,
 			versionArgs:   []string{"version"},
-			versionRegexp: regexp.MustCompile(`go version go(\d+\.\d+\S*)`),
+			versionRegexp: regexp.MustCompile(`go version go` + versionRegex),
 			minVersion:    minGoVersion,
 		},
 		&binaryCheck{
 			name:          "tparse",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"-v"},
-			versionRegexp: regexp.MustCompile(`tparse version: v(\d+\.\d+\.\d+)`),
+			versionRegexp: regexp.MustCompile(`tparse version: ` + versionRegex),
 			hint:          `Run "go install github.com/mfridman/tparse@latest"`,
 		},
 		&binaryCheck{
 			name:          "clang",
 			ifNotFound:    checkError,
 			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`clang version (\d+\.\d+\.\d+)`),
-			minVersion:    &semver.Version{Major: 10, Minor: 0, Patch: 0},
+			versionRegexp: regexp.MustCompile(`clang version ` + versionRegex),
+			minVersion:    &semver.Version{Major: 17, Minor: 0, Patch: 0},
 		},
 		&binaryCheck{
 			name:          "docker-server",
 			command:       "docker",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"version", "--format", "{{ .Server.Version }}"},
-			versionRegexp: regexp.MustCompile(`(\d+\.\d+\.\d+)`),
+			versionRegexp: regexp.MustCompile(versionRegex),
 		},
 		&binaryCheck{
 			name:          "docker-client",
 			command:       "docker",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"version", "--format", "{{ .Client.Version }}"},
-			versionRegexp: regexp.MustCompile(`(\d+\.\d+\.\d+)`),
+			versionRegexp: regexp.MustCompile(versionRegex),
 		},
 		&binaryCheck{
 			name:          "docker-buildx",
 			command:       "docker",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"buildx", "version"},
-			versionRegexp: regexp.MustCompile(`github\.com/docker/buildx v?(\d+\.\d+\.\d+)`),
+			versionRegexp: regexp.MustCompile(`github\.com/docker/buildx ` + versionRegex),
 			hint:          "see https://docs.docker.com/buildx/working-with-buildx/",
 		},
 		&binaryCheck{
 			name:          "ginkgo",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"version"},
-			versionRegexp: regexp.MustCompile(`Ginkgo Version (\d+\.\d+\S*)`),
+			versionRegexp: regexp.MustCompile(`Ginkgo Version ` + versionRegex),
 			minVersion:    &semver.Version{Major: 1, Minor: 4, Patch: 0},
 			maxVersion:    &semver.Version{Major: 2, Minor: 0, Patch: 0},
-			hint:          `Run "go install github.com/onsi/ginkgo/ginkgo@latest".`,
+			hint:          `Run "go install github.com/onsi/ginkgo/ginkgo@v1.16.5".`,
 		},
 		// FIXME add gomega check?
 		&binaryCheck{
 			name:          "golangci-lint",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"version"},
-			versionRegexp: regexp.MustCompile(`(\d+\.\d+\S*)`),
+			versionRegexp: regexp.MustCompile(versionRegex),
 			minVersion:    &semver.Version{Major: 1, Minor: 27, Patch: 0},
-			hint:          "See https://golangci-lint.run/usage/install/#local-installation.",
+			hint:          "See https://golangci-lint.run/welcome/install/#local-installation.",
 		},
 		&binaryCheck{
 			name:          "docker",
 			ifNotFound:    checkError,
 			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`Docker version (\d+\.\d+\.\d+)`),
+			versionRegexp: regexp.MustCompile(`Docker version ` + versionRegex),
 		},
 		&binaryCheck{
 			name:          "helm",
 			ifNotFound:    checkWarning,
-			versionArgs:   []string{"version"},
-			versionRegexp: regexp.MustCompile(`Version:"v(\d+\.\d+\.\d+)"`),
-			minVersion:    &semver.Version{Major: 3, Minor: 6, Patch: 0},
-		},
-		&binaryCheck{
-			name:          "llc",
-			ifNotFound:    checkWarning,
-			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`LLVM\s+version\s+(\d+\.\d+\S*)`),
-			minVersion:    &semver.Version{Major: 10, Minor: 0, Patch: 0},
-		},
-		&binaryCheck{
-			name:          "vagrant",
-			ifNotFound:    checkInfo,
-			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`Vagrant (\d+\.\d+\S*)`),
-			minVersion:    &semver.Version{Major: 2, Minor: 0, Patch: 0},
-		},
-		&binaryCheck{
-			name:           "virtualbox",
-			alternateNames: []string{"VirtualBox"},
-			ifNotFound:     checkInfo,
-		},
-		&binaryCheck{
-			name:           "vboxheadless",
-			alternateNames: []string{"VBoxHeadless"},
-			ifNotFound:     checkInfo,
-			versionArgs:    []string{"--version"},
-			versionRegexp:  regexp.MustCompile(`Oracle VM VirtualBox Headless Interface (\d+\.\d+\.\d+\S*)`),
-			hint:           "run \"VBoxHeadless --help\" to diagnose why vboxheadless failed to execute",
+			versionArgs:   []string{`version`, `--template`, `Version: {{.Version}}`},
+			versionRegexp: regexp.MustCompile(`Version: ` + versionRegex),
+			minVersion:    &semver.Version{Major: 3, Minor: 13, Patch: 0},
 		},
 		&binaryCheck{
 			name:          "pip3",
 			ifNotFound:    checkWarning,
 			versionArgs:   []string{"--version"},
-			versionRegexp: regexp.MustCompile(`pip (\d+\.\d+\S*)`),
+			versionRegexp: regexp.MustCompile(`pip ` + versionRegex),
 		},
 		&binaryCheck{
-			name:          "cfssl",
+			name:          "kind",
 			ifNotFound:    checkWarning,
-			versionArgs:   []string{"version"},
-			versionRegexp: regexp.MustCompile(`Version: (.*)`),
-			hint:          "See https://github.com/cloudflare/cfssl#installation.",
+			versionArgs:   []string{"--version"},
+			versionRegexp: regexp.MustCompile(`kind version ` + versionRegex),
+			minVersion:    &semver.Version{Major: 0, Minor: 7, Patch: 0},
+			hint:          "See https://kind.sigs.k8s.io/docs/user/quick-start/#installation.",
 		},
 		&binaryCheck{
-			name:          "cfssljson",
+			name:          "kubectl",
 			ifNotFound:    checkWarning,
-			versionArgs:   []string{"-version"},
-			versionRegexp: regexp.MustCompile(`Version: (.*)`),
-			hint:          "See https://github.com/cloudflare/cfssl#installation.",
+			versionArgs:   []string{"version", "--output=yaml", "--client=true"},
+			versionRegexp: regexp.MustCompile(`gitVersion: ` + versionRegex),
+			minVersion:    &semver.Version{Major: 1, Minor: 26, Patch: 0},
+			hint:          "See https://kubernetes.io/docs/tasks/tools/#kubectl.",
+		},
+		&binaryCheck{
+			name:          "cilium",
+			ifNotFound:    checkWarning,
+			versionArgs:   []string{"version", "--client"},
+			versionRegexp: regexp.MustCompile(`cilium-cli: [A-Za-z/-]*` + versionRegex),
+			hint:          "See https://docs.cilium.io/en/stable/gettingstarted/k8s-install-default/#install-the-cilium-cli.",
 		},
 		dockerGroupCheck{},
 	}
@@ -208,7 +200,7 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 				name:          "python3",
 				ifNotFound:    checkError,
 				versionArgs:   []string{"--version"},
-				versionRegexp: regexp.MustCompile(`Python\s+(\d+.\d+\.\d+)`),
+				versionRegexp: regexp.MustCompile(`Python\s+` + versionRegex),
 				minVersion:    &semver.Version{Major: 3, Minor: 6, Patch: 0},
 			},
 			&commandCheck{
@@ -220,12 +212,12 @@ func rootCmdRun(cmd *cobra.Command, args []string) {
 				hint:             `Run "pip3 install --user PyGithub".`,
 			},
 			&binaryCheck{
-				name:          "hub",
+				name:          "gh",
 				ifNotFound:    checkError,
 				versionArgs:   []string{"--version"},
-				versionRegexp: regexp.MustCompile(`hub\s+version\s+(\d+.\d+\.\d+)`),
+				versionRegexp: regexp.MustCompile(`gh\s+version\s+` + versionRegex),
 				minVersion:    &semver.Version{Major: 2, Minor: 14, Patch: 0},
-				hint:          `Download the latest version from https://github.com/github/hub/releases.`,
+				hint:          `Download the latest version from https://cli.github.com`,
 			},
 			&envVarCheck{
 				name:            "GITHUB_TOKEN",

@@ -5,56 +5,107 @@ package endpoint
 
 import (
 	"bytes"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"testing"
 
-	"github.com/sirupsen/logrus"
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
+	"github.com/cilium/cilium/pkg/identity/identitymanager"
+	"github.com/cilium/cilium/pkg/logging"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/policy/api"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
 
-func (s *EndpointSuite) TestPolicyLog(c *C) {
-	do := &DummyOwner{repo: policy.NewPolicyRepository(nil, nil, nil, nil)}
-	ep := NewEndpointWithState(do, do, testipcache.NewMockIPCache(), nil, testidentity.NewMockIdentityAllocator(nil), 12345, StateReady)
+func TestEndpointLogFormat(t *testing.T) {
+	setupEndpointSuite(t)
+	logger := hivetest.Logger(t)
+
+	// Default log format is text
+	do := &DummyOwner{repo: policy.NewPolicyRepository(logger, nil, nil, nil, nil, api.NewPolicyMetricsNoop())}
+
+	model := newTestEndpointModel(12345, StateReady)
+	ep, err := NewEndpointFromChangeModel(t.Context(), nil, &MockEndpointBuildQueue{}, nil, nil, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, do.repo, testipcache.NewMockIPCache(), nil, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+	require.NoError(t, err)
+
+	ep.Start(uint16(model.ID))
+	t.Cleanup(ep.Stop)
+
+	// FIXME @aanm
+	// _, ok := ep.getLogger().Logger.Formatter.(*slog.TextHandler)
+	ep.getLogger()
+	// require.True(t, ok)
+
+	// Log format is JSON when configured
+	logging.SetLogFormat(logging.LogFormatJSON)
+	defer func() {
+		logging.SetLogFormat(logging.LogFormatText)
+	}()
+	do = &DummyOwner{repo: policy.NewPolicyRepository(hivetest.Logger(t), nil, nil, nil, nil, api.NewPolicyMetricsNoop())}
+
+	ep, err = NewEndpointFromChangeModel(t.Context(), nil, &MockEndpointBuildQueue{}, nil, nil, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, do.repo, testipcache.NewMockIPCache(), nil, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+	require.NoError(t, err)
+
+	ep.Start(uint16(model.ID))
+	t.Cleanup(ep.Stop)
+
+	// _, ok = ep.getLogger().Logger.Formatter.(*slog.TextHandler)
+	// require.True(t, ok)
+}
+
+func TestPolicyLog(t *testing.T) {
+	setupEndpointSuite(t)
+	logger := hivetest.Logger(t)
+
+	do := &DummyOwner{repo: policy.NewPolicyRepository(hivetest.Logger(t), nil, nil, nil, nil, api.NewPolicyMetricsNoop())}
+
+	model := newTestEndpointModel(12345, StateReady)
+	ep, err := NewEndpointFromChangeModel(t.Context(), nil, &MockEndpointBuildQueue{}, nil, nil, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, do.repo, testipcache.NewMockIPCache(), nil, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+	require.NoError(t, err)
+
+	ep.Start(uint16(model.ID))
+	t.Cleanup(ep.Stop)
 
 	// Initially nil
 	policyLogger := ep.getPolicyLogger()
-	c.Assert(policyLogger, IsNil)
+	require.Nil(t, policyLogger)
 
 	// Enable DebugPolicy option
 	ep.Options.SetValidated(option.DebugPolicy, option.OptionEnabled)
-	c.Assert(ep.Options.IsEnabled(option.DebugPolicy), Equals, true)
+	require.True(t, ep.Options.IsEnabled(option.DebugPolicy))
 	ep.UpdateLogger(nil)
 	policyLogger = ep.getPolicyLogger()
-	c.Assert(policyLogger, Not(IsNil))
+	require.NotNil(t, policyLogger)
 	defer func() {
 		// remote created log file when we are done.
 		err := os.Remove(filepath.Join(option.Config.StateDir, "endpoint-policy.log"))
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 	}()
 
 	// Test logging, policyLogger must not be nil
 	policyLogger.Info("testing policy logging")
 
 	// Test logging with integrated nil check, no fields
-	ep.PolicyDebug(nil, "testing PolicyDebug")
-	ep.PolicyDebug(logrus.Fields{"testField": "Test Value"}, "PolicyDebug with fields")
+	ep.PolicyDebug("testing PolicyDebug")
+	ep.PolicyDebug("PolicyDebug with fields", slog.String("testField", "Test Value"))
 
 	// Disable option
 	ep.Options.SetValidated(option.DebugPolicy, option.OptionDisabled)
-	c.Assert(ep.Options.IsEnabled(option.DebugPolicy), Equals, false)
+	require.False(t, ep.Options.IsEnabled(option.DebugPolicy))
 	ep.UpdateLogger(nil)
 	policyLogger = ep.getPolicyLogger()
-	c.Assert(policyLogger, IsNil)
+	require.Nil(t, policyLogger)
 
 	// Verify file exists and contains the logged message
 	buf, err := os.ReadFile(filepath.Join(option.Config.StateDir, "endpoint-policy.log"))
-	c.Assert(err, IsNil)
-	c.Assert(bytes.Contains(buf, []byte("testing policy logging")), Equals, true)
-	c.Assert(bytes.Contains(buf, []byte("testing PolicyDebug")), Equals, true)
-	c.Assert(bytes.Contains(buf, []byte("Test Value")), Equals, true)
+	require.NoError(t, err)
+	require.True(t, bytes.Contains(buf, []byte("testing policy logging")))
+	require.True(t, bytes.Contains(buf, []byte("testing PolicyDebug")))
+	require.True(t, bytes.Contains(buf, []byte("Test Value")))
 }

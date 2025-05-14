@@ -58,11 +58,12 @@ var _ = SkipDescribeIf(helpers.DoesNotRunOnNetNextKernel, "K8sDatapathBandwidthT
 		)
 
 		AfterFailed(func() {
-			kubectl.CiliumReport("cilium bpf bandwidth list", "cilium endpoint list")
+			kubectl.CiliumReport("cilium-dbg bpf bandwidth list", "cilium-dbg endpoint list")
 		})
 
 		JustAfterEach(func() {
 			kubectl.ValidateNoErrorsInLogs(CurrentGinkgoTestDescription().Duration)
+			kubectl.CollectFeatures()
 		})
 
 		waitForTestPods := func() {

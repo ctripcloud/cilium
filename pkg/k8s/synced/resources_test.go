@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 
 	"github.com/cilium/cilium/pkg/lock"
@@ -34,7 +35,6 @@ type waitForCacheTest struct {
 
 func TestWaitForCacheSyncWithTimeout(t *testing.T) {
 	unit := func(d int) time.Duration { return syncedPollPeriod * time.Duration(d) }
-	assert := assert.New(t)
 	for msg, test := range map[string]waitForCacheTest{
 		"Should complete due to event causing timeout to be extended past initial timeout": {
 			timeout: unit(5),
@@ -90,7 +90,9 @@ func TestWaitForCacheSyncWithTimeout(t *testing.T) {
 		func(test waitForCacheTest) {
 			t.Run(msg, func(t *testing.T) {
 				t.Parallel()
-				r := &Resources{}
+
+				assert := assert.New(t)
+				r := &Resources{logger: hivetest.Logger(t), CacheStatus: make(CacheStatus)}
 				stop := make(chan struct{})
 				swg := lock.NewStoppableWaitGroup()
 				start := time.Now()
@@ -115,13 +117,12 @@ func TestWaitForCacheSyncWithTimeout(t *testing.T) {
 				// Schedule resource events to happen after specified duration.
 				for resourceName, waitForEvent := range test.resourceNamesToEvent {
 					// schedule an event.
-					rname := resourceName
 					time.AfterFunc(waitForEvent, func() {
-						r.SetEventTimestamp(rname)
+						r.SetEventTimestamp(resourceName)
 					})
 				}
 
-				err := r.WaitForCacheSyncWithTimeout(test.timeout, test.resourceNames...)
+				err := r.WaitForCacheSyncWithTimeout(t.Context(), test.timeout, test.resourceNames...)
 				if test.expectErr == nil {
 					assert.NoError(err)
 				} else {

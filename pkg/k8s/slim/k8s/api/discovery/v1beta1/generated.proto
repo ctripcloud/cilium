@@ -30,6 +30,14 @@ message Endpoint {
   // conditions contains information about the current status of the endpoint.
   optional EndpointConditions conditions = 2;
 
+  // hostname of this endpoint. This field may be used by consumers of
+  // endpoints to distinguish endpoints from each other (e.g. in DNS names).
+  // Multiple endpoints which use the same hostname should be considered
+  // fungible (e.g. multiple A values in DNS). Must be lowercase and pass DNS
+  // Label (RFC 1123) validation.
+  // +optional
+  optional string hostname = 3;
+
   // topology contains arbitrary topology information associated with the
   // endpoint. These key/value pairs must conform with the label format.
   // https://kubernetes.io/docs/concepts/overview/working-with-objects/labels
@@ -65,15 +73,13 @@ message EndpointConditions {
   // serving is identical to ready except that it is set regardless of the
   // terminating state of endpoints. This condition should be set to true for
   // a ready endpoint that is terminating. If nil, consumers should defer to
-  // the ready condition. This field can be enabled with the
-  // EndpointSliceTerminatingCondition feature gate.
+  // the ready condition.
   // +optional
   optional bool serving = 2;
 
   // terminating indicates that this endpoint is terminating. A nil value
   // indicates an unknown state. Consumers should interpret this unknown state
-  // to mean that the endpoint is not terminating. This field can be enabled
-  // with the EndpointSliceTerminatingCondition feature gate.
+  // to mean that the endpoint is not terminating.
   // +optional
   optional bool terminating = 3;
 }
@@ -88,9 +94,8 @@ message EndpointHints {
 
 // EndpointPort represents a Port used by an EndpointSlice
 message EndpointPort {
-  // The name of this port. All ports in an EndpointSlice must have a unique
-  // name. If the EndpointSlice is dervied from a Kubernetes service, this
-  // corresponds to the Service.ports[].name.
+  // name represents the name of this port. All ports in an EndpointSlice must have a unique name.
+  // If the EndpointSlice is derived from a Kubernetes service, this corresponds to the Service.ports[].name.
   // Name must either be an empty string or pass DNS_LABEL validation:
   // * must be no more than 63 characters long.
   // * must consist of lower case alphanumeric characters or '-'.
@@ -98,12 +103,12 @@ message EndpointPort {
   // Default is empty string.
   optional string name = 1;
 
-  // The IP protocol for this port.
+  // protocol represents the IP protocol for this port.
   // Must be UDP, TCP, or SCTP.
   // Default is TCP.
   optional string protocol = 2;
 
-  // The port number of the endpoint.
+  // port represents the port number of the endpoint.
   // If this is not specified, ports are not restricted and must be
   // interpreted in the context of the specific consumer.
   optional int32 port = 3;
@@ -115,7 +120,7 @@ message EndpointPort {
 message EndpointSlice {
   // Standard object's metadata.
   // +optional
-  optional github.com.cilium.cilium.pkg.k8s.slim.k8s.apis.meta.v1.ObjectMeta metadata = 1;
+  optional .github.com.cilium.cilium.pkg.k8s.slim.k8s.apis.meta.v1.ObjectMeta metadata = 1;
 
   // addressType specifies the type of address carried by this EndpointSlice.
   // All addresses in this slice must be the same type. This field is
@@ -145,9 +150,9 @@ message EndpointSlice {
 message EndpointSliceList {
   // Standard list metadata.
   // +optional
-  optional github.com.cilium.cilium.pkg.k8s.slim.k8s.apis.meta.v1.ListMeta metadata = 1;
+  optional .github.com.cilium.cilium.pkg.k8s.slim.k8s.apis.meta.v1.ListMeta metadata = 1;
 
-  // List of endpoint slices
+  // items is the list of endpoint slices
   repeated EndpointSlice items = 2;
 }
 

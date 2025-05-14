@@ -8,6 +8,7 @@ package version
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/blang/semver/v4"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -15,12 +16,9 @@ import (
 	"k8s.io/client-go/kubernetes"
 
 	"github.com/cilium/cilium/pkg/lock"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/versioncheck"
 )
-
-var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "k8s")
 
 // ServerCapabilities is a list of server capabilities derived based on
 // version, the Kubernetes discovery API, or probing of individual API
@@ -44,13 +42,6 @@ type ServerCapabilities struct {
 	// This capability was introduced in K8s version 1.14, prior to which
 	// we don't support HA mode for the cilium-operator.
 	LeasesResourceLock bool
-
-	// APIExtensionsV1CRD is set to true when the K8s server supports
-	// apiextensions/v1 CRDs. TODO: Add link to docs
-	//
-	// This capability was introduced in K8s version 1.16, prior to which
-	// apiextensions/v1beta1 CRDs were used exclusively.
-	APIExtensionsV1CRD bool
 }
 
 type cachedVersion struct {
@@ -73,14 +64,6 @@ var (
 	coordinationV1APIGroup   = "coordination.k8s.io/v1"
 	endpointSliceKind        = "EndpointSlice"
 	leaseKind                = "Lease"
-
-	// Constraint to check support for Lease type from coordination.k8s.io/v1.
-	// Support for Lease resource was introduced in K8s version 1.14.
-	isGEThanLeaseSupportConstraint = versioncheck.MustCompile(">=1.14.0")
-
-	// Constraint to check support for apiextensions/v1 CRD types. Support for
-	// v1 CRDs was introduced in K8s version 1.16.
-	isGEThanAPIExtensionsV1CRD = versioncheck.MustCompile(">=1.16.0")
 
 	// Constraint to check support for discovery/v1 types. Support for v1
 	// discovery was introduced in K8s version 1.21.
@@ -124,7 +107,6 @@ func updateVersion(version semver.Version) {
 	cached.version = version
 
 	cached.capabilities.MinimalVersionMet = isGEThanMinimalVersionConstraint(version)
-	cached.capabilities.APIExtensionsV1CRD = isGEThanAPIExtensionsV1CRD(version)
 	cached.capabilities.EndpointSliceV1 = isGEThanAPIDiscoveryV1(version)
 	cached.capabilities.EndpointSlice = isGEThanAPIDiscoveryV1Beta1(version)
 }
@@ -176,7 +158,7 @@ func Force(version string) error {
 	return nil
 }
 
-func endpointSlicesFallbackDiscovery(client kubernetes.Interface) error {
+func endpointSlicesFallbackDiscovery(logger *slog.Logger, client kubernetes.Interface) error {
 	// If a k8s version with discovery v1 is used, then do not even bother
 	// checking for v1beta1
 	cached.mutex.Lock()
@@ -204,7 +186,7 @@ func endpointSlicesFallbackDiscovery(client kubernetes.Interface) error {
 	}
 
 	if errors.IsNotFound(err) {
-		log.WithError(err).Info("Unable to retrieve EndpointSlices for default/kubernetes. Disabling EndpointSlices")
+		logger.Info("Unable to retrieve EndpointSlices for default/kubernetes. Disabling EndpointSlices", logfields.Error, err)
 		// StatusNotFound is a safe error, EndpointSlices are
 		// disabled and the agent can continue.
 		return nil
@@ -212,26 +194,18 @@ func endpointSlicesFallbackDiscovery(client kubernetes.Interface) error {
 
 	// Unknown error, we can't derive whether to enable or disable
 	// EndpointSlices and need to error out.
-	return fmt.Errorf("unable to validate EndpointSlices support: %s", err)
+	return fmt.Errorf("unable to validate EndpointSlices support: %w", err)
 }
 
-func leasesFallbackDiscovery(client kubernetes.Interface, apiDiscoveryEnabled bool) error {
+func leasesFallbackDiscovery(logger *slog.Logger, client kubernetes.Interface, apiDiscoveryEnabled bool) error {
 	// apiDiscoveryEnabled is used to fallback leases discovery to directly
 	// probing the API when we cannot discover API groups.
 	// We require to check for Leases capabilities in operator only, which uses Leases
 	// for leader election purposes in HA mode.
 	if !apiDiscoveryEnabled {
-		log.Debugf("Skipping Leases support fallback discovery")
+		logger.Debug("Skipping Leases support fallback discovery")
 		return nil
 	}
-
-	cached.mutex.RLock()
-	// Here we check if we are running a K8s version that has support for Leases.
-	if !isGEThanLeaseSupportConstraint(cached.version) {
-		cached.mutex.RUnlock()
-		return nil
-	}
-	cached.mutex.RUnlock()
 
 	// Similar to endpointSlicesFallbackDiscovery here we fallback to probing the Kubernetes
 	// API directly. `kube-controller-manager` creates a lease in the kube-system namespace
@@ -245,7 +219,7 @@ func leasesFallbackDiscovery(client kubernetes.Interface, apiDiscoveryEnabled bo
 	}
 
 	if errors.IsNotFound(err) {
-		log.WithError(err).Info("Unable to retrieve Leases for kube-controller-manager. Disabling LeasesResourceLock")
+		logger.Info("Unable to retrieve Leases for kube-controller-manager. Disabling LeasesResourceLock", logfields.Error, err)
 		// StatusNotFound is a safe error, Leases are
 		// disabled and the agent can continue
 		return nil
@@ -253,7 +227,7 @@ func leasesFallbackDiscovery(client kubernetes.Interface, apiDiscoveryEnabled bo
 
 	// Unknown error, we can't derive whether to enable or disable
 	// LeasesResourceLock and need to error out
-	return fmt.Errorf("unable to validate LeasesResourceLock support: %s", err)
+	return fmt.Errorf("unable to validate LeasesResourceLock support: %w", err)
 }
 
 func updateK8sServerVersion(client kubernetes.Interface) error {
@@ -282,7 +256,7 @@ func updateK8sServerVersion(client kubernetes.Interface) error {
 		}
 	}
 
-	return fmt.Errorf("cannot parse k8s server version from %+v: %s", sv, err)
+	return fmt.Errorf("cannot parse k8s server version from %+v: %w", sv, err)
 }
 
 // Update retrieves the version of the Kubernetes apiserver and derives the
@@ -292,7 +266,7 @@ func updateK8sServerVersion(client kubernetes.Interface) error {
 // Discovery of capabilities only works if the discovery API of the apiserver
 // is functional. If it is not available, a warning is logged and the discovery
 // falls back to probing individual API endpoints.
-func Update(client kubernetes.Interface, apiDiscoveryEnabled bool) error {
+func Update(logger *slog.Logger, client kubernetes.Interface, apiDiscoveryEnabled bool) error {
 	err := updateK8sServerVersion(client)
 	if err != nil {
 		return err
@@ -312,21 +286,21 @@ func Update(client kubernetes.Interface, apiDiscoveryEnabled bool) error {
 			// information at a later point because the capabilities are
 			// primiarly used while the agent is starting up. Instead, fall
 			// back to probing API endpoints directly.
-			log.WithError(err).Warning("Unable to discover API groups and resources")
-			if err := endpointSlicesFallbackDiscovery(client); err != nil {
+			logger.Warn("Unable to discover API groups and resources", logfields.Error, err)
+			if err := endpointSlicesFallbackDiscovery(logger, client); err != nil {
 				return err
 			}
 
-			return leasesFallbackDiscovery(client, apiDiscoveryEnabled)
+			return leasesFallbackDiscovery(logger, client, apiDiscoveryEnabled)
 		}
 
 		updateServerGroupsAndResources(apiResourceLists)
 	} else {
-		if err := endpointSlicesFallbackDiscovery(client); err != nil {
+		if err := endpointSlicesFallbackDiscovery(logger, client); err != nil {
 			return err
 		}
 
-		return leasesFallbackDiscovery(client, apiDiscoveryEnabled)
+		return leasesFallbackDiscovery(logger, client, apiDiscoveryEnabled)
 	}
 
 	return nil

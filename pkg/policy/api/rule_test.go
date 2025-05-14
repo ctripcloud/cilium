@@ -6,34 +6,37 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 )
 
-func checkMarshalUnmarshal(c *C, r *Rule) {
+func checkMarshalUnmarshal(t *testing.T, r *Rule) {
 	jsonData, err := json.Marshal(r)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	newRule := Rule{}
 	err = json.Unmarshal(jsonData, &newRule)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	c.Check(newRule.EndpointSelector.LabelSelector == nil, Equals, r.EndpointSelector.LabelSelector == nil)
-	c.Check(newRule.NodeSelector.LabelSelector == nil, Equals, r.NodeSelector.LabelSelector == nil)
+	require.Equal(t, newRule.EndpointSelector.LabelSelector == nil, r.EndpointSelector.LabelSelector == nil)
+	require.Equal(t, newRule.NodeSelector.LabelSelector == nil, r.NodeSelector.LabelSelector == nil)
 }
 
 // This test ensures that the NodeSelector and EndpointSelector fields are kept
 // empty when the rule is marshalled/unmarshalled.
-func (s *PolicyAPITestSuite) TestJSONMarshalling(c *C) {
+func TestJSONMarshalling(t *testing.T) {
+	setUpSuite(t)
+
 	validEndpointRule := Rule{
 		EndpointSelector: WildcardEndpointSelector,
 	}
-	checkMarshalUnmarshal(c, &validEndpointRule)
+	checkMarshalUnmarshal(t, &validEndpointRule)
 
 	validNodeRule := Rule{
 		NodeSelector: WildcardEndpointSelector,
 	}
-	checkMarshalUnmarshal(c, &validNodeRule)
+	checkMarshalUnmarshal(t, &validNodeRule)
 }
 
 func getEgressRuleWithToGroups() *Rule {
@@ -41,8 +44,8 @@ func getEgressRuleWithToGroups() *Rule {
 		Egress: []EgressRule{
 			{
 				EgressCommonRule: EgressCommonRule{
-					ToGroups: []ToGroups{
-						GetToGroupsRule(),
+					ToGroups: []Groups{
+						GetGroupsRule(),
 					},
 				},
 			},
@@ -55,8 +58,8 @@ func getEgressDenyRuleWithToGroups() *Rule {
 		EgressDeny: []EgressDenyRule{
 			{
 				EgressCommonRule: EgressCommonRule{
-					ToGroups: []ToGroups{
-						GetToGroupsRule(),
+					ToGroups: []Groups{
+						GetGroupsRule(),
 					},
 				},
 			},
@@ -64,37 +67,89 @@ func getEgressDenyRuleWithToGroups() *Rule {
 	}
 }
 
-func (s *PolicyAPITestSuite) TestRequiresDerivative(c *C) {
-	egressWithoutToGroups := Rule{}
-	c.Assert(egressWithoutToGroups.RequiresDerivative(), Equals, false)
-
-	egressRuleWithToGroups := getEgressRuleWithToGroups()
-	c.Assert(egressRuleWithToGroups.RequiresDerivative(), Equals, true)
-
-	egressDenyRuleWithToGroups := getEgressDenyRuleWithToGroups()
-	c.Assert(egressDenyRuleWithToGroups.RequiresDerivative(), Equals, true)
+func getIngressRuleWithFromGroups() *Rule {
+	return &Rule{
+		Ingress: []IngressRule{
+			{
+				IngressCommonRule: IngressCommonRule{
+					FromGroups: []Groups{
+						GetGroupsRule(),
+					},
+				},
+			},
+		},
+	}
 }
 
-func (s *PolicyAPITestSuite) TestCreateDerivative(c *C) {
+func getIngressDenyRuleWithFromGroups() *Rule {
+	return &Rule{
+		IngressDeny: []IngressDenyRule{
+			{
+				IngressCommonRule: IngressCommonRule{
+					FromGroups: []Groups{
+						GetGroupsRule(),
+					},
+				},
+			},
+		},
+	}
+}
+
+func TestRequiresDerivative(t *testing.T) {
+	setUpSuite(t)
+
+	egressWithoutToGroups := Rule{}
+	require.False(t, egressWithoutToGroups.RequiresDerivative())
+
+	egressRuleWithToGroups := getEgressRuleWithToGroups()
+	require.True(t, egressRuleWithToGroups.RequiresDerivative())
+
+	egressDenyRuleWithToGroups := getEgressDenyRuleWithToGroups()
+	require.True(t, egressDenyRuleWithToGroups.RequiresDerivative())
+
+	ingressRuleWithToGroups := getIngressRuleWithFromGroups()
+	require.True(t, ingressRuleWithToGroups.RequiresDerivative())
+
+	ingressDenyRuleWithToGroups := getIngressDenyRuleWithFromGroups()
+	require.True(t, ingressDenyRuleWithToGroups.RequiresDerivative())
+}
+
+func TestCreateDerivative(t *testing.T) {
+	setUpSuite(t)
+
 	egressWithoutToGroups := Rule{}
 	newRule, err := egressWithoutToGroups.CreateDerivative(context.TODO())
-	c.Assert(err, IsNil)
-	c.Assert(len(newRule.Egress), Equals, 0)
-	c.Assert(len(newRule.EgressDeny), Equals, 0)
+	require.NoError(t, err)
+	require.Empty(t, newRule.Egress)
+	require.Empty(t, newRule.EgressDeny)
 
 	RegisterToGroupsProvider(AWSProvider, GetCallBackWithRule("192.168.1.1"))
 
 	egressRuleWithToGroups := getEgressRuleWithToGroups()
 	newRule, err = egressRuleWithToGroups.CreateDerivative(context.TODO())
-	c.Assert(err, IsNil)
-	c.Assert(len(newRule.EgressDeny), Equals, 0)
-	c.Assert(len(newRule.Egress), Equals, 1)
-	c.Assert(len(newRule.Egress[0].ToCIDRSet), Equals, 1)
+	require.NoError(t, err)
+	require.Empty(t, newRule.EgressDeny)
+	require.Len(t, newRule.Egress, 1)
+	require.Len(t, newRule.Egress[0].ToCIDRSet, 1)
 
 	egressDenyRuleWithToGroups := getEgressDenyRuleWithToGroups()
 	newRule, err = egressDenyRuleWithToGroups.CreateDerivative(context.TODO())
-	c.Assert(err, IsNil)
-	c.Assert(len(newRule.Egress), Equals, 0)
-	c.Assert(len(newRule.EgressDeny), Equals, 1)
-	c.Assert(len(newRule.EgressDeny[0].ToCIDRSet), Equals, 1)
+	require.NoError(t, err)
+	require.Empty(t, newRule.Egress)
+	require.Len(t, newRule.EgressDeny, 1)
+	require.Len(t, newRule.EgressDeny[0].ToCIDRSet, 1)
+
+	ingressRuleWithToGroups := getIngressRuleWithFromGroups()
+	newRule, err = ingressRuleWithToGroups.CreateDerivative(context.TODO())
+	require.NoError(t, err)
+	require.Empty(t, newRule.IngressDeny)
+	require.Len(t, newRule.Ingress, 1)
+	require.Len(t, newRule.Ingress[0].FromCIDRSet, 1)
+
+	ingressDenyRuleWithToGroups := getIngressDenyRuleWithFromGroups()
+	newRule, err = ingressDenyRuleWithToGroups.CreateDerivative(context.TODO())
+	require.NoError(t, err)
+	require.Empty(t, newRule.Ingress)
+	require.Len(t, newRule.IngressDeny, 1)
+	require.Len(t, newRule.IngressDeny[0].FromCIDRSet, 1)
 }

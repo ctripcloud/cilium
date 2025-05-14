@@ -10,26 +10,40 @@ import (
 	"github.com/cilium/cilium/pkg/labels"
 )
 
-// AuthType is a string identifying a supported authentication type
-type AuthType string
+// AuthenticationMode is a string identifying a supported authentication type
+type AuthenticationMode string
 
 const (
-	AuthTypeNull       AuthType = "null"        // Always succeeds
-	AuthTypeMTLSSpiffe AuthType = "mtls-spiffe" // Mutual TLS with SPIFFE as certificate provider
-	AuthTypeAlwaysFail AuthType = "always-fail"
+	AuthenticationModeDisabled   AuthenticationMode = "disabled" // Always succeeds
+	AuthenticationModeRequired   AuthenticationMode = "required" // Mutual TLS with SPIFFE as certificate provider by default
+	AuthenticationModeAlwaysFail AuthenticationMode = "test-always-fail"
 )
 
-// Auth specifies the kind of cryptographic authentication required for the traffic to
+// Authentication specifies the kind of cryptographic authentication required for the traffic to
 // be allowed.
-type Auth struct {
-	// Type is the required authentication type for the allowed traffic, if any.
+type Authentication struct {
+	// Mode is the required authentication mode for the allowed traffic, if any.
 	//
-	// +kubebuilder:validation:Enum=null;mtls-spiffe;always-fail
+	// +kubebuilder:validation:Enum=disabled;required;test-always-fail
 	// +kubebuilder:validation:Required
-	Type AuthType `json:"type"`
+	Mode AuthenticationMode `json:"mode"`
 }
 
-// +kubebuilder:validation:Type=object
+// DefaultDenyConfig expresses a policy's desired default mode for the subject
+// endpoints.
+type DefaultDenyConfig struct {
+	// Whether or not the endpoint should have a default-deny rule applied
+	// to ingress traffic.
+	//
+	// +kubebuilder:validation:Optional
+	Ingress *bool `json:"ingress,omitempty"`
+
+	// Whether or not the endpoint should have a default-deny rule applied
+	// to egress traffic.
+	//
+	// +kubebuilder:validation:Optional
+	Egress *bool `json:"egress,omitempty"`
+}
 
 // Rule is a policy rule which must be applied to all endpoints which match the
 // labels contained in the endpointSelector
@@ -62,7 +76,7 @@ type Rule struct {
 	// Ingress is a list of IngressRule which are enforced at ingress.
 	// If omitted or empty, this rule does not apply at ingress.
 	//
-	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:AnyOf
 	Ingress []IngressRule `json:"ingress,omitempty"`
 
 	// IngressDeny is a list of IngressDenyRule which are enforced at ingress.
@@ -70,13 +84,13 @@ type Rule struct {
 	// rules in the 'ingress' field.
 	// If omitted or empty, this rule does not apply at ingress.
 	//
-	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:AnyOf
 	IngressDeny []IngressDenyRule `json:"ingressDeny,omitempty"`
 
 	// Egress is a list of EgressRule which are enforced at egress.
 	// If omitted or empty, this rule does not apply at egress.
 	//
-	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:AnyOf
 	Egress []EgressRule `json:"egress,omitempty"`
 
 	// EgressDeny is a list of EgressDenyRule which are enforced at egress.
@@ -84,7 +98,7 @@ type Rule struct {
 	// rules in the 'egress' field.
 	// If omitted or empty, this rule does not apply at egress.
 	//
-	// +kubebuilder:validation:Optional
+	// +kubebuilder:validation:AnyOf
 	EgressDeny []EgressDenyRule `json:"egressDeny,omitempty"`
 
 	// Labels is a list of optional strings which can be used to
@@ -94,6 +108,25 @@ type Rule struct {
 	//
 	// +kubebuilder:validation:Optional
 	Labels labels.LabelArray `json:"labels,omitempty"`
+
+	// EnableDefaultDeny determines whether this policy configures the
+	// subject endpoint(s) to have a default deny mode. If enabled,
+	// this causes all traffic not explicitly allowed by a network policy
+	// to be dropped.
+	//
+	// If not specified, the default is true for each traffic direction
+	// that has rules, and false otherwise. For example, if a policy
+	// only has Ingress or IngressDeny rules, then the default for
+	// ingress is true and egress is false.
+	//
+	// If multiple policies apply to an endpoint, that endpoint's default deny
+	// will be enabled if any policy requests it.
+	//
+	// This is useful for creating broad-based network policies that will not
+	// cause endpoints to enter default-deny mode.
+	//
+	// +kubebuilder:validation:Optional
+	EnableDefaultDeny DefaultDenyConfig `json:"enableDefaultDeny,omitempty"`
 
 	// Description is a free form string, it can be used by the creator of
 	// the rule to store human readable explanation of the purpose of this
@@ -107,22 +140,24 @@ type Rule struct {
 // enforce omitempty on the EndpointSelector nested structures.
 func (r *Rule) MarshalJSON() ([]byte, error) {
 	type common struct {
-		Ingress     []IngressRule     `json:"ingress,omitempty"`
-		IngressDeny []IngressDenyRule `json:"ingressDeny,omitempty"`
-		Egress      []EgressRule      `json:"egress,omitempty"`
-		EgressDeny  []EgressDenyRule  `json:"egressDeny,omitempty"`
-		Labels      labels.LabelArray `json:"labels,omitempty"`
-		Description string            `json:"description,omitempty"`
+		Ingress           []IngressRule     `json:"ingress,omitempty"`
+		IngressDeny       []IngressDenyRule `json:"ingressDeny,omitempty"`
+		Egress            []EgressRule      `json:"egress,omitempty"`
+		EgressDeny        []EgressDenyRule  `json:"egressDeny,omitempty"`
+		Labels            labels.LabelArray `json:"labels,omitempty"`
+		EnableDefaultDeny DefaultDenyConfig `json:"enableDefaultDeny,omitzero"`
+		Description       string            `json:"description,omitempty"`
 	}
 
-	var a interface{}
+	var a any
 	ruleCommon := common{
-		Ingress:     r.Ingress,
-		IngressDeny: r.IngressDeny,
-		Egress:      r.Egress,
-		EgressDeny:  r.EgressDeny,
-		Labels:      r.Labels,
-		Description: r.Description,
+		Ingress:           r.Ingress,
+		IngressDeny:       r.IngressDeny,
+		Egress:            r.Egress,
+		EgressDeny:        r.EgressDeny,
+		Labels:            r.Labels,
+		EnableDefaultDeny: r.EnableDefaultDeny,
+		Description:       r.Description,
 	}
 
 	// Only one of endpointSelector or nodeSelector is permitted.
@@ -193,6 +228,12 @@ func (r *Rule) WithEgressDenyRules(rules []EgressDenyRule) *Rule {
 	return r
 }
 
+// WithEnableDefaultDeny configures the Rule to enable default deny.
+func (r *Rule) WithEnableDefaultDeny(ingress, egress bool) *Rule {
+	r.EnableDefaultDeny = DefaultDenyConfig{&ingress, &egress}
+	return r
+}
+
 // WithLabels configures the Rule with the specified labels metadata.
 func (r *Rule) WithLabels(labels labels.LabelArray) *Rule {
 	r.Labels = labels
@@ -217,6 +258,16 @@ func (r *Rule) RequiresDerivative() bool {
 			return true
 		}
 	}
+	for _, rule := range r.Ingress {
+		if rule.RequiresDerivative() {
+			return true
+		}
+	}
+	for _, rule := range r.IngressDeny {
+		if rule.RequiresDerivative() {
+			return true
+		}
+	}
 	return false
 }
 
@@ -226,6 +277,8 @@ func (r *Rule) CreateDerivative(ctx context.Context) (*Rule, error) {
 	newRule := r.DeepCopy()
 	newRule.Egress = []EgressRule{}
 	newRule.EgressDeny = []EgressDenyRule{}
+	newRule.Ingress = []IngressRule{}
+	newRule.IngressDeny = []IngressDenyRule{}
 
 	for _, egressRule := range r.Egress {
 		derivativeEgressRule, err := egressRule.CreateDerivative(ctx)
@@ -242,5 +295,39 @@ func (r *Rule) CreateDerivative(ctx context.Context) (*Rule, error) {
 		}
 		newRule.EgressDeny = append(newRule.EgressDeny, *derivativeEgressDenyRule)
 	}
+
+	for _, ingressRule := range r.Ingress {
+		derivativeIngressRule, err := ingressRule.CreateDerivative(ctx)
+		if err != nil {
+			return newRule, err
+		}
+		newRule.Ingress = append(newRule.Ingress, *derivativeIngressRule)
+	}
+
+	for _, ingressDenyRule := range r.IngressDeny {
+		derivativeDenyIngressRule, err := ingressDenyRule.CreateDerivative(ctx)
+		if err != nil {
+			return newRule, err
+		}
+		newRule.IngressDeny = append(newRule.IngressDeny, *derivativeDenyIngressRule)
+	}
 	return newRule, nil
+}
+
+type PolicyMetrics interface {
+	AddRule(r Rule)
+	DelRule(r Rule)
+}
+
+type policyMetricsNoop struct {
+}
+
+func (p *policyMetricsNoop) AddRule(Rule) {
+}
+
+func (p *policyMetricsNoop) DelRule(Rule) {
+}
+
+func NewPolicyMetricsNoop() PolicyMetrics {
+	return &policyMetricsNoop{}
 }

@@ -4,13 +4,14 @@
 package ipam
 
 import (
-	"context"
+	"net/netip"
+	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
 	apimock "github.com/cilium/cilium/pkg/azure/api/mock"
 	"github.com/cilium/cilium/pkg/azure/types"
-	"github.com/cilium/cilium/pkg/cidr"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 )
 
@@ -18,7 +19,7 @@ var (
 	subnets = []*ipamTypes.Subnet{
 		{
 			ID:               "subnet-1",
-			CIDR:             cidr.MustParseCIDR("1.1.0.0/16"),
+			CIDR:             netip.MustParsePrefix("1.1.0.0/16"),
 			VirtualNetworkID: "vpc-1",
 			Tags: map[string]string{
 				"tag1": "tag1",
@@ -26,7 +27,7 @@ var (
 		},
 		{
 			ID:               "subnet-2",
-			CIDR:             cidr.MustParseCIDR("2.2.0.0/16"),
+			CIDR:             netip.MustParsePrefix("2.2.0.0/16"),
 			VirtualNetworkID: "vpc-2",
 			Tags: map[string]string{
 				"tag1": "tag1",
@@ -37,7 +38,7 @@ var (
 	subnets2 = []*ipamTypes.Subnet{
 		{
 			ID:               "subnet-1",
-			CIDR:             cidr.MustParseCIDR("1.1.0.0/16"),
+			CIDR:             netip.MustParsePrefix("1.1.0.0/16"),
 			VirtualNetworkID: "vpc-1",
 			Tags: map[string]string{
 				"tag1": "tag1",
@@ -45,7 +46,7 @@ var (
 		},
 		{
 			ID:               "subnet-2",
-			CIDR:             cidr.MustParseCIDR("2.2.0.0/16"),
+			CIDR:             netip.MustParsePrefix("2.2.0.0/16"),
 			VirtualNetworkID: "vpc-2",
 			Tags: map[string]string{
 				"tag1": "tag1",
@@ -53,7 +54,7 @@ var (
 		},
 		{
 			ID:               "subnet-3",
-			CIDR:             cidr.MustParseCIDR("3.3.0.0/16"),
+			CIDR:             netip.MustParsePrefix("3.3.0.0/16"),
 			VirtualNetworkID: "vpc-1",
 			Tags: map[string]string{
 				"tag2": "tag2",
@@ -67,7 +68,7 @@ var (
 	}
 )
 
-func iteration1(api *apimock.API, mngr *InstancesManager) {
+func iteration1(t *testing.T, api *apimock.API, mngr *InstancesManager) {
 	instances := ipamTypes.NewInstanceMap()
 
 	resource := &types.AzureInterface{
@@ -103,10 +104,10 @@ func iteration1(api *apimock.API, mngr *InstancesManager) {
 	})
 
 	api.UpdateInstances(instances)
-	mngr.Resync(context.Background())
+	mngr.Resync(t.Context())
 }
 
-func iteration2(api *apimock.API, mngr *InstancesManager) {
+func iteration2(t *testing.T, api *apimock.API, mngr *InstancesManager) {
 	api.UpdateSubnets(subnets2)
 
 	instances := ipamTypes.NewInstanceMap()
@@ -160,29 +161,29 @@ func iteration2(api *apimock.API, mngr *InstancesManager) {
 	})
 
 	api.UpdateInstances(instances)
-	mngr.Resync(context.TODO())
+	mngr.Resync(t.Context())
 }
 
-func (e *IPAMSuite) TestGetVpcsAndSubnets(c *check.C) {
+func TestGetVpcsAndSubnets(t *testing.T) {
 	api := apimock.NewAPI(subnets, vnets)
-	c.Assert(api, check.Not(check.IsNil))
+	require.NotNil(t, api)
 
-	mngr := NewInstancesManager(api)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr := NewInstancesManager(hivetest.Logger(t), api)
+	require.NotNil(t, mngr)
 
-	c.Assert(mngr.subnets["subnet-1"], check.IsNil)
-	c.Assert(mngr.subnets["subnet-2"], check.IsNil)
-	c.Assert(mngr.subnets["subnet-3"], check.IsNil)
+	require.Nil(t, mngr.subnets["subnet-1"])
+	require.Nil(t, mngr.subnets["subnet-2"])
+	require.Nil(t, mngr.subnets["subnet-3"])
 
-	iteration1(api, mngr)
+	iteration1(t, api, mngr)
 
-	c.Assert(mngr.subnets["subnet-1"], check.Not(check.IsNil))
-	c.Assert(mngr.subnets["subnet-2"], check.Not(check.IsNil))
-	c.Assert(mngr.subnets["subnet-3"], check.IsNil)
+	require.NotNil(t, mngr.subnets["subnet-1"])
+	require.NotNil(t, mngr.subnets["subnet-2"])
+	require.Nil(t, mngr.subnets["subnet-3"])
 
-	iteration2(api, mngr)
+	iteration2(t, api, mngr)
 
-	c.Assert(mngr.subnets["subnet-1"], check.Not(check.IsNil))
-	c.Assert(mngr.subnets["subnet-2"], check.Not(check.IsNil))
-	c.Assert(mngr.subnets["subnet-3"], check.Not(check.IsNil))
+	require.NotNil(t, mngr.subnets["subnet-1"])
+	require.NotNil(t, mngr.subnets["subnet-2"])
+	require.NotNil(t, mngr.subnets["subnet-3"])
 }

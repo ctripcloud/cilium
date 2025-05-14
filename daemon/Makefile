@@ -1,7 +1,15 @@
 # Copyright Authors of Cilium
 # SPDX-License-Identifier: Apache-2.0
 
-include ../Makefile.defs
+.DEFAULT_GOAL := all
+
+ROOT_DIR := $(shell dirname "$(realpath $(lastword $(MAKEFILE_LIST)))")
+
+include ${ROOT_DIR}/../Makefile.defs
+
+# Add the ability to override variables
+# ROOT_DIR changes to repo root after including Makefile.defs
+-include ${ROOT_DIR}/Makefile.override
 
 TARGET := cilium-agent
 
@@ -9,7 +17,7 @@ all: $(TARGET)
 
 .PHONY: all $(TARGET)
 
-$(TARGET): ../Makefile ../Makefile.defs Makefile
+$(TARGET):
 	@$(ECHO_GO)
 	$(QUIET)$(GO_BUILD) -o $(TARGET)
 

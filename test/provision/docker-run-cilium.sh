@@ -1,10 +1,10 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # all args are passed as cilium-agent options (except for "uninstall" below)
 CILIUM_OPTS=$@
-# Default kvstore to consul
+# Default kvstore to etcd
 if [[ "${CILIUM_OPTS}" != *--kvstore* ]]; then
-    CILIUM_OPTS+=" --kvstore consul --kvstore-opt consul.address=127.0.0.1:8500"
+    CILIUM_OPTS+=" --kvstore etcd --kvstore-opt etcd.address=127.0.0.1:4001"
 fi
 
 CILIUM_IMAGE=${CILIUM_IMAGE:-cilium/cilium:latest}
@@ -21,11 +21,14 @@ fi
 if [ "$1" = "uninstall" ] ; then
     if [ -n "$(${SUDO} docker ps -a -q -f label=app=cilium)" ]; then
         echo "Shutting down running Cilium agent"
+        ${SUDO} docker stop cilium || true
         ${SUDO} docker rm -f cilium || true
     fi
     if [ -f /usr/bin/cilium ] ; then
         echo "Removing /usr/bin/cilium"
         ${SUDO} rm /usr/bin/cilium
+        echo "Removing /usr/bin/cilium-dbg"
+        ${SUDO} rm /usr/bin/cilium-dbg
         echo "Removing /usr/bin/cilium-bugtool"
         ${SUDO} rm /usr/bin/cilium-bugtool
     fi
@@ -56,4 +59,13 @@ ${SUDO} docker run --name cilium $DOCKER_OPTS $CILIUM_IMAGE /bin/bash -c "groupa
 
 # Copy Cilium CLI
 ${SUDO} docker cp cilium:/usr/bin/cilium /usr/bin/
+${SUDO} docker cp cilium:/usr/bin/cilium-dbg /usr/bin/
 ${SUDO} docker cp cilium:/usr/bin/cilium-bugtool /usr/bin/
+${SUDO} docker cp cilium:/usr/bin/hubble /usr/bin/
+# These programs are not statically linked so they might break in the case
+# of GHA runners are upgraded.
+if ! command -v "clang" >/dev/null 2>&1; then
+  ${SUDO} docker cp cilium:/usr/local/bin/clang /usr/bin/
+  ${SUDO} docker cp cilium:/usr/local/bin/llc /usr/bin/
+  ${SUDO} docker cp cilium:/usr/sbin/tc /usr/bin/
+fi

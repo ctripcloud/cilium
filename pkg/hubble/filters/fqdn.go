@@ -7,6 +7,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"slices"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
@@ -27,18 +28,9 @@ func filterByFQDNs(fqdnPatterns []string, getFQDNs func(*v1.Event) []string) (Fi
 	}
 
 	return func(ev *v1.Event) bool {
-		names := getFQDNs(ev)
-		if len(names) == 0 {
-			return false
-		}
-
-		for _, name := range names {
-			if fqdnRegexp.MatchString(name) {
-				return true
-			}
-		}
-
-		return false
+		return slices.ContainsFunc(getFQDNs(ev), func(fqdn string) bool {
+			return fqdnRegexp.MatchString(fqdn)
+		})
 	}, nil
 }
 
@@ -50,7 +42,7 @@ func filterByDNSQueries(queryPatterns []string) (FilterFunc, error) {
 	for _, pattern := range queryPatterns {
 		query, err := regexp.Compile(pattern)
 		if err != nil {
-			return nil, fmt.Errorf("failed to compile regexp: %v", err)
+			return nil, fmt.Errorf("failed to compile regexp: %w", err)
 		}
 		queries = append(queries, query)
 	}
@@ -59,12 +51,9 @@ func filterByDNSQueries(queryPatterns []string) (FilterFunc, error) {
 		if dns == nil {
 			return false
 		}
-		for _, query := range queries {
-			if query.MatchString(dns.Query) {
-				return true
-			}
-		}
-		return false
+		return slices.ContainsFunc(queries, func(query *regexp.Regexp) bool {
+			return query.MatchString(dns.Query)
+		})
 	}, nil
 }
 
@@ -94,7 +83,7 @@ func (f *FQDNFilter) OnBuildFilter(ctx context.Context, ff *flowpb.FlowFilter) (
 	if ff.GetDnsQuery() != nil {
 		dnsFilters, err := filterByDNSQueries(ff.GetDnsQuery())
 		if err != nil {
-			return nil, fmt.Errorf("invalid DNS query filter: %v", err)
+			return nil, fmt.Errorf("invalid DNS query filter: %w", err)
 		}
 		fs = append(fs, dnsFilters)
 	}

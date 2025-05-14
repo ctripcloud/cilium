@@ -6,112 +6,30 @@
 package fake
 
 import (
-	"context"
-
-	corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	labels "k8s.io/apimachinery/pkg/labels"
-	schema "k8s.io/apimachinery/pkg/runtime/schema"
-	types "k8s.io/apimachinery/pkg/types"
-	watch "k8s.io/apimachinery/pkg/watch"
-	testing "k8s.io/client-go/testing"
+	v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
+	corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/client/clientset/versioned/typed/core/v1"
+	gentype "k8s.io/client-go/gentype"
 )
 
-// FakeEndpoints implements EndpointsInterface
-type FakeEndpoints struct {
+// fakeEndpoints implements EndpointsInterface
+type fakeEndpoints struct {
+	*gentype.FakeClientWithList[*v1.Endpoints, *v1.EndpointsList]
 	Fake *FakeCoreV1
-	ns   string
 }
 
-var endpointsResource = schema.GroupVersionResource{Group: "", Version: "v1", Resource: "endpoints"}
-
-var endpointsKind = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Endpoints"}
-
-// Get takes name of the endpoints, and returns the corresponding endpoints object, and an error if there is any.
-func (c *FakeEndpoints) Get(ctx context.Context, name string, options v1.GetOptions) (result *corev1.Endpoints, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewGetAction(endpointsResource, c.ns, name), &corev1.Endpoints{})
-
-	if obj == nil {
-		return nil, err
+func newFakeEndpoints(fake *FakeCoreV1, namespace string) corev1.EndpointsInterface {
+	return &fakeEndpoints{
+		gentype.NewFakeClientWithList[*v1.Endpoints, *v1.EndpointsList](
+			fake.Fake,
+			namespace,
+			v1.SchemeGroupVersion.WithResource("endpoints"),
+			v1.SchemeGroupVersion.WithKind("Endpoints"),
+			func() *v1.Endpoints { return &v1.Endpoints{} },
+			func() *v1.EndpointsList { return &v1.EndpointsList{} },
+			func(dst, src *v1.EndpointsList) { dst.ListMeta = src.ListMeta },
+			func(list *v1.EndpointsList) []*v1.Endpoints { return gentype.ToPointerSlice(list.Items) },
+			func(list *v1.EndpointsList, items []*v1.Endpoints) { list.Items = gentype.FromPointerSlice(items) },
+		),
+		fake,
 	}
-	return obj.(*corev1.Endpoints), err
-}
-
-// List takes label and field selectors, and returns the list of Endpoints that match those selectors.
-func (c *FakeEndpoints) List(ctx context.Context, opts v1.ListOptions) (result *corev1.EndpointsList, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewListAction(endpointsResource, endpointsKind, c.ns, opts), &corev1.EndpointsList{})
-
-	if obj == nil {
-		return nil, err
-	}
-
-	label, _, _ := testing.ExtractFromListOptions(opts)
-	if label == nil {
-		label = labels.Everything()
-	}
-	list := &corev1.EndpointsList{ListMeta: obj.(*corev1.EndpointsList).ListMeta}
-	for _, item := range obj.(*corev1.EndpointsList).Items {
-		if label.Matches(labels.Set(item.Labels)) {
-			list.Items = append(list.Items, item)
-		}
-	}
-	return list, err
-}
-
-// Watch returns a watch.Interface that watches the requested endpoints.
-func (c *FakeEndpoints) Watch(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
-	return c.Fake.
-		InvokesWatch(testing.NewWatchAction(endpointsResource, c.ns, opts))
-
-}
-
-// Create takes the representation of a endpoints and creates it.  Returns the server's representation of the endpoints, and an error, if there is any.
-func (c *FakeEndpoints) Create(ctx context.Context, endpoints *corev1.Endpoints, opts v1.CreateOptions) (result *corev1.Endpoints, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewCreateAction(endpointsResource, c.ns, endpoints), &corev1.Endpoints{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*corev1.Endpoints), err
-}
-
-// Update takes the representation of a endpoints and updates it. Returns the server's representation of the endpoints, and an error, if there is any.
-func (c *FakeEndpoints) Update(ctx context.Context, endpoints *corev1.Endpoints, opts v1.UpdateOptions) (result *corev1.Endpoints, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewUpdateAction(endpointsResource, c.ns, endpoints), &corev1.Endpoints{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*corev1.Endpoints), err
-}
-
-// Delete takes name of the endpoints and deletes it. Returns an error if one occurs.
-func (c *FakeEndpoints) Delete(ctx context.Context, name string, opts v1.DeleteOptions) error {
-	_, err := c.Fake.
-		Invokes(testing.NewDeleteActionWithOptions(endpointsResource, c.ns, name, opts), &corev1.Endpoints{})
-
-	return err
-}
-
-// DeleteCollection deletes a collection of objects.
-func (c *FakeEndpoints) DeleteCollection(ctx context.Context, opts v1.DeleteOptions, listOpts v1.ListOptions) error {
-	action := testing.NewDeleteCollectionAction(endpointsResource, c.ns, listOpts)
-
-	_, err := c.Fake.Invokes(action, &corev1.EndpointsList{})
-	return err
-}
-
-// Patch applies the patch and returns the patched endpoints.
-func (c *FakeEndpoints) Patch(ctx context.Context, name string, pt types.PatchType, data []byte, opts v1.PatchOptions, subresources ...string) (result *corev1.Endpoints, err error) {
-	obj, err := c.Fake.
-		Invokes(testing.NewPatchSubresourceAction(endpointsResource, c.ns, name, pt, data, subresources...), &corev1.Endpoints{})
-
-	if obj == nil {
-		return nil, err
-	}
-	return obj.(*corev1.Endpoints), err
 }

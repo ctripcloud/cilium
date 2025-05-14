@@ -7,39 +7,32 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 )
 
-func Test(t *testing.T) {
-	check.TestingT(t)
-}
-
-type OperatorTestSuite struct{}
-
-var _ = check.Suite(&OperatorTestSuite{})
-
-func (s *OperatorTestSuite) TestIdentityHeartbeatStore(c *check.C) {
-	store := newHeartbeatStore(time.Second)
+func TestIdentityHeartbeatStore(t *testing.T) {
+	store := newHeartbeatStore(time.Second, hivetest.Logger(t))
 
 	// mark lifesign to now, identity must be alive, run GC, identity
 	// should still exist
 	store.markAlive("foo", time.Now())
-	c.Assert(store.isAlive("foo"), check.Equals, true)
+	require.True(t, store.isAlive("foo"))
 	store.gc()
-	c.Assert(store.isAlive("foo"), check.Equals, true)
+	require.True(t, store.isAlive("foo"))
 
 	// mark lifesign in the past, identity should not be alive anymore
 	store.markAlive("foo", time.Now().Add(-time.Minute))
-	c.Assert(store.isAlive("foo"), check.Equals, false)
+	require.False(t, store.isAlive("foo"))
 
 	// mark lifesign way in the past, run GC, validate that identity is no
 	// longer tracked
 	store.markAlive("foo", time.Now().Add(-24*time.Hour))
-	c.Assert(store.isAlive("foo"), check.Equals, false)
+	require.False(t, store.isAlive("foo"))
 	store.gc()
 	store.mutex.RLock()
 	_, ok := store.lastLifesign["foo"]
-	c.Assert(ok, check.Equals, false)
+	require.False(t, ok)
 	store.mutex.RUnlock()
 
 	// mark lifesign to now and validate deletion
@@ -47,15 +40,15 @@ func (s *OperatorTestSuite) TestIdentityHeartbeatStore(c *check.C) {
 	store.mutex.RLock()
 	_, ok = store.lastLifesign["foo"]
 	store.mutex.RUnlock()
-	c.Assert(ok, check.Equals, true)
+	require.True(t, ok)
 	store.delete("foo")
 	store.mutex.RLock()
 	_, ok = store.lastLifesign["foo"]
 	store.mutex.RUnlock()
-	c.Assert(ok, check.Equals, false)
+	require.False(t, ok)
 
-	// identtity foo now doesn't exist, simulate start time of operator way
-	// in the past to check if an old, stale identity will be deleeted
+	// identity foo now doesn't exist, simulate start time of operator way
+	// in the past to check if an old, stale identity will be deleted
 	store.firstRun = time.Now().Add(-24 * time.Hour)
-	c.Assert(store.isAlive("foo"), check.Equals, false)
+	require.False(t, store.isAlive("foo"))
 }

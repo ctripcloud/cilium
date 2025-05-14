@@ -1,4 +1,4 @@
-apiVersion: gateway.networking.k8s.io/v1beta1
+apiVersion: gateway.networking.k8s.io/v1
 kind: Gateway
 metadata:
   name: gateway-observed-generation-bump
@@ -7,6 +7,7 @@ spec:
   gatewayClassName: "{GATEWAY_CLASS_NAME}"
   listeners:
     - name: http
+      hostname: "bar.com"
       port: 80
       protocol: HTTP
       allowedRoutes:

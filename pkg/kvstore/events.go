@@ -4,7 +4,8 @@ package kvstore
 
 import (
 	"context"
-	"sync"
+
+	"github.com/cilium/cilium/pkg/spanstat"
 )
 
 // EventType defines the type of watch event that occurred
@@ -50,63 +51,30 @@ type KeyValueEvent struct {
 }
 
 // EventChan is a channel to receive events on
-type EventChan chan KeyValueEvent
+type EventChan <-chan KeyValueEvent
 
-// stopChan is the channel used to indicate stopping of the watcher
-type stopChan chan struct{}
-
-// Watcher represents a KVstore watcher
-type Watcher struct {
-	// Events is the channel to which change notifications will be sent to
-	Events EventChan `json:"-"`
-
-	Name      string `json:"name"`
-	Prefix    string `json:"prefix"`
-	stopWatch stopChan
-
-	// stopOnce guarantees that Stop() is only called once
-	stopOnce sync.Once
-
-	// stopWait is the wait group to wait for watchers to exit gracefully
-	stopWait sync.WaitGroup
+// emitter wraps the channel to send events to, to ensure it is accessed
+// via the proper helper methods.
+type emitter struct {
+	events chan<- KeyValueEvent
+	scope  string
 }
 
-func newWatcher(name, prefix string, chanSize int) *Watcher {
-	w := &Watcher{
-		Name:      name,
-		Prefix:    prefix,
-		Events:    make(EventChan, chanSize),
-		stopWatch: make(stopChan),
+// emit attempts to notify the watcher of an event within the given context.
+// returning false if the context is done before the event is emitted.
+func (e emitter) emit(ctx context.Context, event KeyValueEvent) bool {
+	queueStart := spanstat.Start()
+	var ok bool
+	select {
+	case <-ctx.Done():
+	case e.events <- event:
+		ok = true
 	}
-
-	w.stopWait.Add(1)
-
-	return w
+	trackEventQueued(e.scope, event.Typ, queueStart.End(ok).Total())
+	return ok
 }
 
-// String returns the name of the wather
-func (w *Watcher) String() string {
-	return w.Name
-}
-
-// ListAndWatch creates a new watcher which will watch the specified prefix for
-// changes. Before doing this, it will list the current keys matching the
-// prefix and report them as new keys. Name can be set to anything and is used
-// for logging messages. The Events channel is created with the specified
-// sizes. Upon every change observed, a KeyValueEvent will be sent to the
-// Events channel
-//
-// Returns a watcher structure plus a channel that is closed when the initial
-// list operation has been completed
-func ListAndWatch(ctx context.Context, name, prefix string, chanSize int) *Watcher {
-	return Client().ListAndWatch(ctx, name, prefix, chanSize)
-}
-
-// Stop stops a watcher previously created and started with Watch()
-func (w *Watcher) Stop() {
-	w.stopOnce.Do(func() {
-		close(w.stopWatch)
-		log.WithField(fieldWatcher, w).Debug("Stopped watcher")
-		w.stopWait.Wait()
-	})
+// close closes the events channel.
+func (e emitter) close() {
+	close(e.events)
 }

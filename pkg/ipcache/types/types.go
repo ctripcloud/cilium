@@ -6,16 +6,24 @@ package types
 import (
 	"context"
 	"net"
+	"net/netip"
+	"strconv"
 	"strings"
 	"sync"
 
-	"github.com/cilium/cilium/pkg/identity/cache"
+	"github.com/cilium/cilium/pkg/identity"
 )
 
 // PolicyHandler is responsible for handling identity updates into the core
 // policy engine. See SelectorCache.UpdateIdentities() for more details.
 type PolicyHandler interface {
-	UpdateIdentities(added, deleted cache.IdentityCache, wg *sync.WaitGroup)
+	UpdateIdentities(added, deleted identity.IdentityMap, wg *sync.WaitGroup) (mutated bool)
+}
+
+// PolicyUpdater is responsible for triggering regeneration of all endpoints.
+// See pkg/policy/trigger.go for more details.
+type PolicyUpdater interface {
+	TriggerPolicyUpdates(reason string)
 }
 
 // DatapathHandler is responsible for ensuring that policy updates in the
@@ -38,13 +46,14 @@ type ResourceID string
 type ResourceKind string
 
 var (
-	ResourceKindCNP                  = ResourceKind("cnp")
-	ResourceKindCCNP                 = ResourceKind("ccnp")
-	ResourceKindEndpoint             = ResourceKind("ep")
-	ResourceKindEndpointSlice        = ResourceKind("endpointslices")
-	ResourceKindEndpointSlicev1beta1 = ResourceKind("endpointslices_v1beta1")
-	ResourceKindNetpol               = ResourceKind("netpol")
-	ResourceKindNode                 = ResourceKind("node")
+	ResourceKindCCNP      = ResourceKind("ccnp")
+	ResourceKindCIDRGroup = ResourceKind("cidrgroup")
+	ResourceKindCNP       = ResourceKind("cnp")
+	ResourceKindDaemon    = ResourceKind("daemon")
+	ResourceKindEndpoint  = ResourceKind("ep")
+	ResourceKindFile      = ResourceKind("file")
+	ResourceKindNetpol    = ResourceKind("netpol")
+	ResourceKindNode      = ResourceKind("node")
 )
 
 // NewResourceID returns a ResourceID populated with the standard fields for
@@ -60,7 +69,93 @@ func NewResourceID(kind ResourceKind, namespace, name string) ResourceID {
 	return ResourceID(str.String())
 }
 
-// NodeHandler is responsible for the management of node identities.
-type NodeHandler interface {
-	AllocateNodeID(net.IP) uint16
+func (r ResourceID) Namespace() string {
+	parts := strings.SplitN(string(r), "/", 3)
+	if len(parts) < 2 {
+		return ""
+	}
+	return parts[1]
+}
+
+// TunnelPeer is the IP address of the host associated with this prefix. This is
+// typically used to establish a tunnel, e.g. in tunnel mode or for encryption.
+// This type implements ipcache.IPMetadata
+type TunnelPeer struct{ netip.Addr }
+
+func (t TunnelPeer) IP() net.IP {
+	return t.AsSlice()
+}
+
+// EncryptKey is the identity of the encryption key.
+// This type implements ipcache.IPMetadata
+type EncryptKey uint8
+
+const EncryptKeyEmpty = EncryptKey(0)
+
+func (e EncryptKey) IsValid() bool {
+	return e != EncryptKeyEmpty
+}
+
+func (e EncryptKey) Uint8() uint8 {
+	return uint8(e)
+}
+
+func (e EncryptKey) String() string {
+	return strconv.Itoa(int(e))
+}
+
+// RequestedIdentity is a desired numeric identity for the prefix. When the
+// prefix is next injected, this numeric ID will be requested from the local
+// allocator. If the allocator can accommodate that request, it will do so.
+// In order for this to be useful, the prefix must not already have an identity
+// (or its set of labels must have changed), and that numeric identity must
+// be free.
+// Thus, the numeric ID should have already been held-aside in the allocator
+// using WithholdLocalIdentities(). That will ensure the numeric ID remains free
+// for the prefix to request.
+type RequestedIdentity identity.NumericIdentity
+
+func (id RequestedIdentity) IsValid() bool {
+	return id != 0
+}
+
+func (id RequestedIdentity) ID() identity.NumericIdentity {
+	return identity.NumericIdentity(id)
+}
+
+// EndpointFlags represents various flags that can be attached to endpoints in the IPCache
+// This type implements ipcache.IPMetadata
+type EndpointFlags struct {
+	// isInit gets flipped to true on the first intentional flag set
+	// it is a sentinel to distinguish an uninitialized EndpointFlags
+	// from one with all flags set to false
+	isInit bool
+
+	// flagSkipTunnel can be applied to a remote endpoint to signal that
+	// packets destined for said endpoint shall not be forwarded through
+	// an overlay tunnel, regardless of Cilium's configuration.
+	flagSkipTunnel bool
+}
+
+func (e *EndpointFlags) SetSkipTunnel(skip bool) {
+	e.isInit = true
+	e.flagSkipTunnel = skip
+}
+
+func (e EndpointFlags) IsValid() bool {
+	return e.isInit
+}
+
+// Uint8 encoding MUST mimic the one in pkg/maps/ipcache
+// since it will eventually get recast to it
+const (
+	FlagSkipTunnel uint8 = 1 << iota
+)
+
+func (e EndpointFlags) Uint8() uint8 {
+	var flags uint8 = 0
+	if e.flagSkipTunnel {
+		flags = flags | FlagSkipTunnel
+	}
+	return flags
 }

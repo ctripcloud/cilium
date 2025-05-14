@@ -23,54 +23,6 @@ for example, understanding which S3 buckets are being accessed by an given appli
 
 .. include:: gsg_requirements.rst
 
-
-Edit the ClusterRole for Cilium to give it access to Kubernetes secrets
-
-
-.. code-block:: shell-session
-
-    $ kubectl edit clusterrole cilium -n kube-system
-
-Add the following section at the end of the file:
-
-
-.. code-block:: yaml
-
-  - apiGroups:
-    - ""
-    resources:
-    - secrets
-    verbs:
-    - get
-
-
-Deploy the Demo Application
-===========================
-
-To demonstrate TLS-interception we will use the same ``mediabot`` application that we used for the DNS-aware policy example.
-This application will access the Star Wars API service using HTTPS, which would normally mean that network-layer mechanisms
-like Cilium would not be able to see the HTTP-layer details of the communication, since all application data is encrypted
-using TLS before that data is sent on the network.
-
-In this guide we will learn about:
-
-- Creating an internal Certificate Authority (CA) and associated certificates signed by that CA to enable TLS interception.
-- Using Cilium network policy to select the traffic to intercept using DNS-based policy rules.
-- Inspecting the details of the HTTP request using cilium monitor (accessing this visibility data via Hubble, and applying
-  Cilium network policies to filter/modify the HTTP request is also possible, but is beyond the scope of this simple Getting Started Guide)
-
-
-First off, we will create a single pod ``mediabot`` application:
-
-.. parsed-literal::
-
-   $ kubectl create -f \ |SCM_WEB|\/examples/kubernetes-dns/dns-sw-app.yaml
-   $ kubectl wait pod/mediabot --for=condition=Ready
-   $ kubectl get pods
-   NAME                             READY   STATUS    RESTARTS   AGE
-   pod/mediabot                     1/1     Running   0          14s
-
-
 A Brief Overview of the TLS Certificate Model
 =============================================
 
@@ -101,7 +53,7 @@ requires four primary steps:
 
 1) Create an internal certificate authority by generating a CA private key and CA certificate.
 
-2) For any destination where TLS inspection is desired (e.g., artii.herokuapp.com in the example below),
+2) For any destination where TLS inspection is desired (e.g., httpbin.org in the example below),
    generate a private key and certificate signing request with a common name that matches the destination DNS
    name.
 
@@ -124,16 +76,192 @@ requires four primary steps:
     These secrets should be stored in a namespace where they can be accessed by Cilium, but not general purpose
     workloads.
 
+
+How TLS Inspection works
+========================
+
+All TLS inspection relies on terminating the originating connection with a certificate
+that will be accepted, then originating a new TLS connection using a client certificate
+if necessary.
+
+Because of this, the Network Policy requires configuring a ``terminatingTLS`` and optionally
+an ``originatingTLS`` stanza.
+
+When the Network Policy contains these details, then Cilium will redirect TLS connections to Envoy,
+and allow connections that complete a TLS handshake and pass the configured Network Policy.
+
+One of the most important parts of the configuration for this is how the certificates get to Envoy.
+
+In the current version, Cilium has two options, NPDS (the original) and SDS (the new and better version).
+
+Network Policy Discovery Service (NPDS)
+---------------------------------------
+
+In this version, certificates and keys are sent inline as Base64 encoded text in dedicated fields
+in the Cilium-owned Network Policy Discovery Service.
+
+This had the advantage that it was straightforward to build, but does come with a big disadvantage:
+
+Each Network Policy rule that does TLS Interception keeps its own copy of each secret inline in the
+NPDS config in Envoy. So, if (as is likely for a larger installation), you have the same secret reused
+multiple times (for example if you generate one certificate that will terminate for many SANs, but you
+have multiple rules using that certificate, or you include a valid root certificate bundle in the
+``originatingTLS`` config), then multiple copies of the certificate will be stored in Envoy's memory.
+This memory use can really add up in a large installation.
+
+It also means that we don't benefit from work that has been done to protect secrets when they are sent
+using Secret Discovery Service (.
+
+Secret Discovery Service (SDS)
+------------------------------
+
+Both of the above reasons are why Envoy supports SDS for Network Policy secrets as of Cilium 1.17.
+
+In this configuration, Cilium reads relevant Secrets from a configured secrets namespace, and exposes
+those secrets to Envoy using the core Envoy SDS API. Those secrets are then referenced in the NPDS config
+that's sent to Envoy to configure the Network Policy filter there by name, rather than being included
+directly as Base64 encoded text.
+
+This means that Envoy looks up the SDS secrets for NPDS in the same way as it does the secrets for
+Ingress or Gateway API config.
+
+This method also allows Envoy to deduplicate the storage of the secrets, since they are essentially
+being passed by reference instead of being passed by value.
+
+Because of these advantages over the older NPDS method, SDS is the default for new Cilium installations
+as at Cilium 1.17.
+
+Configuring TLS Interception
+============================
+
+There are three ways to use Cilium in 1.17 and later:
+
+* Using SDS, Secrets referenced in Network Policy can be located anywhere in the cluster, and are
+  copied into a configured namespace (``cilium-secrets`` by default) by the Cilium Operator, synchronized
+  from there into SDS, then referenced in NPDS using that name. This is the default for new clusters,
+  and the recommended method of operation.
+* Secrets can be located anywhere in the cluster, and the Cilium Agent can be granted read access to
+  all Secrets in the cluster. In this case, Secrets are read directly from their original location by
+  the Cilium Agent and sent inline in NPDS. This deployment method is included for backwards compatibility
+  purposes and is **not recommended**, as it **significantly expands** the security scope of the agent.
+* Secrets can be added directly to the ``cilium-secrets`` namespace, then referenced in that namespace
+  from Network Policy. This is also included for backwards compatibility based on user feedback about
+  how this feature was actually being used. It is the default for **upgraded** clusters that have not
+  configured any settings and are using the ``upgradeCompatibility`` setting in Helm, set to ``1.16``
+  or below.
+
+There are three settings in Helm that affect TLS Interception:
+
+* ``tls.secretsNamespace.name`` - default ``cilium-secrets``. Configures the secrets namespace that will
+  be used for Policy secrets. Note that this is set to the same value as a similar setting for Ingress,
+  Gateway API, and BGP configuration by default, but **may** be set to a different value.
+* ``tls.readSecretsOnlyFromSecretsNamespace`` - default ``true``. This setting tells the Helm chart
+  and Cilium whether the Cilium Agent should only read secrets from the configured Secrets namespace,
+  or if the Cilium Agent should attempt to read Secrets directly from their location in the cluster.
+  Previous versions of Cilium used the item ``tls.secretsBackend``, which could be set to ``local``
+  (meaning only read from the Secrets namespace) or ``k8s`` (meaning read from any namespace), but that
+  field is now **deprecated**, as its naming had become detached from its function. Previous installations
+  that set ``tls.secretsBackend`` to ``k8s`` should migrate to setting ``tls.readSecretsOnlyFromSecretsNamespace``
+  to ``false`` instead, although the setting will continue to work for Cilium 1.17. ``tls.secretsBackend``
+  will be removed in a future Cilium version.
+* ``tls.secretSync.enabled`` - default ``true`` for new clusters. Configures secret synchronization and
+  SDS use for Network Policy secrets. SDS use requires this to be set to ``true``, and must be disabled
+  when this field is set to ``false``, so having an additional field for SDS config added no value.
+
+
+Configuring the three available modes for TLS Interception
+----------------------------------------------------------
+
+SDS Mode (recommended, default for new clusters):
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set the following settings in your Helm Values:
+
+.. code-block:: YAML
+
+    tls:
+      readSecretsOnlyFromSecretsNamespace: true
+      secretsNamespace: 
+        name: cilium-secrets # This setting is optional, as it is the default
+      secretSync:
+        enabled: true
+
+
+Read all Secrets in the Cluster mode (not recommended)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set the following settings in your Helm Values:
+
+.. code-block:: YAML
+
+    tls:
+      readSecretsOnlyFromSecretsNamespace: false
+      secretSync:
+        enabled: false
+
+Read Secrets only from secrets namespace, no SDS (default for upgraded clusters)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Set the following settings in your Helm Values:
+
+.. code-block:: YAML
+
+    tls:
+      readSecretsOnlyFromSecretsNamespace: true
+      secretsNamespace: 
+        name: cilium-secrets # This setting is optional, as it is the default
+      secretSync:
+        enabled: false
+
+.. Note::
+
+    If you are using this mode, then you will need to replace all references to
+    ``kube-system`` in the validation instructions on this page with ``cilium-secrets``
+    (or whatever value you have set that namespace to).
+
+Once you've chosen an option and configured your Cilium installation accordingly, proceed with
+verifying your install using the rest of these instructions.
+
+
+
+Deploy the Demo Application
+===========================
+
+To demonstrate TLS-interception we will use the same ``mediabot`` application that we used for the DNS-aware policy example.
+This application will access the Star Wars API service using HTTPS, which would normally mean that network-layer mechanisms
+like Cilium would not be able to see the HTTP-layer details of the communication, since all application data is encrypted
+using TLS before that data is sent on the network.
+
+In this guide we will learn about:
+
+- Creating an internal Certificate Authority (CA) and associated certificates signed by that CA to enable TLS interception.
+- Using Cilium network policy to select the traffic to intercept using DNS-based policy rules.
+- Inspecting the details of the HTTP request using cilium monitor (accessing this visibility data via Hubble, and applying
+  Cilium network policies to filter/modify the HTTP request is also possible, but is beyond the scope of this simple Getting Started Guide)
+
+
+First off, we will create a single pod ``mediabot`` application:
+
+.. parsed-literal::
+
+   $ kubectl create -f \ |SCM_WEB|\/examples/kubernetes-dns/dns-sw-app.yaml
+   $ kubectl wait pod/mediabot --for=condition=Ready
+   $ kubectl get pods
+   NAME                             READY   STATUS    RESTARTS   AGE
+   pod/mediabot                     1/1     Running   0          14s
+
+
+
 Generating and Installing TLS Keys and Certificates
 ===================================================
 
-Now that we have explained the high-level certificate model used by TLS, we will walk through the
+Now that we understand TLS and have configured Cilium to use TLS interception, we will walk through the
 concrete steps to generate the appropriate keys and certificates using the ``openssl`` utility.
 
 The following image describes the different files containing cryptographic data that are generated
 or copied, and what components in the system need access to those files:
 
-.. image:: images/cilium_tls_visibility_gsg.png
+.. image:: images/cilium-tls-interception.png
 
 You can use openssl on your local system if it is already installed, but if not a simple
 shortcut is to use ``kubectl exec`` to execute ``/bin/bash`` within any of the cilium pods, and
@@ -165,23 +293,23 @@ Create Private Key and Certificate Signing Request for a Given DNS Name
 -----------------------------------------------------------------------
 
 Generate an internal private key and certificate signing with a common name that matches the DNS name
-of the destination service to be intercepted for inspection (in this example, use ``artii.herokuapp.com``).
+of the destination service to be intercepted for inspection (in this example, use ``httpbin.org``).
 
 First create the private key:
 
 .. code-block:: shell-session
 
-    $ openssl genrsa -out internal-artii.key 2048
+    $ openssl genrsa -out internal-httpbin.key 2048
 
 Next, create a certificate signing request, specifying the DNS name of the destination service
 for the common name field when prompted.  All other prompts can be filled with any value.
 
 .. code-block:: shell-session
 
-    $ openssl req -new -key internal-artii.key -out internal-artii.csr
+    $ openssl req -new -key internal-httpbin.key -out internal-httpbin.csr
 
 The only field that must be a specific value is ensuring that ``Common Name`` is the exact DNS
-destination ``artii.herokuapp.com`` that will be provided to the client.
+destination ``httpbin.org`` that will be provided to the client.
 
 
 This example workflow will work for any DNS
@@ -191,17 +319,17 @@ name as long as the toFQDNs rule in the policy YAML (below) is also updated to m
 Use CA to Generate a Signed Certificate for the DNS Name
 --------------------------------------------------------
 
-Use the internal CA private key to create a signed certificate for artii.herokuapp.com named ``internal-artii.crt``.
+Use the internal CA private key to create a signed certificate for httpbin.org named ``internal-httpbin.crt``.
 
 .. code-block:: shell-session
 
-    $ openssl x509 -req -days 360 -in internal-artii.csr -CA myCA.crt -CAkey myCA.key -CAcreateserial -out internal-artii.crt -sha256
+    $ openssl x509 -req -days 360 -in internal-httpbin.csr -CA myCA.crt -CAkey myCA.key -CAcreateserial -out internal-httpbin.crt -sha256
 
 Next we create a Kubernetes secret that includes both the private key and signed certificates for the destination service:
 
 .. code-block:: shell-session
 
-    $ kubectl create secret tls artii-tls-data -n kube-system --cert=internal-artii.crt --key=internal-artii.key
+    $ kubectl create secret tls httpbin-tls-data -n kube-system --cert=internal-httpbin.crt --key=internal-httpbin.key
 
 Add the Internal CA as a Trusted CA Inside the Client Pod
 ---------------------------------------------------------
@@ -260,18 +388,19 @@ have not told Cilium which traffic we want to intercept and inspect.   This is d
 the same Cilium Network Policy constructs that are used for other Cilium Network Policies.
 
 The following Cilium network policy indicates that Cilium should perform HTTP-aware inspect
-of communication between the ``mediabot`` pod to ``artii.herokuapp.com``.
+of communication between the ``mediabot`` pod to ``httpbin.org``.
 
 .. literalinclude:: ../../examples/kubernetes-tls-inspection/l7-visibility-tls.yaml
+   :language: yaml
 
 Let's take a closer look at the policy:
 
 * The ``endpointSelector`` means that this policy will only apply to pods with labels ``class: mediabot, org:empire`` to have the egress access.
-* The first egress section uses ``toFQDNs: matchName`` specification to allow TCP port 443 egress to ``artii.herokuapp.com``.
+* The first egress section uses ``toFQDNs: matchName`` specification to allow TCP port 443 egress to ``httpbin.org``.
 * The ``http`` section below the toFQDNs rule
   indicates that such connections should be parsed as HTTP, with a policy of ``{}`` which will allow all requests.
 * The ``terminatingTLS`` and ``originatingTLS`` sections indicate that TLS interception should be used to terminate the initial TLS connection
-  from mediabot and initiate a new out-bound TLS connection to ``artii.herokuapp.com``.
+  from mediabot and initiate a new out-bound TLS connection to ``httpbin.org``.
 * The second egress section allows ``mediabot`` pods to access ``kube-dns`` service. Note that
   ``rules: dns`` instructs Cilium to inspect and allow DNS lookups matching specified patterns.
   In this case, inspect and allow all DNS queries.
@@ -290,34 +419,34 @@ Let's apply the policy:
 Demonstrating TLS Inspection
 ============================
 
-Recall that the policy we pushed will allow all HTTPS requests from ``mediabot`` to ``artii.herokuapp.com``, but will parse all data at
+Recall that the policy we pushed will allow all HTTPS requests from ``mediabot`` to ``httpbin.org``, but will parse all data at
 the HTTP-layer, meaning that cilium monitor will report each HTTP request and response.
 
 To see this, open a new window and run the following command to identity the name of the
 cilium pod (e.g, cilium-97s78) that is running on the same Kubernetes worker node as the ``mediabot`` pod.
 
-Then start running cilium monitor in "L7 mode" to monitor for HTTP requests being reported by Cilium:
+Then start running cilium-dbg monitor in "L7 mode" to monitor for HTTP requests being reported by Cilium:
 
 .. code-block:: shell-session
 
-    $ kubectl exec -it -n kube-system cilium-d5x8v -- cilium monitor -t l7
+    $ kubectl exec -it -n kube-system cilium-d5x8v -- cilium-dbg monitor -t l7
 
-Next in the original window, from the ``mediabot`` pod we can access ``artii.herokuapp.com`` via HTTPS:
+Next in the original window, from the ``mediabot`` pod we can access ``httpbin.org`` via HTTPS:
 
 .. code-block:: shell-session
 
-    $ kubectl exec -it mediabot -- curl -sL 'https://artii.herokuapp.com/fonts_list'
+    $ kubectl exec -it mediabot -- curl -sL 'https://httpbin.org/anything'
     ...
     ...
 
-    $ kubectl exec -it mediabot -- curl -sL 'https://artii.herokuapp.com/make?text=cilium&font=univers'
+    $ kubectl exec -it mediabot -- curl -sL 'https://httpbin.org/headers'
     ...
     ...
 
-Looking back at the cilium monitor window, you will see each individual HTTP request and response.  For example::
+Looking back at the cilium-dbg monitor window, you will see each individual HTTP request and response.  For example::
 
-    -> Request http from 2585 ([k8s:class=mediabot k8s:org=empire k8s:io.kubernetes.pod.namespace=default k8s:io.cilium.k8s.policy.serviceaccount=default k8s:io.cilium.k8s.policy.cluster=default]) to 0 ([reserved:world]), identity 24948->2, verdict Forwarded GET https://artii.herokuapp.com/fonts_list => 0
-    -> Response http to 2585 ([k8s:io.kubernetes.pod.namespace=default k8s:io.cilium.k8s.policy.serviceaccount=default k8s:io.cilium.k8s.policy.cluster=default k8s:class=mediabot k8s:org=empire]) from 0 ([reserved:world]), identity 24948->2, verdict Forwarded GET https://artii.herokuapp.com/fonts_list => 200
+    -> Request http from 2585 ([k8s:class=mediabot k8s:org=empire k8s:io.kubernetes.pod.namespace=default k8s:io.cilium.k8s.policy.serviceaccount=default k8s:io.cilium.k8s.policy.cluster=default]) to 0 ([reserved:world]), identity 24948->2, verdict Forwarded GET https://httpbin.org/anything => 0
+    -> Response http to 2585 ([k8s:io.kubernetes.pod.namespace=default k8s:io.cilium.k8s.policy.serviceaccount=default k8s:io.cilium.k8s.policy.cluster=default k8s:class=mediabot k8s:org=empire]) from 0 ([reserved:world]), identity 24948->2, verdict Forwarded GET https://httpbin.org/anything => 200
 
 Refer to :ref:`l4_policy` and :ref:`l7_policy` to learn more about Cilium L4 and L7 network policies.
 
@@ -329,4 +458,4 @@ Clean-up
    $ kubectl delete -f \ |SCM_WEB|\/examples/kubernetes-dns/dns-sw-app.yaml
    $ kubectl delete cnp l7-visibility-tls
    $ kubectl delete secret -n kube-system tls-orig-data
-   $ kubectl delete secret -n kube-system artii-tls-data
+   $ kubectl delete secret -n kube-system httpbin-tls-data

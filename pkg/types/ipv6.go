@@ -11,6 +11,15 @@ import (
 // IPv6 is the binary representation for encoding in binary structs.
 type IPv6 [16]byte
 
+func (v6 IPv6) IsZero() bool {
+	for i := 0; i < 16; i++ {
+		if v6[i] != 0 {
+			return false
+		}
+	}
+	return true
+}
+
 func (v6 IPv6) IP() net.IP {
 	return v6[:]
 }
@@ -26,5 +35,16 @@ func (v6 IPv6) String() string {
 // DeepCopyInto is a deepcopy function, copying the receiver, writing into out. in must be non-nil.
 func (v6 *IPv6) DeepCopyInto(out *IPv6) {
 	copy(out[:], v6[:])
-	return
+}
+
+// FromAddr will populate the receiver with the specified address if and only
+// if the provided address is a valid IPv6 address. Any other address,
+// including the "invalid ip" value netip.Addr{} will zero the receiver.
+func (v6 *IPv6) FromAddr(addr netip.Addr) {
+	if addr.Is6() {
+		a := IPv6(addr.As16())
+		copy(v6[:], a[:])
+	} else {
+		clear(v6[:])
+	}
 }

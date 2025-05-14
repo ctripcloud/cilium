@@ -6,8 +6,12 @@ package agent
 import (
 	"context"
 
+	"github.com/cilium/hive/cell"
+
 	"github.com/cilium/cilium/api/v1/models"
-	v2alpha1api "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
+	restapi "github.com/cilium/cilium/api/v1/server/restapi/bgp"
+	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
+	"github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2alpha1"
 )
 
 // BGPRouterManager provides a declarative API for defining
@@ -31,7 +35,11 @@ type BGPRouterManager interface {
 	//
 	// Providing a nil policy to ConfigurePeers will withdrawal all routes
 	// and disconnect from the peers.
-	ConfigurePeers(ctx context.Context, policy *v2alpha1api.CiliumBGPPeeringPolicy, state *ControlPlaneState) error
+	ConfigurePeers(ctx context.Context, policy *v2alpha1.CiliumBGPPeeringPolicy, ciliumNode *v2.CiliumNode) error
+
+	// ReconcileInstances evaluates the provided CiliumBGPNodeConfig
+	// and the implementation will configure itself to apply this configuration.
+	ReconcileInstances(ctx context.Context, bgpnc *v2.CiliumBGPNodeConfig, ciliumNode *v2.CiliumNode) error
 
 	// GetPeers fetches BGP peering state from underlying routing daemon.
 	//
@@ -39,4 +47,13 @@ type BGPRouterManager interface {
 	// BGP daemon running locally, then peers can be differentiated based on
 	// local AS number.
 	GetPeers(ctx context.Context) ([]*models.BgpPeer, error)
+
+	// GetRoutes fetches BGP routes from underlying routing daemon's RIBs.
+	GetRoutes(ctx context.Context, params restapi.GetBgpRoutesParams) ([]*models.BgpRoute, error)
+
+	// GetRoutePolicies fetches BGP routing policies from underlying routing daemon.
+	GetRoutePolicies(ctx context.Context, params restapi.GetBgpRoutePoliciesParams) ([]*models.BgpRoutePolicy, error)
+
+	// Stop will stop all BGP instances and clean up local state.
+	Stop(ctx cell.HookContext) error
 }

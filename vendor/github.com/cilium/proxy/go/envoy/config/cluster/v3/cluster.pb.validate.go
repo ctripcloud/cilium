@@ -89,6 +89,7 @@ func (m *ClusterCollection) validate(all bool) error {
 	if len(errors) > 0 {
 		return ClusterCollectionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -635,6 +636,36 @@ func (m *Cluster) validate(all bool) error {
 				err := ClusterValidationError{
 					field:  "DnsRefreshRate",
 					reason: "value must be greater than 1ms",
+				}
+				if !all {
+					return err
+				}
+				errors = append(errors, err)
+			}
+
+		}
+	}
+
+	if d := m.GetDnsJitter(); d != nil {
+		dur, err := d.AsDuration(), d.CheckValid()
+		if err != nil {
+			err = ClusterValidationError{
+				field:  "DnsJitter",
+				reason: "value is not a valid duration",
+				cause:  err,
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		} else {
+
+			gte := time.Duration(0*time.Second + 0*time.Nanosecond)
+
+			if dur < gte {
+				err := ClusterValidationError{
+					field:  "DnsJitter",
+					reason: "value must be greater than or equal to 0s",
 				}
 				if !all {
 					return err
@@ -1232,9 +1263,18 @@ func (m *Cluster) validate(all bool) error {
 
 	// no validation rules for ConnectionPoolPerDownstreamConnection
 
-	switch m.ClusterDiscoveryType.(type) {
-
+	switch v := m.ClusterDiscoveryType.(type) {
 	case *Cluster_Type:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "ClusterDiscoveryType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if _, ok := Cluster_DiscoveryType_name[int32(m.GetType())]; !ok {
 			err := ClusterValidationError{
@@ -1248,6 +1288,16 @@ func (m *Cluster) validate(all bool) error {
 		}
 
 	case *Cluster_ClusterType:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "ClusterDiscoveryType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetClusterType()).(type) {
@@ -1278,11 +1328,21 @@ func (m *Cluster) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
-
-	switch m.LbConfig.(type) {
-
+	switch v := m.LbConfig.(type) {
 	case *Cluster_RingHashLbConfig_:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "LbConfig",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetRingHashLbConfig()).(type) {
@@ -1314,6 +1374,16 @@ func (m *Cluster) validate(all bool) error {
 		}
 
 	case *Cluster_MaglevLbConfig_:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "LbConfig",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetMaglevLbConfig()).(type) {
@@ -1345,6 +1415,16 @@ func (m *Cluster) validate(all bool) error {
 		}
 
 	case *Cluster_OriginalDstLbConfig_:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "LbConfig",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetOriginalDstLbConfig()).(type) {
@@ -1376,6 +1456,16 @@ func (m *Cluster) validate(all bool) error {
 		}
 
 	case *Cluster_LeastRequestLbConfig_:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "LbConfig",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetLeastRequestLbConfig()).(type) {
@@ -1407,6 +1497,16 @@ func (m *Cluster) validate(all bool) error {
 		}
 
 	case *Cluster_RoundRobinLbConfig_:
+		if v == nil {
+			err := ClusterValidationError{
+				field:  "LbConfig",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetRoundRobinLbConfig()).(type) {
@@ -1437,11 +1537,14 @@ func (m *Cluster) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return ClusterMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1574,6 +1677,7 @@ func (m *LoadBalancingPolicy) validate(all bool) error {
 	if len(errors) > 0 {
 		return LoadBalancingPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1703,9 +1807,39 @@ func (m *UpstreamConnectionOptions) validate(all bool) error {
 
 	// no validation rules for SetLocalInterfaceNameOnUpstreamConnections
 
+	if all {
+		switch v := interface{}(m.GetHappyEyeballsConfig()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, UpstreamConnectionOptionsValidationError{
+					field:  "HappyEyeballsConfig",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, UpstreamConnectionOptionsValidationError{
+					field:  "HappyEyeballsConfig",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetHappyEyeballsConfig()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return UpstreamConnectionOptionsValidationError{
+				field:  "HappyEyeballsConfig",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
 	if len(errors) > 0 {
 		return UpstreamConnectionOptionsMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1808,9 +1942,12 @@ func (m *TrackClusterStats) validate(all bool) error {
 
 	// no validation rules for RequestResponseSizes
 
+	// no validation rules for PerEndpointStats
+
 	if len(errors) > 0 {
 		return TrackClusterStatsMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1981,6 +2118,7 @@ func (m *Cluster_TransportSocketMatch) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_TransportSocketMatchMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2123,6 +2261,7 @@ func (m *Cluster_CustomClusterType) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_CustomClusterTypeMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2255,6 +2394,7 @@ func (m *Cluster_EdsClusterConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_EdsClusterConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2449,6 +2589,7 @@ func (m *Cluster_LbSubsetConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_LbSubsetConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2637,6 +2778,7 @@ func (m *Cluster_SlowStartConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_SlowStartConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2767,6 +2909,7 @@ func (m *Cluster_RoundRobinLbConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_RoundRobinLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2941,6 +3084,7 @@ func (m *Cluster_LeastRequestLbConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_LeastRequestLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3084,6 +3228,7 @@ func (m *Cluster_RingHashLbConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_RingHashLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3200,6 +3345,7 @@ func (m *Cluster_MaglevLbConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_MaglevLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3317,9 +3463,39 @@ func (m *Cluster_OriginalDstLbConfig) validate(all bool) error {
 
 	}
 
+	if all {
+		switch v := interface{}(m.GetMetadataKey()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, Cluster_OriginalDstLbConfigValidationError{
+					field:  "MetadataKey",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, Cluster_OriginalDstLbConfigValidationError{
+					field:  "MetadataKey",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetMetadataKey()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return Cluster_OriginalDstLbConfigValidationError{
+				field:  "MetadataKey",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
 	if len(errors) > 0 {
 		return Cluster_OriginalDstLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3539,9 +3715,18 @@ func (m *Cluster_CommonLbConfig) validate(all bool) error {
 		}
 	}
 
-	switch m.LocalityConfigSpecifier.(type) {
-
+	switch v := m.LocalityConfigSpecifier.(type) {
 	case *Cluster_CommonLbConfig_ZoneAwareLbConfig_:
+		if v == nil {
+			err := Cluster_CommonLbConfigValidationError{
+				field:  "LocalityConfigSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetZoneAwareLbConfig()).(type) {
@@ -3573,6 +3758,16 @@ func (m *Cluster_CommonLbConfig) validate(all bool) error {
 		}
 
 	case *Cluster_CommonLbConfig_LocalityWeightedLbConfig_:
+		if v == nil {
+			err := Cluster_CommonLbConfigValidationError{
+				field:  "LocalityConfigSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetLocalityWeightedLbConfig()).(type) {
@@ -3603,11 +3798,14 @@ func (m *Cluster_CommonLbConfig) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return Cluster_CommonLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3780,6 +3978,7 @@ func (m *Cluster_RefreshRate) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_RefreshRateMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3911,6 +4110,7 @@ func (m *Cluster_PreconnectPolicy) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_PreconnectPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4027,6 +4227,7 @@ func (m *Cluster_LbSubsetConfig_LbSubsetSelector) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_LbSubsetConfig_LbSubsetSelectorMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4192,6 +4393,7 @@ func (m *Cluster_CommonLbConfig_ZoneAwareLbConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return Cluster_CommonLbConfig_ZoneAwareLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4297,6 +4499,7 @@ func (m *Cluster_CommonLbConfig_LocalityWeightedLbConfig) validate(all bool) err
 	if len(errors) > 0 {
 		return Cluster_CommonLbConfig_LocalityWeightedLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4424,6 +4627,7 @@ func (m *Cluster_CommonLbConfig_ConsistentHashingLbConfig) validate(all bool) er
 	if len(errors) > 0 {
 		return Cluster_CommonLbConfig_ConsistentHashingLbConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4563,6 +4767,7 @@ func (m *LoadBalancingPolicy_Policy) validate(all bool) error {
 	if len(errors) > 0 {
 		return LoadBalancingPolicy_PolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4638,3 +4843,129 @@ var _ interface {
 	Cause() error
 	ErrorName() string
 } = LoadBalancingPolicy_PolicyValidationError{}
+
+// Validate checks the field values on
+// UpstreamConnectionOptions_HappyEyeballsConfig with the rules defined in the
+// proto definition for this message. If any rules are violated, the first
+// error encountered is returned, or nil if there are no violations.
+func (m *UpstreamConnectionOptions_HappyEyeballsConfig) Validate() error {
+	return m.validate(false)
+}
+
+// ValidateAll checks the field values on
+// UpstreamConnectionOptions_HappyEyeballsConfig with the rules defined in the
+// proto definition for this message. If any rules are violated, the result is
+// a list of violation errors wrapped in
+// UpstreamConnectionOptions_HappyEyeballsConfigMultiError, or nil if none found.
+func (m *UpstreamConnectionOptions_HappyEyeballsConfig) ValidateAll() error {
+	return m.validate(true)
+}
+
+func (m *UpstreamConnectionOptions_HappyEyeballsConfig) validate(all bool) error {
+	if m == nil {
+		return nil
+	}
+
+	var errors []error
+
+	// no validation rules for FirstAddressFamilyVersion
+
+	if wrapper := m.GetFirstAddressFamilyCount(); wrapper != nil {
+
+		if wrapper.GetValue() < 1 {
+			err := UpstreamConnectionOptions_HappyEyeballsConfigValidationError{
+				field:  "FirstAddressFamilyCount",
+				reason: "value must be greater than or equal to 1",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
+
+	if len(errors) > 0 {
+		return UpstreamConnectionOptions_HappyEyeballsConfigMultiError(errors)
+	}
+
+	return nil
+}
+
+// UpstreamConnectionOptions_HappyEyeballsConfigMultiError is an error wrapping
+// multiple validation errors returned by
+// UpstreamConnectionOptions_HappyEyeballsConfig.ValidateAll() if the
+// designated constraints aren't met.
+type UpstreamConnectionOptions_HappyEyeballsConfigMultiError []error
+
+// Error returns a concatenation of all the error messages it wraps.
+func (m UpstreamConnectionOptions_HappyEyeballsConfigMultiError) Error() string {
+	var msgs []string
+	for _, err := range m {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// AllErrors returns a list of validation violation errors.
+func (m UpstreamConnectionOptions_HappyEyeballsConfigMultiError) AllErrors() []error { return m }
+
+// UpstreamConnectionOptions_HappyEyeballsConfigValidationError is the
+// validation error returned by
+// UpstreamConnectionOptions_HappyEyeballsConfig.Validate if the designated
+// constraints aren't met.
+type UpstreamConnectionOptions_HappyEyeballsConfigValidationError struct {
+	field  string
+	reason string
+	cause  error
+	key    bool
+}
+
+// Field function returns field value.
+func (e UpstreamConnectionOptions_HappyEyeballsConfigValidationError) Field() string { return e.field }
+
+// Reason function returns reason value.
+func (e UpstreamConnectionOptions_HappyEyeballsConfigValidationError) Reason() string {
+	return e.reason
+}
+
+// Cause function returns cause value.
+func (e UpstreamConnectionOptions_HappyEyeballsConfigValidationError) Cause() error { return e.cause }
+
+// Key function returns key value.
+func (e UpstreamConnectionOptions_HappyEyeballsConfigValidationError) Key() bool { return e.key }
+
+// ErrorName returns error name.
+func (e UpstreamConnectionOptions_HappyEyeballsConfigValidationError) ErrorName() string {
+	return "UpstreamConnectionOptions_HappyEyeballsConfigValidationError"
+}
+
+// Error satisfies the builtin error interface
+func (e UpstreamConnectionOptions_HappyEyeballsConfigValidationError) Error() string {
+	cause := ""
+	if e.cause != nil {
+		cause = fmt.Sprintf(" | caused by: %v", e.cause)
+	}
+
+	key := ""
+	if e.key {
+		key = "key for "
+	}
+
+	return fmt.Sprintf(
+		"invalid %sUpstreamConnectionOptions_HappyEyeballsConfig.%s: %s%s",
+		key,
+		e.field,
+		e.reason,
+		cause)
+}
+
+var _ error = UpstreamConnectionOptions_HappyEyeballsConfigValidationError{}
+
+var _ interface {
+	Field() string
+	Reason() string
+	Key() bool
+	Cause() error
+	ErrorName() string
+} = UpstreamConnectionOptions_HappyEyeballsConfigValidationError{}

@@ -4,28 +4,24 @@
 package identitygc
 
 import (
-	"context"
-	"errors"
 	"fmt"
-	"strconv"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/cilium/hive/cell"
+	"github.com/cilium/hive/hivetest"
 	"go.uber.org/goleak"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/tools/cache"
 
-	"github.com/cilium/cilium/operator/watchers"
-	"github.com/cilium/cilium/pkg/defaults"
+	authIdentity "github.com/cilium/cilium/operator/auth/identity"
+	"github.com/cilium/cilium/operator/auth/spire"
+	"github.com/cilium/cilium/operator/k8s"
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
-	"github.com/cilium/cilium/pkg/k8s"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/informer"
-	"github.com/cilium/cilium/pkg/k8s/utils"
+	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/option"
 )
 
@@ -38,13 +34,18 @@ func TestIdentitiesGC(t *testing.T) {
 	)
 
 	var clientset k8sClient.Clientset
+	var authIdentityClient authIdentity.Provider
 
 	hive := hive.New(
+		cell.Config(cmtypes.DefaultClusterInfo),
+		metrics.Metric(NewMetrics),
+
 		// provide a fake clientset
 		k8sClient.FakeClientCell,
-
+		// provide a fake spire client
+		spire.FakeCellClient,
 		// provide resources
-		k8s.SharedResourcesCell,
+		k8s.ResourcesCell,
 
 		// provide identities gc test configuration
 		cell.Provide(func() Config {
@@ -59,35 +60,36 @@ func TestIdentitiesGC(t *testing.T) {
 		cell.Provide(func() SharedConfig {
 			return SharedConfig{
 				IdentityAllocationMode: option.IdentityAllocationModeCRD,
-				EnableMetrics:          false,
-				ClusterName:            defaults.ClusterName,
-				K8sNamespace:           "",
-				ClusterID:              0,
 			}
 		}),
 
 		// initial setup for the test
-		cell.Invoke(func(c k8sClient.Clientset) error {
+		cell.Invoke(func(c k8sClient.Clientset, authClient authIdentity.Provider) error {
 			clientset = c
-			if err := setupK8sNodes(clientset); err != nil {
+			authIdentityClient = authClient
+			if err := setupK8sNodes(t, clientset); err != nil {
 				return err
 			}
-			if err := setupCiliumIdentities(clientset); err != nil {
+			if err := setupCiliumIdentities(t, clientset); err != nil {
 				return err
 			}
-			if err := setupCiliumEndpoint(clientset); err != nil {
+			if err := setupCiliumEndpoint(t, clientset); err != nil {
 				return err
 			}
+			if err := setupAuthIdentities(t, authIdentityClient); err != nil {
+				return err
+			}
+
 			return nil
 		}),
-		cell.Invoke(setupCiliumEndpointWatcher),
+
 		cell.Invoke(registerGC),
 	)
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
-	if err := hive.Start(ctx); err != nil {
+	tlog := hivetest.Logger(t)
+	if err := hive.Start(tlog, ctx); err != nil {
 		t.Fatalf("failed to start: %s", err)
 	}
 
@@ -95,7 +97,7 @@ func TestIdentitiesGC(t *testing.T) {
 		identities *v2.CiliumIdentityList
 		err        error
 	)
-	for retry := 0; retry < 10; retry++ {
+	for range 10 {
 		identities, err = clientset.CiliumV2().CiliumIdentities().List(
 			ctx,
 			metav1.ListOptions{
@@ -123,12 +125,25 @@ func TestIdentitiesGC(t *testing.T) {
 		t.Fatalf("expected Cilium identity \"99999\", got %q", identities.Items[0].Name)
 	}
 
-	if err := hive.Stop(ctx); err != nil {
+	authIdentities, err := authIdentityClient.List(ctx)
+	if err != nil {
+		t.Fatalf("unable to list Cilium Auth identities: %s", err)
+	}
+
+	if len(authIdentities) != 1 {
+		t.Fatalf("expected 1 Cilium Auth identity, got %d", len(authIdentities))
+	}
+
+	if authIdentities[0] != "99999" {
+		t.Fatalf("expected Cilium Auth identity \"99999\", got %q", authIdentities[0])
+	}
+
+	if err := hive.Stop(tlog, ctx); err != nil {
 		t.Fatalf("failed to stop: %s", err)
 	}
 }
 
-func setupK8sNodes(clientset k8sClient.Clientset) error {
+func setupK8sNodes(t *testing.T, clientset k8sClient.Clientset) error {
 	nodes := []*corev1.Node{
 		{
 			TypeMeta: metav1.TypeMeta{
@@ -153,14 +168,14 @@ func setupK8sNodes(clientset k8sClient.Clientset) error {
 	}
 	for _, node := range nodes {
 		if _, err := clientset.CoreV1().Nodes().
-			Create(context.Background(), node, metav1.CreateOptions{}); err != nil {
+			Create(t.Context(), node, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("failed to create node %v: %w", node, err)
 		}
 	}
 	return nil
 }
 
-func setupCiliumIdentities(clientset k8sClient.Clientset) error {
+func setupCiliumIdentities(t *testing.T, clientset k8sClient.Clientset) error {
 	identities := []*v2.CiliumIdentity{
 		{
 			TypeMeta: metav1.TypeMeta{
@@ -189,14 +204,24 @@ func setupCiliumIdentities(clientset k8sClient.Clientset) error {
 	}
 	for _, identity := range identities {
 		if _, err := clientset.CiliumV2().CiliumIdentities().
-			Create(context.Background(), identity, metav1.CreateOptions{}); err != nil {
+			Create(t.Context(), identity, metav1.CreateOptions{}); err != nil {
 			return fmt.Errorf("failed to create identity %v: %w", identity, err)
 		}
 	}
 	return nil
 }
 
-func setupCiliumEndpoint(clientset k8sClient.Clientset) error {
+func setupAuthIdentities(t *testing.T, client authIdentity.Provider) error {
+	if err := client.Upsert(t.Context(), "88888"); err != nil {
+		return err
+	}
+	if err := client.Upsert(t.Context(), "99999"); err != nil {
+		return err
+	}
+	return nil
+}
+
+func setupCiliumEndpoint(t *testing.T, clientset k8sClient.Clientset) error {
 	endpoint := &v2.CiliumEndpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "test-endpoint",
@@ -208,82 +233,8 @@ func setupCiliumEndpoint(clientset k8sClient.Clientset) error {
 		},
 	}
 	if _, err := clientset.CiliumV2().CiliumEndpoints("").
-		Create(context.Background(), endpoint, metav1.CreateOptions{}); err != nil {
+		Create(t.Context(), endpoint, metav1.CreateOptions{}); err != nil {
 		return fmt.Errorf("failed to create endpoint %v: %w", endpoint, err)
 	}
 	return nil
-}
-
-func setupCiliumEndpointWatcher(
-	lc hive.Lifecycle,
-	params params,
-) {
-	var wg sync.WaitGroup
-
-	lc.Append(hive.Hook{
-		OnStart: func(ctx hive.HookContext) error {
-			// identity gc internally depends on the global watchers.CiliumEndpointStore,
-			// so we have to create a mock one here (and run an informer) to get the gc
-			// to work properly.
-
-			watchers.CiliumEndpointStore = cache.NewIndexer(
-				cache.DeletionHandlingMetaNamespaceKeyFunc,
-				cache.Indexers{
-					cache.NamespaceIndex: cache.MetaNamespaceIndexFunc,
-					"identity": func(obj interface{}) ([]string, error) {
-						endpointObj, ok := obj.(*v2.CiliumEndpoint)
-						if !ok {
-							return nil, errors.New("failed to convert cilium endpoint")
-						}
-						identityID := "0"
-						if endpointObj.Status.Identity != nil {
-							identityID = strconv.FormatInt(endpointObj.Status.Identity.ID, 10)
-						}
-						return []string{identityID}, nil
-					},
-				},
-			)
-			ciliumEndpointInformer := informer.NewInformerWithStore(
-				utils.ListerWatcherFromTyped[*v2.CiliumEndpointList](params.Clientset.CiliumV2().CiliumEndpoints("")),
-				&v2.CiliumEndpoint{},
-				0,
-				cache.ResourceEventHandlerFuncs{},
-				func(obj interface{}) interface{} {
-					endpointObj, ok := obj.(*v2.CiliumEndpoint)
-					if !ok {
-						return errors.New("failed to convert cilium endpoint")
-					}
-					return &v2.CiliumEndpoint{
-						TypeMeta: endpointObj.TypeMeta,
-						ObjectMeta: metav1.ObjectMeta{
-							Name: endpointObj.Name,
-						},
-						Status: v2.EndpointStatus{
-							Identity: endpointObj.Status.Identity,
-						},
-					}
-				},
-				watchers.CiliumEndpointStore,
-			)
-
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				ciliumEndpointInformer.Run(ctx.Done())
-			}()
-			cache.WaitForCacheSync(ctx.Done(), ciliumEndpointInformer.HasSynced)
-			// signal that endpoints are sync-ed, otherwise identities gc won't start
-			close(watchers.CiliumEndpointsSynced)
-
-			return nil
-		},
-		OnStop: func(ctx hive.HookContext) error {
-			// force cleanup of goroutines run from initialization of watchers.nodeQueue
-			watchers.NodeQueueShutDown()
-			// wait for CiliumEndpointInformer goroutine to be cleaned up
-			wg.Wait()
-
-			return nil
-		},
-	})
 }

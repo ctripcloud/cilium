@@ -1,4 +1,4 @@
-name: BPF checks
+name: BPF Checks
 
 # Any change in triggers needs to be reflected in the concurrency group.
 on:
@@ -7,29 +7,33 @@ on:
     branches:
       - main
       - ft/main/**
+  merge_group:
+    types: [checks_requested]
 
 permissions: read-all
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.after }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.event.after || github.event.merge_group && github.run_id }}
+  cancel-in-progress: ${{ !github.event.merge_group }}
 
 jobs:
   check_changes:
     name: Deduce required tests from code changes
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       bpf-tree: ${{ steps.changes.outputs.bpf-tree }}
       coccinelle: ${{ steps.changes.outputs.coccinelle }}
       bpf-tests-runner: ${{ steps.changes.outputs.bpf-tests-runner }}
+      workflow-description: ${{ steps.changes.outputs.workflow-description }}
     steps:
       - name: Checkout code
         if: ${{ !github.event.pull_request }}
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Check code changes
-        uses: dorny/paths-filter@4512585405083f25c027a35db413c2b3b9006d50 # v2.11.1
+        uses: dorny/paths-filter@de90cc6fb38fc0963ad72b210f1f284cd68cea36 # v3.0.2
         id: changes
         with:
           # For `push` events, compare against the `ref` base branch
@@ -38,17 +42,24 @@ jobs:
           filters: |
             bpf-tree:
               - 'bpf/**'
+              - 'images/**'
+              - 'Makefile*'
+              - 'contrib/scripts/builder.sh'
+
             coccinelle:
               - 'contrib/coccinelle/**'
             bpf-tests-runner:
-              - 'test/bpf_tests/**'
+              - 'bpf/tests/bpftest/**'
+              - 'pkg/bpf/**'
+            workflow-description:
+              - '.github/workflows/lint-bpf-checks.yaml'
 
   checkpatch:
-    name: checkpatch
-    runs-on: ubuntu-latest
+    name: Check Patch
+    runs-on: ubuntu-24.04
     steps:
       - name: Checkout code
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -59,14 +70,16 @@ jobs:
   # Runs only if code under bpf/ or contrib/coccinnelle/ is changed.
   coccicheck:
     needs: check_changes
-    if: ${{ needs.check_changes.outputs.bpf-tree == 'true' || needs.check_changes.outputs.coccinelle == 'true' }}
-    name: coccicheck
-    runs-on: ubuntu-latest
+    if: ${{ needs.check_changes.outputs.bpf-tree == 'true' || needs.check_changes.outputs.coccinelle == 'true' || needs.check_changes.outputs.workflow-description == 'true' }}
+    name: Run coccicheck
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+      - name: Checkout code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: docker://cilium/coccicheck:2.4@sha256:24abe3fbb8e829fa41a68a3b76cb4df84fd5a87a7d1d6254c1c1fe5effb5bd1b
+      - name: Run coccicheck
+        uses: docker://cilium/coccicheck:2.4@sha256:24abe3fbb8e829fa41a68a3b76cb4df84fd5a87a7d1d6254c1c1fe5effb5bd1b
         with:
           entrypoint: ./contrib/coccinelle/check-cocci.sh
         # Note: Setting COCCINELLE_HOME can be removed, here and in the
@@ -76,46 +89,15 @@ jobs:
         env:
           COCCINELLE_HOME: /usr/local/lib/coccinelle
 
-  set_clang_dir:
-    name: Set clang directory
-    runs-on: ubuntu-latest
-    outputs:
-      clang_dir: ${{ steps.set_dir.outputs.clang_dir }}
-    steps:
-    - name: Set directory
-      id: set_dir
-      run: echo "clang_dir=$HOME/.clang" >> $GITHUB_OUTPUT
-
   # Runs only if code under bpf/ is changed.
   build_all:
-    needs: [check_changes, set_clang_dir]
-    if: ${{ needs.check_changes.outputs.bpf-tree == 'true' }}
-    name: build datapath
-    runs-on: ubuntu-22.04
+    needs: [check_changes]
+    if: ${{ needs.check_changes.outputs.bpf-tree == 'true' || needs.check_changes.outputs.workflow-description == 'true' }}
+    name: Build Datapath
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install Go
-        uses: actions/setup-go@4d34df0c2316fe8122ab82dc22947d607c0c91f9 # v4.0.0
-        with:
-          # renovate: datasource=golang-version depName=go
-          go-version: 1.20.3
-      - name: Cache LLVM and Clang
-        id: cache-llvm
-        uses: actions/cache@88522ab9f39a2ea568f7027eddc7d8d8bc9d59c8 # v3.3.1
-        with:
-          path: ${{ needs.set_clang_dir.outputs.clang_dir }}
-          key: llvm-10.0
-      - name: Install LLVM and Clang prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libtinfo5
-      - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@13d5d77cbf0bd7e35cb02a8f9ed4bb85bed3393b # v1.8.0
-        with:
-          version: "10.0"
-          directory: ${{ needs.set_clang_dir.outputs.clang_dir }}
-          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
       - name: Checkout code
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
           fetch-depth: 0
@@ -123,49 +105,46 @@ jobs:
         env:
           V: 0
         run: |
-          make --quiet -C bpf build_all || (echo "Run 'make -C bpf build_all' locally to investigate build breakages"; exit 1)
+          contrib/scripts/builder.sh make --quiet -C bpf build_all -j $(nproc) || (echo "Run 'make -C bpf build_all' locally to investigate build breakages"; exit 1)
 
   bpf_tests:
-    needs: [check_changes, set_clang_dir]
-    if: ${{ needs.check_changes.outputs.bpf-tree == 'true' || needs.check_changes.outputs.bpf-tests-runner == 'true' }}
+    needs: [check_changes]
+    if: ${{ needs.check_changes.outputs.bpf-tree == 'true' || needs.check_changes.outputs.bpf-tests-runner == 'true' || needs.check_changes.outputs.workflow-description == 'true' }}
     name: BPF unit/integration Tests
-    runs-on: ubuntu-22.04
+    env:
+      # GitHub doesn't provide a way to retrieve the name of a job, so we have
+      # to repeated it here.
+      job_name: "bpf_tests"
+    runs-on: ubuntu-24.04
     steps:
-      - name: Install Go
-        uses: actions/setup-go@4d34df0c2316fe8122ab82dc22947d607c0c91f9 # v4.0.0
-        with:
-          # renovate: datasource=golang-version depName=go
-          go-version: 1.20.3
-      - name: Cache LLVM and Clang
-        id: cache-llvm
-        uses: actions/cache@88522ab9f39a2ea568f7027eddc7d8d8bc9d59c8 # v3.3.1
-        with:
-          path: ${{ needs.set_clang_dir.outputs.clang_dir }}
-          key: llvm-10.0
-      - name: Install LLVM and Clang prerequisites
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libtinfo5
-      - name: Install LLVM and Clang
-        uses: KyleMayes/install-llvm-action@13d5d77cbf0bd7e35cb02a8f9ed4bb85bed3393b # v1.8.0
-        with:
-          version: "10.0"
-          directory: ${{ needs.set_clang_dir.outputs.clang_dir }}
-          cached: ${{ steps.cache-llvm.outputs.cache-hit }}
       - name: Checkout code
-        uses: actions/checkout@8e5e7e5ab8b370d6c329ec480221332ada57f0ab # v3.5.2
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Run BPF tests with code coverage reporting
-        env:
-          # Disable coverage report for these test cases since they are hitting
-          # https://github.com/cilium/coverbee/issues/7
-          NOCOVER_PATTERN: "inter_cluster_snat_clusterip.*|session_affinity_test.o|tc_egressgw_redirect.o|tc_egressgw_snat.o|tc_nodeport_lb4_dsr_backend.o|tc_nodeport_lb4_dsr_lb.o|tc_nodeport_lb4_nat_backend.o|tc_nodeport_lb4_nat_lb.o|xdp_nodeport_lb4_dsr_lb.o|xdp_nodeport_lb4_nat_backend.o|xdp_nodeport_lb4_nat_lb.o|xdp_nodeport_lb4_test.o|bpf_nat_tests.o"
+      - name: Run BPF tests
         run: |
-          make -C test run_bpf_tests COVER=1 NOCOVER="$NOCOVER_PATTERN" || (echo "Run 'make -C test run_bpf_tests COVER=1 NOCOVER=\"$NOCOVER_PATTERN\"' locally to investigate failures"; exit 1)
-      - name: Archive code coverage results
-        uses: actions/upload-artifact@0b7f8abb1508181956e8e162db84b466c27e18ce # v3.1.2
+          make run_bpf_tests \
+              LOG_CODEOWNERS=1 \
+              JUNIT_PATH="../../test/${{ env.job_name }}.xml" \
+          || (echo "Run 'make run_bpf_tests' locally to investigate failures"; exit 1)
+      - name: Fetch JUnits
+        shell: bash
+        run: |
+          mkdir -p cilium-junits
+          cd test/
+          # junit_filename needs to be the same as the Job Name presented on the
+          # GH web UI - In the Summary page of a workflow run, left column
+          # "Jobs" - so that we can map the junit file to the right job - step
+          # pair on datastudio.
+          junit_filename="${{ env.job_name }}.xml"
+          for filename in *.xml; do cp "${filename}" "../cilium-junits/${junit_filename}"; done;
+      - name: Upload JUnits [junit]
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: bpf-code-coverage-report
-          path: bpf-coverage.html
+          name: cilium-junits
+          path: cilium-junits/*.xml
+      - name: Publish Test Results As GitHub Summary
+        uses: aanm/junit2md@332ebf0fddd34e91b03a832cfafaa826306558f9 # v0.0.3
+        with:
+          junit-directory: "cilium-junits"

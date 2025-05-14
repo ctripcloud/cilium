@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __BPF_BUILTINS__
-#define __BPF_BUILTINS__
+#pragma once
 
 #include "compiler.h"
 
@@ -44,24 +43,28 @@ __bpf_memset_builtin(void *d, __u8 c, __u64 len)
 
 static __always_inline void __bpf_memzero(void *d, __u64 len)
 {
-#if __clang_major__ >= 10
 	if (!__builtin_constant_p(len))
 		__throw_build_bug();
 
 	d += len;
 
+	if (len > 1 && len % 2 == 1) {
+		__it_set(d, 8);
+		len -= 1;
+	}
+
 	switch (len) {
-	case 96:         __it_set(d, 64);
-	case 88: jmp_88: __it_set(d, 64);
-	case 80: jmp_80: __it_set(d, 64);
-	case 72: jmp_72: __it_set(d, 64);
-	case 64: jmp_64: __it_set(d, 64);
-	case 56: jmp_56: __it_set(d, 64);
-	case 48: jmp_48: __it_set(d, 64);
-	case 40: jmp_40: __it_set(d, 64);
-	case 32: jmp_32: __it_set(d, 64);
-	case 24: jmp_24: __it_set(d, 64);
-	case 16: jmp_16: __it_set(d, 64);
+	case 96:         __it_set(d, 64); fallthrough;
+	case 88: jmp_88: __it_set(d, 64); fallthrough;
+	case 80: jmp_80: __it_set(d, 64); fallthrough;
+	case 72: jmp_72: __it_set(d, 64); fallthrough;
+	case 64: jmp_64: __it_set(d, 64); fallthrough;
+	case 56: jmp_56: __it_set(d, 64); fallthrough;
+	case 48: jmp_48: __it_set(d, 64); fallthrough;
+	case 40: jmp_40: __it_set(d, 64); fallthrough;
+	case 32: jmp_32: __it_set(d, 64); fallthrough;
+	case 24: jmp_24: __it_set(d, 64); fallthrough;
+	case 16: jmp_16: __it_set(d, 64); fallthrough;
 	case  8: jmp_8:  __it_set(d, 64);
 		break;
 
@@ -118,9 +121,6 @@ static __always_inline void __bpf_memzero(void *d, __u64 len)
 		 */
 		__throw_build_bug();
 	}
-#else
-	__bpf_memset_builtin(d, 0, len);
-#endif
 }
 
 static __always_inline __maybe_unused void
@@ -151,7 +151,6 @@ __bpf_memcpy_builtin(void *d, const void *s, __u64 len)
 
 static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 {
-#if __clang_major__ >= 10
 	if (!__builtin_constant_p(len))
 		__throw_build_bug();
 
@@ -164,17 +163,17 @@ static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 	}
 
 	switch (len) {
-	case 96:         __it_mob(d, s, 64);
-	case 88: jmp_88: __it_mob(d, s, 64);
-	case 80: jmp_80: __it_mob(d, s, 64);
-	case 72: jmp_72: __it_mob(d, s, 64);
-	case 64: jmp_64: __it_mob(d, s, 64);
-	case 56: jmp_56: __it_mob(d, s, 64);
-	case 48: jmp_48: __it_mob(d, s, 64);
-	case 40: jmp_40: __it_mob(d, s, 64);
-	case 32: jmp_32: __it_mob(d, s, 64);
-	case 24: jmp_24: __it_mob(d, s, 64);
-	case 16: jmp_16: __it_mob(d, s, 64);
+	case 96:         __it_mob(d, s, 64); fallthrough;
+	case 88: jmp_88: __it_mob(d, s, 64); fallthrough;
+	case 80: jmp_80: __it_mob(d, s, 64); fallthrough;
+	case 72: jmp_72: __it_mob(d, s, 64); fallthrough;
+	case 64: jmp_64: __it_mob(d, s, 64); fallthrough;
+	case 56: jmp_56: __it_mob(d, s, 64); fallthrough;
+	case 48: jmp_48: __it_mob(d, s, 64); fallthrough;
+	case 40: jmp_40: __it_mob(d, s, 64); fallthrough;
+	case 32: jmp_32: __it_mob(d, s, 64); fallthrough;
+	case 24: jmp_24: __it_mob(d, s, 64); fallthrough;
+	case 16: jmp_16: __it_mob(d, s, 64); fallthrough;
 	case  8: jmp_8:  __it_mob(d, s, 64);
 		break;
 
@@ -231,9 +230,6 @@ static __always_inline void __bpf_memcpy(void *d, const void *s, __u64 len)
 		 */
 		__throw_build_bug();
 	}
-#else
-	__bpf_memcpy_builtin(d, s, len);
-#endif
 }
 
 static __always_inline __maybe_unused void
@@ -270,7 +266,6 @@ __bpf_memcmp_builtin(const void *x, const void *y, __u64 len)
 static __always_inline __u64 __bpf_memcmp(const void *x, const void *y,
 					  __u64 len)
 {
-#if __clang_major__ >= 10
 	__u64 r = 0;
 
 	if (!__builtin_constant_p(len))
@@ -285,14 +280,14 @@ static __always_inline __u64 __bpf_memcmp(const void *x, const void *y,
 	}
 
 	switch (len) {
-	case 72:         __it_xor(x, y, r, 64);
-	case 64: jmp_64: __it_xor(x, y, r, 64);
-	case 56: jmp_56: __it_xor(x, y, r, 64);
-	case 48: jmp_48: __it_xor(x, y, r, 64);
-	case 40: jmp_40: __it_xor(x, y, r, 64);
-	case 32: jmp_32: __it_xor(x, y, r, 64);
-	case 24: jmp_24: __it_xor(x, y, r, 64);
-	case 16: jmp_16: __it_xor(x, y, r, 64);
+	case 72:         __it_xor(x, y, r, 64); fallthrough;
+	case 64: jmp_64: __it_xor(x, y, r, 64); fallthrough;
+	case 56: jmp_56: __it_xor(x, y, r, 64); fallthrough;
+	case 48: jmp_48: __it_xor(x, y, r, 64); fallthrough;
+	case 40: jmp_40: __it_xor(x, y, r, 64); fallthrough;
+	case 32: jmp_32: __it_xor(x, y, r, 64); fallthrough;
+	case 24: jmp_24: __it_xor(x, y, r, 64); fallthrough;
+	case 16: jmp_16: __it_xor(x, y, r, 64); fallthrough;
 	case  8: jmp_8:  __it_xor(x, y, r, 64);
 		break;
 
@@ -337,9 +332,6 @@ static __always_inline __u64 __bpf_memcmp(const void *x, const void *y,
 	}
 
 	return r;
-#else
-	return __bpf_memcmp_builtin(x, y, len);
-#endif
 }
 
 static __always_inline __maybe_unused __u64
@@ -378,22 +370,21 @@ static __always_inline void __bpf_memmove_bwd(void *d, const void *s, __u64 len)
 
 static __always_inline void __bpf_memmove_fwd(void *d, const void *s, __u64 len)
 {
-#if __clang_major__ >= 10
 	if (!__builtin_constant_p(len))
 		__throw_build_bug();
 
 	switch (len) {
-	case 96:         __it_mof(d, s, 64);
-	case 88: jmp_88: __it_mof(d, s, 64);
-	case 80: jmp_80: __it_mof(d, s, 64);
-	case 72: jmp_72: __it_mof(d, s, 64);
-	case 64: jmp_64: __it_mof(d, s, 64);
-	case 56: jmp_56: __it_mof(d, s, 64);
-	case 48: jmp_48: __it_mof(d, s, 64);
-	case 40: jmp_40: __it_mof(d, s, 64);
-	case 32: jmp_32: __it_mof(d, s, 64);
-	case 24: jmp_24: __it_mof(d, s, 64);
-	case 16: jmp_16: __it_mof(d, s, 64);
+	case 96:         __it_mof(d, s, 64); fallthrough;
+	case 88: jmp_88: __it_mof(d, s, 64); fallthrough;
+	case 80: jmp_80: __it_mof(d, s, 64); fallthrough;
+	case 72: jmp_72: __it_mof(d, s, 64); fallthrough;
+	case 64: jmp_64: __it_mof(d, s, 64); fallthrough;
+	case 56: jmp_56: __it_mof(d, s, 64); fallthrough;
+	case 48: jmp_48: __it_mof(d, s, 64); fallthrough;
+	case 40: jmp_40: __it_mof(d, s, 64); fallthrough;
+	case 32: jmp_32: __it_mof(d, s, 64); fallthrough;
+	case 24: jmp_24: __it_mof(d, s, 64); fallthrough;
+	case 16: jmp_16: __it_mof(d, s, 64); fallthrough;
 	case  8: jmp_8:  __it_mof(d, s, 64);
 		break;
 
@@ -450,9 +441,6 @@ static __always_inline void __bpf_memmove_fwd(void *d, const void *s, __u64 len)
 		 */
 		__throw_build_bug();
 	}
-#else
-	__bpf_memmove_builtin(d, s, len);
-#endif
 }
 
 static __always_inline __maybe_unused void
@@ -488,5 +476,3 @@ static __always_inline __nobuiltin("memmove") void memmove(void *d,
 {
 	return __bpf_memmove(d, s, len);
 }
-
-#endif /* __BPF_BUILTINS__ */

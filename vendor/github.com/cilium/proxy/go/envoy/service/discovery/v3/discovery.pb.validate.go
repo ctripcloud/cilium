@@ -64,6 +64,7 @@ func (m *ResourceLocator) validate(all bool) error {
 	if len(errors) > 0 {
 		return ResourceLocatorMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -194,6 +195,7 @@ func (m *ResourceName) validate(all bool) error {
 	if len(errors) > 0 {
 		return ResourceNameMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -266,6 +268,164 @@ var _ interface {
 	Cause() error
 	ErrorName() string
 } = ResourceNameValidationError{}
+
+// Validate checks the field values on ResourceError with the rules defined in
+// the proto definition for this message. If any rules are violated, the first
+// error encountered is returned, or nil if there are no violations.
+func (m *ResourceError) Validate() error {
+	return m.validate(false)
+}
+
+// ValidateAll checks the field values on ResourceError with the rules defined
+// in the proto definition for this message. If any rules are violated, the
+// result is a list of violation errors wrapped in ResourceErrorMultiError, or
+// nil if none found.
+func (m *ResourceError) ValidateAll() error {
+	return m.validate(true)
+}
+
+func (m *ResourceError) validate(all bool) error {
+	if m == nil {
+		return nil
+	}
+
+	var errors []error
+
+	if all {
+		switch v := interface{}(m.GetResourceName()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, ResourceErrorValidationError{
+					field:  "ResourceName",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, ResourceErrorValidationError{
+					field:  "ResourceName",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetResourceName()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return ResourceErrorValidationError{
+				field:  "ResourceName",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
+	if all {
+		switch v := interface{}(m.GetErrorDetail()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, ResourceErrorValidationError{
+					field:  "ErrorDetail",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, ResourceErrorValidationError{
+					field:  "ErrorDetail",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetErrorDetail()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return ResourceErrorValidationError{
+				field:  "ErrorDetail",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		return ResourceErrorMultiError(errors)
+	}
+
+	return nil
+}
+
+// ResourceErrorMultiError is an error wrapping multiple validation errors
+// returned by ResourceError.ValidateAll() if the designated constraints
+// aren't met.
+type ResourceErrorMultiError []error
+
+// Error returns a concatenation of all the error messages it wraps.
+func (m ResourceErrorMultiError) Error() string {
+	var msgs []string
+	for _, err := range m {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// AllErrors returns a list of validation violation errors.
+func (m ResourceErrorMultiError) AllErrors() []error { return m }
+
+// ResourceErrorValidationError is the validation error returned by
+// ResourceError.Validate if the designated constraints aren't met.
+type ResourceErrorValidationError struct {
+	field  string
+	reason string
+	cause  error
+	key    bool
+}
+
+// Field function returns field value.
+func (e ResourceErrorValidationError) Field() string { return e.field }
+
+// Reason function returns reason value.
+func (e ResourceErrorValidationError) Reason() string { return e.reason }
+
+// Cause function returns cause value.
+func (e ResourceErrorValidationError) Cause() error { return e.cause }
+
+// Key function returns key value.
+func (e ResourceErrorValidationError) Key() bool { return e.key }
+
+// ErrorName returns error name.
+func (e ResourceErrorValidationError) ErrorName() string { return "ResourceErrorValidationError" }
+
+// Error satisfies the builtin error interface
+func (e ResourceErrorValidationError) Error() string {
+	cause := ""
+	if e.cause != nil {
+		cause = fmt.Sprintf(" | caused by: %v", e.cause)
+	}
+
+	key := ""
+	if e.key {
+		key = "key for "
+	}
+
+	return fmt.Sprintf(
+		"invalid %sResourceError.%s: %s%s",
+		key,
+		e.field,
+		e.reason,
+		cause)
+}
+
+var _ error = ResourceErrorValidationError{}
+
+var _ interface {
+	Field() string
+	Reason() string
+	Key() bool
+	Cause() error
+	ErrorName() string
+} = ResourceErrorValidationError{}
 
 // Validate checks the field values on DiscoveryRequest with the rules defined
 // in the proto definition for this message. If any rules are violated, the
@@ -390,6 +550,7 @@ func (m *DiscoveryRequest) validate(all bool) error {
 	if len(errors) > 0 {
 		return DiscoveryRequestMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -557,9 +718,44 @@ func (m *DiscoveryResponse) validate(all bool) error {
 		}
 	}
 
+	for idx, item := range m.GetResourceErrors() {
+		_, _ = idx, item
+
+		if all {
+			switch v := interface{}(item).(type) {
+			case interface{ ValidateAll() error }:
+				if err := v.ValidateAll(); err != nil {
+					errors = append(errors, DiscoveryResponseValidationError{
+						field:  fmt.Sprintf("ResourceErrors[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			case interface{ Validate() error }:
+				if err := v.Validate(); err != nil {
+					errors = append(errors, DiscoveryResponseValidationError{
+						field:  fmt.Sprintf("ResourceErrors[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			}
+		} else if v, ok := interface{}(item).(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return DiscoveryResponseValidationError{
+					field:  fmt.Sprintf("ResourceErrors[%v]", idx),
+					reason: "embedded message failed validation",
+					cause:  err,
+				}
+			}
+		}
+
+	}
+
 	if len(errors) > 0 {
 		return DiscoveryResponseMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -793,6 +989,7 @@ func (m *DeltaDiscoveryRequest) validate(all bool) error {
 	if len(errors) > 0 {
 		return DeltaDiscoveryRequestMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -994,9 +1191,44 @@ func (m *DeltaDiscoveryResponse) validate(all bool) error {
 		}
 	}
 
+	for idx, item := range m.GetResourceErrors() {
+		_, _ = idx, item
+
+		if all {
+			switch v := interface{}(item).(type) {
+			case interface{ ValidateAll() error }:
+				if err := v.ValidateAll(); err != nil {
+					errors = append(errors, DeltaDiscoveryResponseValidationError{
+						field:  fmt.Sprintf("ResourceErrors[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			case interface{ Validate() error }:
+				if err := v.Validate(); err != nil {
+					errors = append(errors, DeltaDiscoveryResponseValidationError{
+						field:  fmt.Sprintf("ResourceErrors[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			}
+		} else if v, ok := interface{}(item).(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return DeltaDiscoveryResponseValidationError{
+					field:  fmt.Sprintf("ResourceErrors[%v]", idx),
+					reason: "embedded message failed validation",
+					cause:  err,
+				}
+			}
+		}
+
+	}
+
 	if len(errors) > 0 {
 		return DeltaDiscoveryResponseMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1095,9 +1327,18 @@ func (m *DynamicParameterConstraints) validate(all bool) error {
 
 	var errors []error
 
-	switch m.Type.(type) {
-
+	switch v := m.Type.(type) {
 	case *DynamicParameterConstraints_Constraint:
+		if v == nil {
+			err := DynamicParameterConstraintsValidationError{
+				field:  "Type",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetConstraint()).(type) {
@@ -1129,6 +1370,16 @@ func (m *DynamicParameterConstraints) validate(all bool) error {
 		}
 
 	case *DynamicParameterConstraints_OrConstraints:
+		if v == nil {
+			err := DynamicParameterConstraintsValidationError{
+				field:  "Type",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetOrConstraints()).(type) {
@@ -1160,6 +1411,16 @@ func (m *DynamicParameterConstraints) validate(all bool) error {
 		}
 
 	case *DynamicParameterConstraints_AndConstraints:
+		if v == nil {
+			err := DynamicParameterConstraintsValidationError{
+				field:  "Type",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetAndConstraints()).(type) {
@@ -1191,6 +1452,16 @@ func (m *DynamicParameterConstraints) validate(all bool) error {
 		}
 
 	case *DynamicParameterConstraints_NotConstraints:
+		if v == nil {
+			err := DynamicParameterConstraintsValidationError{
+				field:  "Type",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetNotConstraints()).(type) {
@@ -1221,11 +1492,14 @@ func (m *DynamicParameterConstraints) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return DynamicParameterConstraintsMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1477,6 +1751,7 @@ func (m *Resource) validate(all bool) error {
 	if len(errors) > 0 {
 		return ResourceMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1576,12 +1851,33 @@ func (m *DynamicParameterConstraints_SingleConstraint) validate(all bool) error 
 
 	// no validation rules for Key
 
-	switch m.ConstraintType.(type) {
-
+	oneofConstraintTypePresent := false
+	switch v := m.ConstraintType.(type) {
 	case *DynamicParameterConstraints_SingleConstraint_Value:
+		if v == nil {
+			err := DynamicParameterConstraints_SingleConstraintValidationError{
+				field:  "ConstraintType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofConstraintTypePresent = true
 		// no validation rules for Value
-
 	case *DynamicParameterConstraints_SingleConstraint_Exists_:
+		if v == nil {
+			err := DynamicParameterConstraints_SingleConstraintValidationError{
+				field:  "ConstraintType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofConstraintTypePresent = true
 
 		if all {
 			switch v := interface{}(m.GetExists()).(type) {
@@ -1613,6 +1909,9 @@ func (m *DynamicParameterConstraints_SingleConstraint) validate(all bool) error 
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofConstraintTypePresent {
 		err := DynamicParameterConstraints_SingleConstraintValidationError{
 			field:  "ConstraintType",
 			reason: "value is required",
@@ -1621,12 +1920,12 @@ func (m *DynamicParameterConstraints_SingleConstraint) validate(all bool) error 
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
 		return DynamicParameterConstraints_SingleConstraintMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1767,6 +2066,7 @@ func (m *DynamicParameterConstraints_ConstraintList) validate(all bool) error {
 	if len(errors) > 0 {
 		return DynamicParameterConstraints_ConstraintListMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1873,6 +2173,7 @@ func (m *DynamicParameterConstraints_SingleConstraint_Exists) validate(all bool)
 	if len(errors) > 0 {
 		return DynamicParameterConstraints_SingleConstraint_ExistsMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1985,6 +2286,7 @@ func (m *Resource_CacheControl) validate(all bool) error {
 	if len(errors) > 0 {
 		return Resource_CacheControlMultiError(errors)
 	}
+
 	return nil
 }
 

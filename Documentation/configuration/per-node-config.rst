@@ -10,8 +10,6 @@
 Per-node configuration
 **********************
 
-.. include:: ../beta.rst
-
 The Cilium agent process (a.k.a. DaemonSet) supports setting configuration
 on a per-node basis. This allows overriding :ref:`cilium-config-configmap`
 for a node or set of nodes. It is managed by CiliumNodeConfig objects.
@@ -45,7 +43,7 @@ hardware, one would label the relevant nodes and override their configuration.
 
 .. code-block:: yaml
 
-    apiVersion: cilium.io/v2alpha1
+    apiVersion: cilium.io/v2
     kind: CiliumNodeConfig
     metadata:
       namespace: kube-system
@@ -62,12 +60,12 @@ Example: KubeProxyReplacement Rollout
 
 To roll out :ref:`kube-proxy replacement <kubeproxy-free>` in a gradual manner,
 you may also wish to use the CiliumNodeConfig feature. This will label all migrated
-nodes with ``io.cilium.migration/kube-proxy-replacement: strict``
+nodes with ``io.cilium.migration/kube-proxy-replacement: true``
 
 .. warning::
 
     You must have installed Cilium with the Helm values ``k8sServiceHost`` and
-    ``k8sServicePort``. Otherwise Cilium will not be able to reach the Kubernetes
+    ``k8sServicePort``. Otherwise, Cilium will not be able to reach the Kubernetes
     APIServer after kube-proxy is uninstalled.
 
     You can apply these two values to a running cluster via ``helm upgrade``.
@@ -76,25 +74,25 @@ nodes with ``io.cilium.migration/kube-proxy-replacement: strict``
 
     .. code-block:: shell-session
 
-        kubectl -n kube-system patch daemonset kube-proxy --patch '{"spec": {"template": {"spec": {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "io.cilium.migration/kube-proxy-replacement", "operator": "NotIn", "values": ["strict"]}]}]}}}}}}}'
+        kubectl -n kube-system patch daemonset kube-proxy --patch '{"spec": {"template": {"spec": {"affinity": {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [{"key": "io.cilium.migration/kube-proxy-replacement", "operator": "NotIn", "values": ["true"]}]}]}}}}}}}'
 
-#. Configure Cilium to use strict kube-proxy on migrated nodes
+#. Configure Cilium to use kube-proxy replacement on migrated nodes
 
     .. code-block:: shell-session
 
         cat <<EOF | kubectl apply --server-side -f -
-        apiVersion: cilium.io/v2alpha1
+        apiVersion: cilium.io/v2
         kind: CiliumNodeConfig
         metadata:
           namespace: kube-system
-          name: kube-proxy-replacement-strict
+          name: kube-proxy-replacement
         spec:
           nodeSelector:
             matchLabels:
-              io.cilium.migration/kube-proxy-replacement: strict
+              io.cilium.migration/kube-proxy-replacement: "true"
           defaults:
-            kube-proxy-replacement: strict
-            kube-proxy-replacement-healthz-bind-address: "0.0.0.0:10256"
+            kube-proxy-replacement: "true"
+            kube-proxy-replacement-healthz-bind-address: "'0.0.0.0:10256'"
 
         EOF
 
@@ -103,7 +101,7 @@ nodes with ``io.cilium.migration/kube-proxy-replacement: strict``
     .. code-block:: shell-session
 
         export NODE=kind-worker
-        kubectl label node $NODE --overwrite 'io.cilium.migration/kube-proxy-replacement=strict'
+        kubectl label node $NODE --overwrite 'io.cilium.migration/kube-proxy-replacement=true'
         kubectl cordon $NODE
 
 #. Delete Cilium DaemonSet to reload configuration:
@@ -118,7 +116,7 @@ nodes with ``io.cilium.migration/kube-proxy-replacement: strict``
 
         kubectl -n kube-system exec $(kubectl -n kube-system get pod -l k8s-app=cilium --field-selector spec.nodeName=$NODE -o name) -c cilium-agent -- \
             cilium config get kube-proxy-replacement
-        strict
+        true
 
 #. Uncordon node
 
@@ -130,9 +128,9 @@ nodes with ``io.cilium.migration/kube-proxy-replacement: strict``
 
     .. code-block:: shell-session
 
-        cilium config set --restart=false kube-proxy-replacement strict
-        cilium config set --restart=false kube-proxy-replacement-healthz-bind-address "0.0.0.0:10256"
-        kubectl -n kube-system delete ciliumnodeconfig kube-proxy-replacement-strict
+        cilium config set --restart=false kube-proxy-replacement true
+        cilium config set --restart=false kube-proxy-replacement-healthz-bind-address '0.0.0.0:10256'
+        kubectl -n kube-system delete ciliumnodeconfig kube-proxy-replacement
 
 #. Cleanup: delete kube-proxy daemonset, unlabel nodes
 

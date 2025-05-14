@@ -24,9 +24,11 @@ import (
 
 	apiserverOption "github.com/cilium/cilium/clustermesh-apiserver/option"
 	operatorOption "github.com/cilium/cilium/operator/option"
+	"github.com/cilium/cilium/pkg/cmdref"
 	"github.com/cilium/cilium/pkg/components"
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/safeio"
 )
 
 // BugtoolRootCmd is the top level command for the bugtool.
@@ -59,84 +61,69 @@ for sensitive information.
 	defaultDumpPath = "/tmp"
 )
 
+// ExtraCommandsFunc represents a function that builds and returns a list of extra commands
+// to gather additional information in specific environments.
+//
+// confDir is the directory where the output of "config commands" (e.g: "uname -r") is stored.
+// cmdDir is the directory where the output of "info commands" (e.g: "cilium-dbg debuginfo",
+// "cilium-dbg metrics list" and pprof traces) is stored.
+//
+// It returns a slice of strings with all the commands to be executed.
+type ExtraCommandsFunc func(confDir string, cmdDir string) []string
+
+// ExtraCommands is a slice of ExtraCommandsFunc each of which generates a list of additional
+// commands to be executed alongside the default ones.
+var ExtraCommands []ExtraCommandsFunc
+
 var (
-	archive                  bool
-	archiveType              string
-	k8s                      bool
-	dumpPath                 string
-	host                     string
-	k8sNamespace             string
-	k8sLabel                 string
-	execTimeout              time.Duration
-	configPath               string
-	dryRunMode               bool
-	enableMarkdown           bool
-	archivePrefix            string
-	getPProf                 bool
-	pprofDebug               int
-	envoyDump                bool
-	envoyMetrics             bool
-	pprofPort                int
-	traceSeconds             int
-	parallelWorkers          int
-	ciliumAgentContainerName string
-	excludeObjectFiles       bool
+	archive            bool
+	archiveType        string
+	dumpPath           string
+	host               string
+	execTimeout        time.Duration
+	configPath         string
+	dryRunMode         bool
+	enableMarkdown     bool
+	archivePrefix      string
+	getPProf           bool
+	pprofDebug         int
+	envoyDump          bool
+	envoyMetrics       bool
+	pprofPort          int
+	traceSeconds       int
+	parallelWorkers    int
+	excludeObjectFiles bool
+	hubbleMetrics      bool
+	hubbleMetricsPort  int
 )
 
 func init() {
 	BugtoolRootCmd.Flags().BoolVar(&archive, "archive", true, "Create archive when false skips deletion of the output directory")
 	BugtoolRootCmd.Flags().BoolVar(&getPProf, "get-pprof", false, "When set, only gets the pprof traces from the cilium-agent binary")
-	BugtoolRootCmd.Flags().IntVar(&pprofDebug, "pprof-debug", 1, "Debug pprof args")
+	BugtoolRootCmd.Flags().IntVar(&pprofDebug, "pprof-debug", 0, "Debug pprof args")
 	BugtoolRootCmd.Flags().BoolVar(&envoyDump, "envoy-dump", true, "When set, dump envoy configuration from unix socket")
 	BugtoolRootCmd.Flags().BoolVar(&envoyMetrics, "envoy-metrics", true, "When set, dump envoy prometheus metrics from unix socket")
 	BugtoolRootCmd.Flags().IntVar(&pprofPort,
 		"pprof-port", option.PprofPortAgent,
 		fmt.Sprintf(
 			"Pprof port to connect to. Known Cilium component ports are agent:%d, operator:%d, apiserver:%d",
-			option.PprofPortAgent, operatorOption.PprofPortOperator, apiserverOption.PprofPortAPIServer,
+			option.PprofPortAgent, operatorOption.PprofPortOperator, apiserverOption.PprofPortClusterMesh,
 		),
 	)
 	BugtoolRootCmd.Flags().IntVar(&traceSeconds, "pprof-trace-seconds", 180, "Amount of seconds used for pprof CPU traces")
 	BugtoolRootCmd.Flags().StringVarP(&archiveType, "archiveType", "o", "tar", "Archive type: tar | gz")
-	BugtoolRootCmd.Flags().BoolVar(&k8s, "k8s-mode", false, "Require Kubernetes pods to be found or fail")
 	BugtoolRootCmd.Flags().BoolVar(&dryRunMode, "dry-run", false, "Create configuration file of all commands that would have been executed")
 	BugtoolRootCmd.Flags().StringVarP(&dumpPath, "tmp", "t", defaultDumpPath, "Path to store extracted files. Use '-' to send to stdout.")
 	BugtoolRootCmd.Flags().StringVarP(&host, "host", "H", "", "URI to server-side API")
-	BugtoolRootCmd.Flags().StringVarP(&k8sNamespace, "k8s-namespace", "", "kube-system", "Kubernetes namespace for Cilium pod")
-	BugtoolRootCmd.Flags().StringVarP(&k8sLabel, "k8s-label", "", "k8s-app=cilium", "Kubernetes label for Cilium pod")
 	BugtoolRootCmd.Flags().DurationVarP(&execTimeout, "exec-timeout", "", 30*time.Second, "The default timeout for any cmd execution in seconds")
 	BugtoolRootCmd.Flags().StringVarP(&configPath, "config", "", "./.cilium-bugtool.config", "Configuration to decide what should be run")
 	BugtoolRootCmd.Flags().BoolVar(&enableMarkdown, "enable-markdown", false, "Dump output of commands in markdown format")
 	BugtoolRootCmd.Flags().StringVarP(&archivePrefix, "archive-prefix", "", "", "String to prefix to name of archive if created (e.g., with cilium pod-name)")
 	BugtoolRootCmd.Flags().IntVar(&parallelWorkers, "parallel-workers", 0, "Maximum number of parallel worker tasks, use 0 for number of CPUs")
-	BugtoolRootCmd.Flags().StringVarP(&ciliumAgentContainerName, "cilium-agent-container-name", "", "cilium-agent", "Name of the Cilium Agent main container (when k8s-mode is true)")
 	BugtoolRootCmd.Flags().BoolVar(&excludeObjectFiles, "exclude-object-files", false, "Exclude per-endpoint object files. Template object files will be kept")
-}
-
-func getVerifyCiliumPods() (k8sPods []string) {
-	if k8s {
-		var err error
-		// By default try to pick either Kubernetes or non-k8s (host mode). If
-		// we find Cilium pod(s) then it's k8s-mode otherwise host mode.
-		// Passing extra flags can override the default.
-		k8sPods, err = getCiliumPods(k8sNamespace, k8sLabel)
-		// When the k8s flag is set, perform extra checks that we actually do have pods or fail.
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error: %s\nFailed to find pods, is kube-apiserver running?\n", err)
-			os.Exit(1)
-		}
-		if len(k8sPods) < 1 {
-			fmt.Fprint(os.Stderr, "Found no pods, is kube-apiserver running?\n")
-			os.Exit(1)
-		}
-	}
-	if os.Getuid() != 0 && !k8s && len(k8sPods) == 0 {
-		// When the k8s flag is not set and the user is not root,
-		// debuginfo and BPF related commands can fail.
-		fmt.Fprintf(os.Stderr, "Warning, some of the BPF commands might fail when run as not root\n")
-	}
-
-	return k8sPods
+	BugtoolRootCmd.Flags().BoolVar(&hubbleMetrics, "hubble-metrics", true, "When set, hubble prometheus metrics")
+	BugtoolRootCmd.Flags().IntVar(&hubbleMetricsPort, "hubble-metrics-port", 9965, "Port to query for hubble metrics")
+	BugtoolRootCmd.AddCommand(cmdref.NewCmd(BugtoolRootCmd))
 }
 
 func removeIfEmpty(dir string) {
@@ -156,13 +143,25 @@ func removeIfEmpty(dir string) {
 
 func isValidArchiveType(archiveType string) bool {
 	switch archiveType {
-	case
-		"tar",
-		"gz":
+	case "tar", "gz":
 		return true
 	}
 	return false
 }
+
+type postProcessFunc func(output []byte) ([]byte, error)
+
+var envoySecretMask = jsonFieldMaskPostProcess([]string{
+	// Cilium LogEntry -> KafkaLogEntry{l7} -> KafkaLogEntry{api_key}
+	"api_key",
+	// This could be from one of the following:
+	// - Cilium NetworkPolicy -> PortNetworkPolicy{ingress_per_port_policies, egress_per_port_policies}
+	//	-> PortNetworkPolicyRule{rules} -> TLSContext{downstream_tls_context, upstream_tls_context}
+	// - Upstream Envoy tls_certificate
+	"trusted_ca",
+	"certificate_chain",
+	"private_key",
+})
 
 func runTool() {
 	// Validate archive type
@@ -193,13 +192,26 @@ func runTool() {
 	cmdDir := createDir(dbgDir, "cmd")
 	confDir := createDir(dbgDir, "conf")
 
-	k8sPods := getVerifyCiliumPods()
+	if os.Getuid() != 0 {
+		// When the user is not root, debuginfo and BPF related commands can fail.
+		fmt.Fprintf(os.Stderr, "Warning, some of the BPF commands might fail when run as not root\n")
+	}
 
-	var commands []string
+	commands := defaultCommands(confDir, cmdDir)
+	for _, f := range ExtraCommands {
+		commands = append(commands, f(confDir, cmdDir)...)
+	}
+
 	if dryRunMode {
-		dryRun(configPath, k8sPods, confDir, cmdDir)
+		dryRun(configPath, commands)
 		fmt.Fprintf(os.Stderr, "Configuration file at %s\n", configPath)
 		return
+	}
+
+	// Check if there is a non-empty user supplied configuration
+	if config, _ := loadConfigFile(configPath); config != nil && len(config.Commands) > 0 {
+		// All of of the commands run are from the configuration file
+		commands = config.Commands
 	}
 
 	if getPProf {
@@ -210,32 +222,39 @@ func runTool() {
 		}
 	} else {
 		if envoyDump {
-			if err := dumpEnvoy(cmdDir, "http://admin/config_dump?include_eds", "envoy-config.json"); err != nil {
+			if err := dumpEnvoy(cmdDir, "http://admin/config_dump?include_eds", "envoy-config.json", envoySecretMask); err != nil {
 				fmt.Fprintf(os.Stderr, "Unable to dump envoy config: %s\n", err)
+			}
+			if err := dumpEnvoy(cmdDir, "http://admin/listeners", "envoy-listeners.txt", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to dump envoy listeners: %s\n", err)
+			}
+
+			if err := dumpEnvoy(cmdDir, "http://admin/clusters", "envoy-clusters.txt", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to dump envoy clusters: %s\n", err)
+			}
+
+			if err := dumpEnvoy(cmdDir, "http://admin/server_info", "envoy-server-info.json", nil); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to dump envoy server info: %s\n", err)
 			}
 		}
 
 		if envoyMetrics {
-			if err := dumpEnvoy(cmdDir, "http://admin/stats/prometheus", "envoy-metrics.txt"); err != nil {
+			if err := dumpEnvoy(cmdDir, "http://admin/stats/prometheus", "envoy-metrics.txt", nil); err != nil {
 				fmt.Fprintf(os.Stderr, "Unable to retrieve envoy prometheus metrics: %s\n", err)
 			}
 		}
 
-		// Check if there is a user supplied configuration
-		if config, _ := loadConfigFile(configPath); config != nil {
-			// All of of the commands run are from the configuration file
-			commands = config.Commands
+		if hubbleMetrics {
+			if err := dumpHubbleMetrics(cmdDir); err != nil {
+				fmt.Fprintf(os.Stderr, "Unable to retrieve hubble prometheus metrics: %s\n", err)
+			}
 		}
-		if len(commands) == 0 {
-			// Found no configuration file or empty so fall back to default commands.
-			commands = defaultCommands(confDir, cmdDir, k8sPods)
-		}
-		defer printDisclaimer()
 
-		runAll(commands, cmdDir, k8sPods)
+		defer printDisclaimer()
+		runAll(commands, cmdDir)
 
 		if excludeObjectFiles {
-			removeObjectFiles(cmdDir, k8sPods)
+			removeObjectFiles(cmdDir)
 		}
 	}
 
@@ -266,9 +285,8 @@ func runTool() {
 
 // dryRun creates the configuration file to show the user what would have been run.
 // The same file can be used to modify what will be run by the bugtool.
-func dryRun(configPath string, k8sPods []string, confDir, cmdDir string) {
-	_, err := setupDefaultConfig(configPath, k8sPods, confDir, cmdDir)
-	if err != nil {
+func dryRun(configPath string, commands []string) {
+	if err := save(&BugtoolConfiguration{commands}, configPath); err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %s", err)
 		os.Exit(1)
 	}
@@ -307,11 +325,7 @@ func createDir(dbgDir string, newDir string) string {
 	return confDir
 }
 
-func podPrefix(pod, cmd string) string {
-	return fmt.Sprintf("kubectl exec %s -c %s -n %s -- %s", pod, ciliumAgentContainerName, k8sNamespace, cmd)
-}
-
-func runAll(commands []string, cmdDir string, k8sPods []string) {
+func runAll(commands []string, cmdDir string) {
 	if len(commands) == 0 {
 		return
 	}
@@ -326,18 +340,17 @@ func runAll(commands []string, cmdDir string, k8sPods []string) {
 			// iptables commands hold locks so we can't have multiple runs. They
 			// have to be run one at a time to avoid 'Another app is currently
 			// holding the xtables lock...'
-			writeCmdToFile(cmdDir, cmd, k8sPods, enableMarkdown, nil)
+			writeCmdToFile(cmdDir, cmd, enableMarkdown, nil)
 			continue
 		}
 
-		cmd := cmd // https://golang.org/doc/faq#closures_and_goroutines
 		err := wp.Submit(cmd, func(_ context.Context) error {
 			if strings.Contains(cmd, "xfrm state") {
 				//  Output of 'ip -s xfrm state' needs additional processing to replace
 				// raw keys by their hash.
-				writeCmdToFile(cmdDir, cmd, k8sPods, enableMarkdown, hashEncryptionKeys)
+				writeCmdToFile(cmdDir, cmd, enableMarkdown, hashEncryptionKeys)
 			} else {
-				writeCmdToFile(cmdDir, cmd, k8sPods, enableMarkdown, nil)
+				writeCmdToFile(cmdDir, cmd, enableMarkdown, nil)
 			}
 			return nil
 		})
@@ -359,7 +372,7 @@ func runAll(commands []string, cmdDir string, k8sPods []string) {
 	}
 }
 
-func removeObjectFiles(cmdDir string, k8sPods []string) {
+func removeObjectFiles(cmdDir string) {
 	// Remove object files for each endpoint. Endpoints directories are in the
 	// state directory and have numerical names.
 	rmFunc := func(path string) {
@@ -375,15 +388,8 @@ func removeObjectFiles(cmdDir string, k8sPods []string) {
 		}
 	}
 
-	if k8s {
-		for _, pod := range k8sPods {
-			path := filepath.Join(cmdDir, fmt.Sprintf("%s-%s", pod, defaults.StateDir))
-			rmFunc(path)
-		}
-	} else {
-		path := filepath.Join(cmdDir, defaults.StateDir)
-		rmFunc(path)
-	}
+	path := filepath.Join(cmdDir, defaults.StateDir)
+	rmFunc(path)
 }
 
 func execCommand(prompt string) ([]byte, error) {
@@ -397,36 +403,30 @@ func execCommand(prompt string) ([]byte, error) {
 }
 
 // writeCmdToFile will execute command and write markdown output to a file
-func writeCmdToFile(cmdDir, prompt string, k8sPods []string, enableMarkdown bool, postProcess func(output []byte) []byte) {
+func writeCmdToFile(cmdDir, prompt string, enableMarkdown bool, postProcess func(output []byte) []byte) {
 	// Clean up the filename
 	name := strings.Replace(prompt, "/", " ", -1)
 	name = strings.Replace(name, " ", "-", -1)
-	f, err := os.Create(filepath.Join(cmdDir, name+".md"))
+	suffix := ".md"
+	if strings.HasSuffix(name, "html") {
+		// If the command we run ends in 'html' (such as 'metrics/html'), write out the
+		// output as a HTML file.
+		suffix = ".html"
+		enableMarkdown = false
+	}
+	f, err := os.Create(filepath.Join(cmdDir, name+suffix))
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Could not create file %s\n", err)
 		return
 	}
 	defer f.Close()
 
-	cmd, args := split(prompt)
+	cmd := strings.Split(prompt, " ")[0]
 
-	if len(k8sPods) == 0 {
-		// The command does not exist, abort.
-		if _, err := exec.LookPath(cmd); err != nil {
-			os.Remove(f.Name())
-			return
-		}
-	} else if len(args) > 5 {
-		// Boundary check is necessary to skip other non exec kubectl
-		// commands.
-		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
-		defer cancel()
-		if _, err := exec.CommandContext(ctx, "kubectl", "exec",
-			args[1], "-n", args[3], "--", "which",
-			args[5]).CombinedOutput(); err != nil || errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			os.Remove(f.Name())
-			return
-		}
+	// The command does not exist, abort.
+	if _, err := exec.LookPath(cmd); err != nil {
+		os.Remove(f.Name())
+		return
 	}
 
 	var output []byte
@@ -452,7 +452,7 @@ func writeCmdToFile(cmdDir, prompt string, k8sPods []string, enableMarkdown bool
 			fmt.Fprint(f, string(output))
 		} else if enableMarkdown && len(output) > 0 {
 			// Write prompt as header and the output as body, and/or error but delete empty output.
-			fmt.Fprint(f, fmt.Sprintf("# %s\n\n```\n%s\n```\n", prompt, output))
+			fmt.Fprintf(f, "# %s\n\n```\n%s\n```\n", prompt, output)
 		}
 	}
 
@@ -461,53 +461,26 @@ func writeCmdToFile(cmdDir, prompt string, k8sPods []string, enableMarkdown bool
 	}
 }
 
-// split takes a command prompt and returns the command and arguments separately
-func split(prompt string) (string, []string) {
-	// Split the command and arguments
-	split := strings.Split(prompt, " ")
-	argc := len(split)
-	var args []string
-	cmd := split[0]
-
-	if argc > 1 {
-		args = split[1:]
-	}
-
-	return cmd, args
+func dumpHubbleMetrics(rootDir string) error {
+	httpClient := http.DefaultClient
+	url := fmt.Sprintf("http://localhost:%d/metrics", hubbleMetricsPort)
+	return downloadToFile(httpClient, url, filepath.Join(rootDir, "hubble-metrics.txt"))
 }
 
-func getCiliumPods(namespace, label string) ([]string, error) {
-	output, err := execCommand(fmt.Sprintf("kubectl -n %s get pods -l %s", namespace, label))
-	if err != nil {
-		return nil, err
-	}
-
-	lines := bytes.Split(output, []byte("\n"))
-	ciliumPods := make([]string, 0, len(lines))
-	for _, l := range lines {
-		if !bytes.HasPrefix(l, []byte("cilium")) {
-			continue
-		}
-		// NAME           READY     STATUS    RESTARTS   AGE
-		// cilium-cfmww   0/1       Running   0          3m
-		// ^
-		pod := bytes.Split(l, []byte(" "))[0]
-		ciliumPods = append(ciliumPods, string(pod))
-	}
-
-	return ciliumPods, nil
-}
-
-func dumpEnvoy(rootDir string, resource string, fileName string) error {
-	// curl --unix-socket /var/run/cilium/envoy-admin.sock http:/admin/config_dump\?include_eds > dump.json
+func dumpEnvoy(rootDir string, resource string, fileName string, postProcess postProcessFunc) error {
+	// curl --unix-socket /var/run/cilium/envoy/sockets/admin.sock http:/admin/config_dump\?include_eds > dump.json
 	c := &http.Client{
 		Transport: &http.Transport{
 			DialContext: func(_ context.Context, _, _ string) (net.Conn, error) {
-				return net.Dial("unix", "/var/run/cilium/envoy-admin.sock")
+				return net.Dial("unix", "/var/run/cilium/envoy/sockets/admin.sock")
 			},
 		},
 	}
-	return downloadToFile(c, resource, filepath.Join(rootDir, fileName))
+
+	if postProcess == nil {
+		return downloadToFile(c, resource, filepath.Join(rootDir, fileName))
+	}
+	return downloadToFileWithPostProcess(c, resource, filepath.Join(rootDir, fileName), postProcess)
 }
 
 func pprofTraces(rootDir string, pprofDebug int) error {
@@ -538,13 +511,13 @@ func pprofTraces(rootDir string, pprofDebug int) error {
 	}
 
 	cmd := fmt.Sprintf("gops stack $(pidof %s)", components.CiliumAgentName)
-	writeCmdToFile(rootDir, cmd, nil, enableMarkdown, nil)
+	writeCmdToFile(rootDir, cmd, enableMarkdown, nil)
 
 	cmd = fmt.Sprintf("gops stats $(pidof %s)", components.CiliumAgentName)
-	writeCmdToFile(rootDir, cmd, nil, enableMarkdown, nil)
+	writeCmdToFile(rootDir, cmd, enableMarkdown, nil)
 
 	cmd = fmt.Sprintf("gops memstats $(pidof %s)", components.CiliumAgentName)
-	writeCmdToFile(rootDir, cmd, nil, enableMarkdown, nil)
+	writeCmdToFile(rootDir, cmd, enableMarkdown, nil)
 
 	wg.Wait()
 	if profileErr != nil {
@@ -570,4 +543,28 @@ func downloadToFile(client *http.Client, url, file string) error {
 	}
 	_, err = io.Copy(out, resp.Body)
 	return err
+}
+
+// downloadToFileWithPostProcess downloads the content from the given URL and writes it to the given file.
+// The content is then post-processed using the given postProcess function before being written to the file.
+// Note: Please use downloadToFile instead of this function if no post-processing is required.
+func downloadToFileWithPostProcess(client *http.Client, url, file string, postProcess postProcessFunc) error {
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("bad status: %s", resp.Status)
+	}
+	b, err := safeio.ReadAllLimit(resp.Body, safeio.MB)
+	if err != nil {
+		return err
+	}
+
+	b, err = postProcess(b)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(file, b, 0644)
 }

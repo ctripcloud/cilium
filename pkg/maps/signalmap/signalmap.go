@@ -5,13 +5,13 @@ package signalmap
 
 import (
 	"fmt"
-	"unsafe"
+	"log/slog"
+	"os"
+
+	"github.com/cilium/ebpf"
+	"github.com/cilium/ebpf/perf"
 
 	"github.com/cilium/cilium/pkg/bpf"
-)
-
-var (
-	MaxEntries int
 )
 
 const (
@@ -20,49 +20,67 @@ const (
 )
 
 // Key is the index into the prog array map.
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type Key struct {
-	index uint32
+	Index uint32
 }
 
 // Value is the program ID in the prog array map.
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type Value struct {
-	progID uint32
+	ProgID uint32
 }
 
-// GetKeyPtr returns the unsafe pointer to the BPF key.
-func (k *Key) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
-
-// GetValuePtr returns the unsafe pointer to the BPF value.
-func (v *Value) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
-
 // String converts the key into a human readable string format.
-func (k *Key) String() string { return fmt.Sprintf("%d", k.index) }
+func (k *Key) String() string  { return fmt.Sprintf("%d", k.Index) }
+func (k *Key) New() bpf.MapKey { return &Key{} }
 
 // String converts the value into a human readable string format.
-func (v *Value) String() string { return fmt.Sprintf("%d", v.progID) }
+func (v *Value) String() string    { return fmt.Sprintf("%d", v.ProgID) }
+func (v *Value) New() bpf.MapValue { return &Value{} }
 
-// NewValue returns a new empty instance of the structure representing the BPF
-// map value.
-func (k Key) NewValue() bpf.MapValue { return &Value{} }
+type signalMap struct {
+	logger     *slog.Logger
+	oldBpfMap  *bpf.Map
+	ebpfMap    *ebpf.Map
+	maxEntries int
+}
 
-// InitMap creates the signal map in the kernel.
-func InitMap(maxEntries int) error {
-	MaxEntries = maxEntries
-	signalMap := bpf.NewMap(MapName,
-		bpf.MapTypePerfEventArray,
-		&Key{},
-		int(unsafe.Sizeof(Key{})),
-		&Value{},
-		int(unsafe.Sizeof(Value{})),
-		MaxEntries,
-		0,
-		0,
-		bpf.ConvertKeyValue,
-	)
-	_, err := signalMap.Create()
+// initMap creates the signal map in the kernel.
+func initMap(logger *slog.Logger, maxEntries int) *signalMap {
+	return &signalMap{
+		logger:     logger,
+		maxEntries: maxEntries,
+		oldBpfMap: bpf.NewMap(MapName,
+			ebpf.PerfEventArray,
+			&Key{},
+			&Value{},
+			maxEntries,
+			0,
+		),
+	}
+}
+
+func (sm *signalMap) open() error {
+	if err := sm.oldBpfMap.Create(); err != nil {
+		return err
+	}
+	path := bpf.MapPath(sm.logger, MapName)
+
+	var err error
+	sm.ebpfMap, err = ebpf.LoadPinnedMap(path, nil)
 	return err
+}
+
+func (sm *signalMap) close() error {
+	if sm.ebpfMap != nil {
+		return sm.ebpfMap.Close()
+	}
+	return nil
+}
+
+func (sm *signalMap) NewReader() (PerfReader, error) {
+	return perf.NewReader(sm.ebpfMap, os.Getpagesize())
+}
+
+func (sm *signalMap) MapName() string {
+	return MapName
 }

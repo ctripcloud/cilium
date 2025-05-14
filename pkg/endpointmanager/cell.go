@@ -5,21 +5,25 @@ package endpointmanager
 
 import (
 	"context"
+	"log/slog"
 	"net/netip"
 	"sync"
-	"time"
 
+	"github.com/cilium/hive/cell"
+
+	"github.com/cilium/cilium/api/v1/models"
+	endpointapi "github.com/cilium/cilium/api/v1/server/restapi/endpoint"
+	"github.com/cilium/cilium/pkg/container/set"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
-	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
-	"github.com/cilium/cilium/pkg/identity/cache"
-	"github.com/cilium/cilium/pkg/ipcache"
+	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/watchers"
-	"github.com/cilium/cilium/pkg/k8s/watchers/subscriber"
+	"github.com/cilium/cilium/pkg/metrics"
+	monitoragent "github.com/cilium/cilium/pkg/monitor/agent"
+	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Cell provides the EndpointManager which maintains the collection of locally
@@ -32,6 +36,8 @@ var Cell = cell.Module(
 
 	cell.Config(defaultEndpointManagerConfig),
 	cell.Provide(newDefaultEndpointManager),
+	cell.Provide(endpoint.NewEndpointBuildQueue),
+	cell.ProvidePrivate(newEndpointSynchronizer),
 )
 
 type EndpointsLookup interface {
@@ -41,8 +47,8 @@ type EndpointsLookup interface {
 	// LookupCiliumID looks up endpoint by endpoint ID
 	LookupCiliumID(id uint16) *endpoint.Endpoint
 
-	// LookupContainerID looks up endpoint by container ID
-	LookupContainerID(id string) *endpoint.Endpoint
+	// LookupCNIAttachmentID looks up endpoint by CNI attachment ID
+	LookupCNIAttachmentID(id string) *endpoint.Endpoint
 
 	// LookupIPv4 looks up endpoint by IPv4 address
 	LookupIPv4(ipv4 string) *endpoint.Endpoint
@@ -53,11 +59,20 @@ type EndpointsLookup interface {
 	// LookupIP looks up endpoint by IP address
 	LookupIP(ip netip.Addr) (ep *endpoint.Endpoint)
 
-	// LookupPodName looks up endpoint by namespace + pod name, e.g. "prod/pod-0"
-	LookupPodName(name string) *endpoint.Endpoint
+	// LookupCEPName looks up endpoints by namespace + cep name, e.g. "prod/cep-0"
+	LookupCEPName(name string) (ep *endpoint.Endpoint)
+
+	// GetEndpointsByPodName looks up endpoints by namespace + pod name, e.g. "prod/pod-0"
+	GetEndpointsByPodName(name string) []*endpoint.Endpoint
+
+	// GetEndpointsByContainerID looks up endpoints by container ID
+	GetEndpointsByContainerID(containerID string) []*endpoint.Endpoint
 
 	// GetEndpoints returns a slice of all endpoints present in endpoint manager.
 	GetEndpoints() []*endpoint.Endpoint
+
+	// GetEndpointList returns a slice of all endpoint models.
+	GetEndpointList(params endpointapi.GetEndpointParams) []*models.Endpoint
 
 	// EndpointExists returns whether the endpoint with id exists.
 	EndpointExists(id uint16) bool
@@ -67,21 +82,20 @@ type EndpointsLookup interface {
 
 	// HostEndpointExists returns true if the host endpoint exists.
 	HostEndpointExists() bool
+
+	// GetIngressEndpoint returns the ingress endpoint.
+	GetIngressEndpoint() *endpoint.Endpoint
+
+	// IngressEndpointExists returns true if the ingress endpoint exists.
+	IngressEndpointExists() bool
+
+	// GetEndpointNetnsCookieByIP returns the netns cookie for the passed endpoint with ip address if found.
+	GetEndpointNetnsCookieByIP(ip netip.Addr) (uint64, error)
 }
 
 type EndpointsModify interface {
 	// AddEndpoint takes the prepared endpoint object and starts managing it.
-	AddEndpoint(owner regeneration.Owner, ep *endpoint.Endpoint, reason string) (err error)
-
-	AddHostEndpoint(
-		ctx context.Context,
-		owner regeneration.Owner,
-		policyGetter policyRepoGetter,
-		ipcache *ipcache.IPCache,
-		proxy endpoint.EndpointProxy,
-		allocator cache.IdentityAllocator,
-		reason, nodeName string,
-	) error
+	AddEndpoint(ep *endpoint.Endpoint) (err error)
 
 	// RestoreEndpoint exposes the specified endpoint to other subsystems via the
 	// manager.
@@ -91,22 +105,14 @@ type EndpointsModify interface {
 	UpdateReferences(ep *endpoint.Endpoint) error
 
 	// RemoveEndpoint stops the active handling of events by the specified endpoint,
-	// and prevents the endpoint from being globally acccessible via other packages.
+	// and prevents the endpoint from being globally accessible via other packages.
 	RemoveEndpoint(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) []error
-
-	// RemoveAll removes all endpoints from the global maps.
-	RemoveAll()
 }
 
 type EndpointManager interface {
 	EndpointsLookup
 	EndpointsModify
-	subscriber.Node
 	EndpointResourceSynchronizer
-
-	// InitMetrics hooks the EndpointManager into the metrics subsystem. This can
-	// only be done once, globally, otherwise the metrics library will panic.
-	InitMetrics()
 
 	// Subscribe to endpoint events.
 	Subscribe(s Subscriber)
@@ -127,6 +133,10 @@ type EndpointManager interface {
 	// regenerated.
 	RegenerateAllEndpoints(regenMetadata *regeneration.ExternalRegenerationMetadata) *sync.WaitGroup
 
+	// TriggerRegenerateAlEndpoints triggers a batched regeneration of all endpoints.
+	// Returns immediately.
+	TriggerRegenerateAllEndpoints()
+
 	// WaitForEndpointsAtPolicyRev waits for all endpoints which existed at the time
 	// this function is called to be at a given policy revision.
 	// New endpoints appearing while waiting are ignored.
@@ -143,14 +153,26 @@ type EndpointManager interface {
 	// manager as policy.Endpoint interface set for the map key.
 	GetPolicyEndpoints() map[policy.Endpoint]struct{}
 
-	// HasGlobalCT returns true if the endpoints have a global CT, false otherwise.
-	HasGlobalCT() bool
-
 	// CallbackForEndpointsAtPolicyRev registers a callback on all endpoints that
 	// exist when invoked. It is similar to WaitForEndpointsAtPolicyRevision but
 	// each endpoint that reaches the desired revision calls 'done' independently.
 	// The provided callback should not block and generally be lightweight.
 	CallbackForEndpointsAtPolicyRev(ctx context.Context, rev uint64, done func(time.Time)) error
+
+	// GetEndpointNetnsCookieByIP returns the netns cookie for the passed endpoint with ip address if found.
+	GetEndpointNetnsCookieByIP(ip netip.Addr) (uint64, error)
+
+	// UpdatePolicy triggers policy updates for all live endpoints.
+	// Endpoints with security IDs in provided set will be regenerated. Otherwise, the endpoint's
+	// policy revision will be bumped to toRev.
+	UpdatePolicy(idsToRegen *set.Set[identity.NumericIdentity], fromRev, toRev uint64)
+}
+
+// EndpointResourceSynchronizer is an interface which synchronizes CiliumEndpoint
+// resources with Kubernetes.
+type EndpointResourceSynchronizer interface {
+	RunK8sCiliumEndpointSync(ep *endpoint.Endpoint, hr cell.Health)
+	DeleteK8sCiliumEndpointSync(e *endpoint.Endpoint)
 }
 
 var (
@@ -162,31 +184,40 @@ var (
 type endpointManagerParams struct {
 	cell.In
 
-	Lifecycle hive.Lifecycle
-	Config    EndpointManagerConfig
-	Clientset client.Clientset
+	Logger *slog.Logger
+
+	Lifecycle       cell.Lifecycle
+	Config          EndpointManagerConfig
+	Clientset       client.Clientset
+	MetricsRegistry *metrics.Registry
+	Health          cell.Health
+	EPSynchronizer  EndpointResourceSynchronizer
+	LocalNodeStore  *node.LocalNodeStore
+	MonitorAgent    monitoragent.Agent
 }
 
 type endpointManagerOut struct {
 	cell.Out
 
-	Lookup  EndpointsLookup
-	Modify  EndpointsModify
-	Manager EndpointManager
+	Lookup   EndpointsLookup
+	Modify   EndpointsModify
+	Manager  EndpointManager
+	Callback PolicyUpdateCallbackManager
 }
 
 func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 	checker := endpoint.CheckHealth
 
-	mgr := New(&watchers.EndpointSynchronizer{Clientset: p.Clientset})
+	mgr := New(p.Logger, p.EPSynchronizer, p.LocalNodeStore, p.Health, p.MonitorAgent)
 	if p.Config.EndpointGCInterval > 0 {
 		ctx, cancel := context.WithCancel(context.Background())
-		p.Lifecycle.Append(hive.Hook{
-			OnStart: func(hive.HookContext) error {
+		p.Lifecycle.Append(cell.Hook{
+			OnStart: func(cell.HookContext) error {
 				mgr.WithPeriodicEndpointGC(ctx, checker, p.Config.EndpointGCInterval)
+				mgr.WithPeriodicEndpointRegeneration(ctx, p.Config.EndpointRegenInterval)
 				return nil
 			},
-			OnStop: func(hive.HookContext) error {
+			OnStop: func(cell.HookContext) error {
 				cancel()
 				mgr.controllers.RemoveAllAndWait()
 				return nil
@@ -194,11 +225,22 @@ func newDefaultEndpointManager(p endpointManagerParams) endpointManagerOut {
 		})
 	}
 
-	mgr.InitMetrics()
+	mgr.InitMetrics(p.MetricsRegistry)
 
 	return endpointManagerOut{
-		Lookup:  mgr,
-		Modify:  mgr,
-		Manager: mgr,
+		Lookup:   mgr,
+		Modify:   mgr,
+		Manager:  mgr,
+		Callback: mgr,
 	}
+}
+
+type endpointSynchronizerParams struct {
+	cell.In
+
+	Clientset client.Clientset
+}
+
+func newEndpointSynchronizer(p endpointSynchronizerParams) EndpointResourceSynchronizer {
+	return &EndpointSynchronizer{Clientset: p.Clientset}
 }

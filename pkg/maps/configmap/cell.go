@@ -4,9 +4,9 @@
 package configmap
 
 import (
+	"github.com/cilium/hive/cell"
+
 	"github.com/cilium/cilium/pkg/bpf"
-	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
 )
 
 // Cell initializes and manages the config map.
@@ -17,27 +17,17 @@ var Cell = cell.Module(
 	cell.Provide(newMap),
 )
 
-func newMap(lifecycle hive.Lifecycle) MapOut {
+func newMap(lifecycle cell.Lifecycle) bpf.MapOut[Map] {
 	configmap := newConfigMap()
 
-	lifecycle.Append(hive.Hook{
-		OnStart: func(startCtx hive.HookContext) error {
+	lifecycle.Append(cell.Hook{
+		OnStart: func(startCtx cell.HookContext) error {
 			return configmap.init()
 		},
-		OnStop: func(stopCtx hive.HookContext) error {
+		OnStop: func(stopCtx cell.HookContext) error {
 			return configmap.close()
 		},
 	})
 
-	return MapOut{
-		ConfigMap: configmap,
-		BpfMap:    configmap,
-	}
-}
-
-type MapOut struct {
-	cell.Out
-
-	ConfigMap Map
-	BpfMap    bpf.BpfMap `group:"bpf-maps"`
+	return bpf.NewMapOut(Map(configmap))
 }

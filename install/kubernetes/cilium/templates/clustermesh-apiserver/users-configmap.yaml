@@ -1,12 +1,23 @@
-{{- if ne .Values.clustermesh.apiserver.tls.authMode "legacy" }}
+{{- if and
+  (and .Values.clustermesh.useAPIServer (eq .Values.clustermesh.apiserver.kvstoremesh.kvstoreMode "internal"))
+  (ne .Values.clustermesh.apiserver.tls.authMode "legacy")
+}}
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: clustermesh-remote-users
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "cilium.namespace" . }}
+  {{- with .Values.clustermesh.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     app.kubernetes.io/part-of: cilium
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+
 data:
   users.yaml: |
     users:

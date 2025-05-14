@@ -4,15 +4,17 @@
 package proxy
 
 import (
+	"github.com/cilium/cilium/pkg/container/versioned"
 	"github.com/cilium/cilium/pkg/endpoint"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/policy"
+	"github.com/cilium/cilium/pkg/revert"
 )
 
 type DNSProxier interface {
-	GetRules(uint16) (restore.DNSRules, error)
+	GetRules(*versioned.VersionHandle, uint16) (restore.DNSRules, error)
 	RemoveRestoredRules(uint16)
-	UpdateAllowed(endpointID uint64, destPort uint16, newRules policy.L7DataMap) error
+	UpdateAllowed(endpointID uint64, destPort restore.PortProto, newRules policy.L7DataMap) (revert.RevertFunc, error)
 	GetBindPort() uint16
 	SetRejectReply(string)
 	RestoreRules(op *endpoint.Endpoint)
@@ -21,16 +23,15 @@ type DNSProxier interface {
 
 type MockFQDNProxy struct{}
 
-func (m MockFQDNProxy) GetRules(u uint16) (restore.DNSRules, error) {
+func (m MockFQDNProxy) GetRules(*versioned.VersionHandle, uint16) (restore.DNSRules, error) {
 	return nil, nil
 }
 
 func (m MockFQDNProxy) RemoveRestoredRules(u uint16) {
-	return
 }
 
-func (m MockFQDNProxy) UpdateAllowed(endpointID uint64, destPort uint16, newRules policy.L7DataMap) error {
-	return nil
+func (m MockFQDNProxy) UpdateAllowed(endpointID uint64, destPort restore.PortProto, newRules policy.L7DataMap) (revert.RevertFunc, error) {
+	return nil, nil
 }
 
 func (m MockFQDNProxy) GetBindPort() uint16 {
@@ -38,13 +39,10 @@ func (m MockFQDNProxy) GetBindPort() uint16 {
 }
 
 func (m MockFQDNProxy) SetRejectReply(s string) {
-	return
 }
 
 func (m MockFQDNProxy) RestoreRules(op *endpoint.Endpoint) {
-	return
 }
 
 func (m MockFQDNProxy) Cleanup() {
-	return
 }

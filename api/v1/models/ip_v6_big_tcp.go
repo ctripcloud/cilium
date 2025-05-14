@@ -17,13 +17,17 @@ import (
 
 // IPV6BigTCP Status of IPv6 BIG TCP
 //
-// +k8s:deepcopy-gen=true
-//
 // swagger:model IPV6BigTCP
 type IPV6BigTCP struct {
 
 	// Is IPv6 BIG TCP enabled
 	Enabled bool `json:"enabled,omitempty"`
+
+	// Maximum IPv6 GRO size
+	MaxGRO int64 `json:"maxGRO,omitempty"`
+
+	// Maximum IPv6 GSO size
+	MaxGSO int64 `json:"maxGSO,omitempty"`
 }
 
 // Validate validates this IP v6 big TCP

@@ -4,9 +4,11 @@
 package accesslog
 
 import (
-	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
+
+	"github.com/cilium/cilium/pkg/labels"
 )
 
 // FlowType is the type to indicate the flow direction
@@ -82,8 +84,9 @@ type EndpointInfo struct {
 	// Identity is the security identity of the endpoint
 	Identity uint64
 
-	// Labels is the list of security relevant labels of the endpoint
-	Labels []string
+	// Labels is the list of security relevant labels of the endpoint.
+	// Shared, do not mutate!
+	Labels labels.LabelArray
 }
 
 // ServiceInfo contains information about the Kubernetes service
@@ -261,7 +264,7 @@ type LogRecordDNS struct {
 
 	// IPs are any IPs seen in this response.
 	// This field is filled only for DNS responses with IPs.
-	IPs []net.IP `json:"IPs,omitempty"`
+	IPs []netip.Addr `json:"IPs,omitempty"`
 
 	// TTL is the lowest applicable TTL for this data
 	// This field is filled only for DNS responses.
@@ -279,17 +282,17 @@ type LogRecordDNS struct {
 
 	// RCode is the response code
 	// defined as per https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-6
-	// Use 	github.com/miekg/dns.RcodeToString map to retrieve string representation
+	// Use 	github.com/cilium/dns.RcodeToString map to retrieve string representation
 	RCode int `json:"RCode,omitempty"`
 
 	// QTypes are question types in DNS message
 	// https://www.ietf.org/rfc/rfc1035.txt
-	// Use github.com/miekg/dns.TypeToString map to retrieve string representation
+	// Use github.com/cilium/dns.TypeToString map to retrieve string representation
 	QTypes []uint16 `json:"QTypes,omitempty"`
 
 	// AnswerTypes are record types in the answer section
 	// https://www.iana.org/assignments/dns-parameters/dns-parameters.xhtml#dns-parameters-4
-	// Use github.com/miekg/dns.TypeToString map to retrieve string representation
+	// Use github.com/cilium/dns.TypeToString map to retrieve string representation
 	AnswerTypes []uint16 `json:"AnswerTypes,omitempty"`
 }
 

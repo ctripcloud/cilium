@@ -6,30 +6,23 @@ package v2
 import (
 	"encoding/json"
 	"fmt"
+	"net"
 	"reflect"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
-	"github.com/cilium/cilium/pkg/checker"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
 	k8sUtils "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/utils"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/labels"
+	"github.com/cilium/cilium/pkg/node/addressing"
 	"github.com/cilium/cilium/pkg/policy/api"
 )
-
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type CiliumV2Suite struct{}
-
-var _ = Suite(&CiliumV2Suite{})
 
 var (
 	apiRule = api.Rule{
@@ -268,7 +261,7 @@ var (
 }`)...)
 )
 
-func (s *CiliumV2Suite) TestParseSpec(c *C) {
+func TestParseSpec(t *testing.T) {
 	es := api.NewESFromMatchRequirements(
 		map[string]string{
 			fmt.Sprintf("%s.role", labels.LabelSourceAny): "backend",
@@ -318,23 +311,25 @@ func (s *CiliumV2Suite) TestParseSpec(c *C) {
 	// Sanitize rule to populate aggregated selectors.
 	expectedSpecRule.Sanitize()
 
-	rules, err := expectedPolicyRule.Parse()
-	c.Assert(err, IsNil)
-	c.Assert(len(rules), Equals, 1)
-	c.Assert(*rules[0], checker.DeepEquals, *expectedSpecRule)
+	logger := hivetest.Logger(t)
+
+	rules, err := expectedPolicyRule.Parse(logger)
+	require.NoError(t, err)
+	require.Len(t, rules, 1)
+	require.Equal(t, *expectedSpecRule, *rules[0])
 
 	b, err := json.Marshal(expectedPolicyRule)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	var expectedPolicyRuleUnmarshalled CiliumNetworkPolicy
 	err = json.Unmarshal(b, &expectedPolicyRuleUnmarshalled)
-	c.Assert(err, IsNil)
-	expectedPolicyRuleUnmarshalled.Parse()
-	c.Assert(expectedPolicyRuleUnmarshalled, checker.DeepEquals, *expectedPolicyRule)
+	require.NoError(t, err)
+	expectedPolicyRuleUnmarshalled.Parse(logger)
+	require.Equal(t, *expectedPolicyRule, expectedPolicyRuleUnmarshalled)
 
 	cnpl := CiliumNetworkPolicy{}
 	err = json.Unmarshal(ciliumRule, &cnpl)
-	c.Assert(err, IsNil)
-	c.Assert(cnpl, checker.DeepEquals, *expectedPolicyRuleWithLabel)
+	require.NoError(t, err)
+	require.Equal(t, *expectedPolicyRuleWithLabel, cnpl)
 
 	empty := &CiliumNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -343,8 +338,8 @@ func (s *CiliumV2Suite) TestParseSpec(c *C) {
 			UID:       uuidRule,
 		},
 	}
-	_, err = empty.Parse()
-	c.Assert(err, checker.DeepEquals, ErrEmptyCNP)
+	_, err = empty.Parse(logger)
+	require.EqualValues(t, ErrEmptyCNP, err)
 
 	emptyCCNP := &CiliumClusterwideNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -352,11 +347,11 @@ func (s *CiliumV2Suite) TestParseSpec(c *C) {
 			UID:  uuidRule,
 		},
 	}
-	_, err = emptyCCNP.Parse()
-	c.Assert(err, checker.DeepEquals, ErrEmptyCCNP)
+	_, err = emptyCCNP.Parse(logger)
+	require.EqualValues(t, ErrEmptyCCNP, err)
 }
 
-func (s *CiliumV2Suite) TestParseRules(c *C) {
+func TestParseRules(t *testing.T) {
 	es := api.NewESFromMatchRequirements(
 		map[string]string{
 			fmt.Sprintf("%s.role", labels.LabelSourceAny): "backend",
@@ -408,28 +403,30 @@ func (s *CiliumV2Suite) TestParseRules(c *C) {
 		expectedSpecRules[i].Sanitize()
 	}
 
-	rules, err := expectedPolicyRuleList.Parse()
-	c.Assert(err, IsNil)
-	c.Assert(len(rules), Equals, 2)
+	logger := hivetest.Logger(t)
+
+	rules, err := expectedPolicyRuleList.Parse(logger)
+	require.NoError(t, err)
+	require.Len(t, rules, 2)
 	for i, rule := range rules {
-		c.Assert(rule, checker.DeepEquals, expectedSpecRules[i])
+		require.Equal(t, expectedSpecRules[i], rule)
 	}
 
 	b, err := json.Marshal(expectedPolicyRuleList)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	var expectedPolicyRuleUnmarshalled CiliumNetworkPolicy
 	err = json.Unmarshal(b, &expectedPolicyRuleUnmarshalled)
-	c.Assert(err, IsNil)
-	expectedPolicyRuleUnmarshalled.Parse()
-	c.Assert(expectedPolicyRuleUnmarshalled, checker.DeepEquals, *expectedPolicyRuleList)
+	require.NoError(t, err)
+	expectedPolicyRuleUnmarshalled.Parse(logger)
+	require.Equal(t, *expectedPolicyRuleList, expectedPolicyRuleUnmarshalled)
 
 	cnpl := CiliumNetworkPolicy{}
 	err = json.Unmarshal(ciliumRuleList, &cnpl)
-	c.Assert(err, IsNil)
-	c.Assert(cnpl, checker.DeepEquals, *expectedPolicyRuleListWithLabel)
+	require.NoError(t, err)
+	require.Equal(t, *expectedPolicyRuleListWithLabel, cnpl)
 }
 
-func (s *CiliumV2Suite) TestParseWithNodeSelector(c *C) {
+func TestParseWithNodeSelector(t *testing.T) {
 	// A rule without any L7 rules so that we can validate both CNP and CCNP.
 	// CCNP doesn't support L7 rules just yet.
 	rule := api.Rule{
@@ -480,6 +477,8 @@ func (s *CiliumV2Suite) TestParseWithNodeSelector(c *C) {
 	rule.EndpointSelector = emptySelector
 	rule.NodeSelector = prevEPSelector
 
+	logger := hivetest.Logger(t)
+
 	// Expect CNP parse error because it's not allowed to have a NodeSelector.
 	cnpl := CiliumNetworkPolicy{
 		ObjectMeta: metav1.ObjectMeta{
@@ -489,9 +488,8 @@ func (s *CiliumV2Suite) TestParseWithNodeSelector(c *C) {
 		},
 		Spec: &rule,
 	}
-	_, err := cnpl.Parse()
-	c.Assert(err, ErrorMatches,
-		"Invalid CiliumNetworkPolicy spec: rule cannot have NodeSelector")
+	_, err := cnpl.Parse(logger)
+	require.ErrorContains(t, err, "Invalid CiliumNetworkPolicy spec: rule cannot have NodeSelector")
 
 	// CCNP parse is allowed to have a NodeSelector.
 	ccnpl := CiliumClusterwideNetworkPolicy{
@@ -502,8 +500,8 @@ func (s *CiliumV2Suite) TestParseWithNodeSelector(c *C) {
 		},
 		Spec: cnpl.Spec,
 	}
-	_, err = ccnpl.Parse()
-	c.Assert(err, IsNil)
+	_, err = ccnpl.Parse(logger)
+	require.NoError(t, err)
 
 	// CCNPs are received as CNP and initially parsed as CNP. Create a CNP with
 	// an empty namespace to test this case. See #12834 for details.
@@ -515,28 +513,28 @@ func (s *CiliumV2Suite) TestParseWithNodeSelector(c *C) {
 		},
 		Spec: &rule,
 	}
-	_, err = ccnplAsCNP.Parse()
-	c.Assert(err, IsNil)
+	_, err = ccnplAsCNP.Parse(logger)
+	require.NoError(t, err)
 
 	// Now test a CNP and CCNP with an EndpointSelector only.
 	rule.EndpointSelector = prevEPSelector
 	rule.NodeSelector = emptySelector
 
 	// CNP and CCNP parse is allowed to have an EndpointSelector.
-	_, err = cnpl.Parse()
-	c.Assert(err, IsNil)
-	_, err = ccnpl.Parse()
-	c.Assert(err, IsNil)
-	_, err = ccnplAsCNP.Parse()
-	c.Assert(err, IsNil)
+	_, err = cnpl.Parse(logger)
+	require.NoError(t, err)
+	_, err = ccnpl.Parse(logger)
+	require.NoError(t, err)
+	_, err = ccnplAsCNP.Parse(logger)
+	require.NoError(t, err)
 }
 
-func (s *CiliumV2Suite) TestCiliumNodeInstanceID(c *C) {
-	c.Assert((*CiliumNode)(nil).InstanceID(), Equals, "")
-	c.Assert((&CiliumNode{}).InstanceID(), Equals, "")
-	c.Assert((&CiliumNode{Spec: NodeSpec{InstanceID: "foo"}}).InstanceID(), Equals, "foo")
-	c.Assert((&CiliumNode{Spec: NodeSpec{InstanceID: "foo", ENI: eniTypes.ENISpec{InstanceID: "bar"}}}).InstanceID(), Equals, "foo")
-	c.Assert((&CiliumNode{Spec: NodeSpec{ENI: eniTypes.ENISpec{InstanceID: "bar"}}}).InstanceID(), Equals, "bar")
+func TestCiliumNodeInstanceID(t *testing.T) {
+	require.Empty(t, (*CiliumNode)(nil).InstanceID())
+	require.Empty(t, (&CiliumNode{}).InstanceID())
+	require.Equal(t, "foo", (&CiliumNode{Spec: NodeSpec{InstanceID: "foo"}}).InstanceID())
+	require.Equal(t, "foo", (&CiliumNode{Spec: NodeSpec{InstanceID: "foo", ENI: eniTypes.ENISpec{InstanceID: "bar"}}}).InstanceID())
+	require.Equal(t, "bar", (&CiliumNode{Spec: NodeSpec{ENI: eniTypes.ENISpec{InstanceID: "bar"}}}).InstanceID())
 }
 
 func BenchmarkSpecEquals(b *testing.B) {
@@ -627,7 +625,7 @@ func BenchmarkSpecEquals(b *testing.B) {
 	b.Run("Reflected SpecEquals", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			reflect.DeepEqual(r.Spec, o.Spec)
 			reflect.DeepEqual(r.Specs, o.Specs)
 		}
@@ -635,8 +633,69 @@ func BenchmarkSpecEquals(b *testing.B) {
 	b.Run("Generated SpecEquals", func(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
-		for i := 0; i < b.N; i++ {
+		for b.Loop() {
 			r.DeepEqual(o)
 		}
 	})
+}
+
+func TestGetIP(t *testing.T) {
+	n := CiliumNode{
+		Spec: NodeSpec{
+			Addresses: []NodeAddress{
+				{
+					Type: addressing.NodeExternalIP,
+					IP:   "192.0.2.3",
+				},
+			},
+		},
+	}
+	ip := n.GetIP(false)
+	// Return the only IP present
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("192.0.2.3")))
+
+	n.Spec.Addresses = append(n.Spec.Addresses, NodeAddress{IP: "w.x.y.z", Type: addressing.NodeExternalIP})
+	ip = n.GetIP(false)
+	// Invalid external IPv4 address should return the existing external IPv4 address
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("192.0.2.3")))
+
+	n.Spec.Addresses = append(n.Spec.Addresses, NodeAddress{IP: "198.51.100.2", Type: addressing.NodeInternalIP})
+	ip = n.GetIP(false)
+	// The next priority should be NodeInternalIP
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("198.51.100.2")))
+
+	n.Spec.Addresses = append(n.Spec.Addresses, NodeAddress{IP: "2001:DB8::1", Type: addressing.NodeExternalIP})
+	ip = n.GetIP(true)
+	// The next priority should be NodeExternalIP and IPv6
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("2001:DB8::1")))
+
+	n.Spec.Addresses = append(n.Spec.Addresses, NodeAddress{IP: "w.x.y.z", Type: addressing.NodeExternalIP})
+	ip = n.GetIP(true)
+	// Invalid external IPv6 address should return the existing external IPv6 address
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("2001:DB8::1")))
+
+	n.Spec.Addresses = append(n.Spec.Addresses, NodeAddress{IP: "2001:DB8::2", Type: addressing.NodeInternalIP})
+	ip = n.GetIP(true)
+	// The next priority should be NodeInternalIP and IPv6
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("2001:DB8::2")))
+
+	n.Spec.Addresses = append(n.Spec.Addresses, NodeAddress{IP: "198.51.100.2", Type: addressing.NodeInternalIP})
+	ip = n.GetIP(false)
+	// Should still return NodeInternalIP and IPv4
+	require.NotNil(t, ip)
+	require.True(t, ip.Equal(net.ParseIP("198.51.100.2")))
+
+	n.Spec.Addresses = []NodeAddress{{IP: "w.x.y.z", Type: addressing.NodeExternalIP}}
+	ip = n.GetIP(false)
+	// Return a nil IP when no valid IPv4 addresses exist
+	require.Nil(t, ip)
+	ip = n.GetIP(true)
+	// Return a nil IP when no valid IPv6 addresses exist
+	require.Nil(t, ip)
 }

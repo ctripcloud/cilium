@@ -102,6 +102,21 @@ message EthernetSegmentIdentifier {
   bytes value = 2;
 }
 
+// VPLSNLRI represents the NLRI for:
+// - AFI=25, SAFI=65
+message VPLSNLRI {
+  // One of:
+  // - RouteDistinguisherTwoOctetASN
+  // - RouteDistinguisherIPAddress
+  // - RouteDistinguisherFourOctetASN
+  google.protobuf.Any rd = 1;
+  uint32 ve_id = 2;
+  uint32 ve_block_offset = 3;
+  uint32 ve_block_size = 4;
+  uint32 label_block_base = 5;
+}
+
+
 // EVPNEthernetAutoDiscoveryRoute represents the NLRI for:
 // - AFI=25, SAFI=70, RouteType=1
 message EVPNEthernetAutoDiscoveryRoute {
@@ -338,11 +353,22 @@ message LsPrefixV6NLRI {
   LsPrefixDescriptor prefix_descriptor = 2;
 }
 
+// TODO: LsSrPolicyiCandidatePathNLRI
+
+message LsSrv6SIDNLRI {
+    LsNodeDescriptor local_node = 1;
+    LsSrv6SIDInformation srv6_sid_information = 2;
+    LsMultiTopologyIdentifier multi_topo_id = 3;
+}
+
 // Based om RFC 7752, Table 1.
 enum LsNLRIType {
-  LS_NLRI_UNKNOWN = 0; LS_NLRI_NODE = 1; LS_NLRI_LINK = 2;
+  LS_NLRI_UNKNOWN = 0;
+  LS_NLRI_NODE = 1;
+  LS_NLRI_LINK = 2;
   LS_NLRI_PREFIX_V4 = 3;
   LS_NLRI_PREFIX_V6 = 4;
+  LS_NLRI_SRV6_SID = 6;
 }
 
 enum LsProtocolID {
@@ -362,6 +388,7 @@ message LsAddrPrefix {
   // - LsLinkNLRI
   // - LsPrefixV4NLRI
   // - LsPrefixV6NLRI
+  // - LsSrv6SIDNLRI
   google.protobuf.Any nlri = 2;
   uint32 length = 3;
   LsProtocolID protocol_id = 4;
@@ -398,6 +425,8 @@ message MUPType1SessionTransformedRoute {
   uint32 qfi = 5;
   uint32 endpoint_address_length = 6;
   string endpoint_address = 7;
+  uint32 source_address_length = 8;
+  string source_address = 9;
 }
 
 message MUPType2SessionTransformedRoute {
@@ -530,6 +559,11 @@ message MUPExtended {
   uint32 segment_id4 = 3;
 }
 
+message VPLSExtended {
+  uint32 control_flags = 1;
+  uint32 mtu = 2;
+}
+
 message UnknownExtended {
   uint32 type = 1;
   bytes value = 2;
@@ -551,6 +585,7 @@ message ExtendedCommunitiesAttribute {
   // - RedirectFourOctetAsSpecificExtended
   // - TrafficRemarkExtended
   // - MUPExtended
+  // - VPLSExtended
   // - UnknownExtended
   repeated google.protobuf.Any communities = 1;
 }
@@ -911,4 +946,13 @@ message PrefixSID {
   // - SRv6L3ServiceTLV Type 5
   // - SRv6L2ServiceTLV Type 6
   repeated google.protobuf.Any tlvs = 1;
+}
+
+// https://tools.ietf.org/html/rfc9552
+message LsSrv6SIDInformation {
+  repeated string sids = 1;
+}
+
+message LsMultiTopologyIdentifier {
+  repeated uint32 multi_topo_ids = 1;
 }

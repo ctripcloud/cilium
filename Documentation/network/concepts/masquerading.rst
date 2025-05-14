@@ -18,9 +18,6 @@ the network.
 .. image:: masquerade.png
     :align: center
 
-For IPv6 addresses masquerading is performed only when using iptables
-implementation mode.
-
 This behavior can be disabled with the option ``enable-ipv4-masquerade: false``
 for IPv4 and ``enable-ipv6-masquerade: false`` for IPv6 traffic leaving the host.
 
@@ -34,6 +31,16 @@ Setting the routable CIDR
   10.0.0.0/8`` (or ``ipv6-native-routing-cidr: fd00::/100`` for IPv6 addresses)
   in which case all destinations within that CIDR will **not** be masqueraded.
 
+  In the public cloud environment, if you don't configure ``ipv4-native-routing-cidr``, 
+  Cilium will automatically detect the VPC CIDR range as the native routing range. 
+  Cilium does not masquerade the source address for traffic that is natively
+  routable in the network, because it is possible for the endpoints to
+  communicate directly without NAT.
+  As a result, if masquerading is enabled, traffic from pods to other 
+  non-cluster resources within the same VPC (e.g., virtual machines) will be 
+  routed directly without masquerading the source IP address.
+
+
 Setting the masquerading interface
   See :ref:`masq_modes` for configuring the masquerading interfaces.
 
@@ -45,9 +52,20 @@ Implementation Modes
 eBPF-based
 **********
 
-The eBPF-based implementation is the most efficient
-implementation. It requires Linux kernel 4.19 and can be enabled with
+.. note::
+
+   **IPv6** BPF masquerading is a beta feature. Please provide feedback and
+   file a GitHub issue if you experience any problems. IPv4 BPF masquerading is
+   production-ready.
+
+.. note::
+   BPF masquerading is incompatible with Istio.
+
+The eBPF-based implementation is the most efficient implementation. It can be enabled with
 the ``bpf.masquerade=true`` helm option.
+
+By default, BPF masquerading also enables the BPF Host-Routing mode.
+See :ref:`eBPF_Host_Routing` for benefits and limitations of this mode.
 
 The current implementation depends on :ref:`the BPF NodePort feature <kubeproxy-free>`.
 The dependency will be removed in the future (:gh-issue:`13732`).
@@ -62,13 +80,13 @@ to determine which devices the program is running on:
 
 .. code-block:: shell-session
 
-    $ kubectl -n kube-system exec ds/cilium -- cilium status | grep Masquerading
+    $ kubectl -n kube-system exec ds/cilium -- cilium-dbg status | grep Masquerading
     Masquerading:   BPF (ip-masq-agent)   [eth0, eth1]  10.0.0.0/16
 
 From the output above, the program is running on the ``eth0`` and ``eth1`` devices.
 
 
-The eBPF-based masquerading can masquerade packets of the following IPv4 L4 protocols:
+The eBPF-based masquerading can masquerade packets of the following L4 protocols:
 
 - TCP
 - UDP
@@ -82,8 +100,9 @@ The eBPF-based masquerading can masquerade packets of the following IPv4 L4 prot
 
 By default, all packets from a pod destined to an IP address outside of the
 ``ipv4-native-routing-cidr`` range are masqueraded, except for packets destined
-to other cluster nodes. The exclusion CIDR is shown in the above output of
-``cilium status`` (``10.0.0.0/16``).
+to other cluster nodes (as with ``ipv6-native-routing-cidr`` for IPv6). The
+preceding output shows the exclusion CIDR of ``cilium status``
+(``10.0.0.0/16``).
 
 .. note::
 
@@ -96,8 +115,8 @@ To allow more fine-grained control, Cilium implements `ip-masq-agent
 <https://github.com/kubernetes-sigs/ip-masq-agent>`_ in eBPF which can be
 enabled with the ``ipMasqAgent.enabled=true`` helm option.
 
-The eBPF-based ip-masq-agent supports the ``nonMasqueradeCIDRs`` and
-``masqLinkLocal`` options set in a configuration file. A packet sent from a pod to
+The eBPF-based ip-masq-agent supports the ``nonMasqueradeCIDRs``, ``masqLinkLocal``, and
+``masqLinkLocalIPv6`` options set in a configuration file. A packet sent from a pod to
 a destination which belongs to any CIDR from the ``nonMasqueradeCIDRs`` is not
 going to be masqueraded. If the configuration file is empty, the agent will provision
 the following non-masquerade CIDRs:
@@ -115,7 +134,9 @@ the following non-masquerade CIDRs:
 - ``240.0.0.0/4``
 
 In addition, if the ``masqLinkLocal`` is not set or set to false, then
-``169.254.0.0/16`` is appended to the non-masquerade CIDRs list.
+``169.254.0.0/16`` is appended to the non-masquerade CIDRs list. For IPv6, if
+``masqLinkLocalIPv6`` is not set or set to false, ``fe80::/10`` is appended.
+
 
 The agent uses Fsnotify to track updates to the configuration file, so the original
 ``resyncInterval`` option is unnecessary.
@@ -123,6 +144,7 @@ The agent uses Fsnotify to track updates to the configuration file, so the origi
 The example below shows how to configure the agent via :term:`ConfigMap` and to verify it:
 
 .. literalinclude:: ../../../examples/kubernetes-ip-masq-agent/rfc1918.yaml
+     :language: yaml
 
 .. parsed-literal::
 
@@ -130,19 +152,16 @@ The example below shows how to configure the agent via :term:`ConfigMap` and to 
 
     $ # Wait ~60s until the ConfigMap is propagated into the configuration file
 
-    $ kubectl -n kube-system exec ds/cilium -- cilium bpf ipmasq list
+    $ kubectl -n kube-system exec ds/cilium -- cilium-dbg bpf ipmasq list
     IP PREFIX/ADDRESS
     10.0.0.0/8
     172.16.0.0/12
     192.168.0.0/16
 
 Alternatively, you can pass ``--set ipMasqAgent.config.nonMasqueradeCIDRs='{10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}'``
-and ``--set ipMasqAgent.config.masqLinkLocal=false`` when installing Cilium via Helm to
+and ``--set ipMasqAgent.config.masqLinkLocal=false`` (or with the corresponding
+option, for IPv6) when installing Cilium via Helm to
 configure the ``ip-masq-agent`` as above.
-
-.. note::
-
-    eBPF based masquerading is currently not supported for IPv6 traffic.
 
 iptables-based
 **************
@@ -159,3 +178,17 @@ option ``egress-masquerade-interfaces: eth0`` can be used.
    It is possible to specify an interface prefix as well, by specifying
    ``eth+``, all interfaces matching the prefix ``eth`` will be used for
    masquerading.
+
+For the advanced case where the routing layer would select different source addresses
+depending on the destination CIDR, the option ``enable-masquerade-to-route-source: "true"``
+can be used in order to masquerade to the source addresses rather than to the
+primary interface address. The latter is then only considered as a catch-all
+fallback, and for the default routes. For these advanced cases the user needs
+to ensure that there are no overlapping destination CIDRs as routes on the
+relevant masquerading interfaces.
+
+With the ``enable-masquerade-to-route-source: "true"`` option, Cilium will, 
+by default, use interfaces listed in the ``devices`` field as the egress masquerade interfaces 
+when ``egress-masquerade-interfaces`` is empty. When ``egress-masquerade-interfaces`` is set, 
+it takes precedence over ``devices`` to choose which network interface should perform masquerading.
+You can set ``egress-masquerade-interfaces`` to match multiple interfaces like this: ``eth+ ens+``.

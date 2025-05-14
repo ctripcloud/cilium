@@ -3,7 +3,9 @@
 
 package annotation
 
-import metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+import (
+	"regexp"
+)
 
 const (
 	// Prefix is the common prefix for all annotations
@@ -23,6 +25,21 @@ const (
 
 	// ServicePrefix is the common prefix for service related annotations.
 	ServicePrefix = "service.cilium.io"
+
+	// IPAMPrefix is the common prefix for IPAM related annotations.
+	IPAMPrefix = "ipam.cilium.io"
+
+	// LBIPAMPrefix is the common prefix for LB IPAM related annotations.
+	LBIPAMPrefix = "lbipam.cilium.io"
+
+	// CNIPrefix is the common prefix for CNI related annotations.
+	CNIPrefix = "cni.cilium.io"
+
+	// CECPrefix is the common prefix for CEC related annotations.
+	CECPrefix = "cec.cilium.io"
+
+	// PodAnnotationMAC is used to store the MAC address of the Pod.
+	PodAnnotationMAC = CNIPrefix + "/mac-address"
 
 	// PolicyName / PolicyNameAlias is an optional annotation to the NetworkPolicy
 	// resource which specifies the name of the policy node to which all
@@ -77,6 +94,10 @@ const (
 	GlobalService      = ServicePrefix + "/global"
 	GlobalServiceAlias = Prefix + "/global-service"
 
+	// GlobalServiceSyncEndpointSlice if set to true, marks a service to
+	// synchronize remote clusters endpoint slices to the local Kubernetes API
+	GlobalServiceSyncEndpointSlices = ServicePrefix + "/global-sync-endpoint-slices"
+
 	// SharedService / SharedServiceAlias if set to false, prevents a service
 	// from being shared, the default is true if GlobalService is set, otherwise
 	// false. Setting the annotation SharedService to false while setting
@@ -97,12 +118,55 @@ const (
 	ServiceAffinity      = ServicePrefix + "/affinity"
 	ServiceAffinityAlias = Prefix + "/service-affinity"
 
-	// ProxyVisibility / ProxyVisibilityAlias is the annotation name used to
-	// indicate whether proxy visibility should be enabled for a given pod (i.e.,
-	// all traffic for the pod is redirected to the proxy for the given port /
-	// protocol in the annotation
-	ProxyVisibility      = PolicyPrefix + "/proxy-visibility"
-	ProxyVisibilityAlias = Prefix + ".proxy-visibility"
+	// ServiceLoadBalancingAlgorithm indicates which backend selection algorithm
+	// for a given Service to use. This annotation will override the default
+	// value set in bpf-lb-algorithm.
+	// Allowed values:
+	// - random
+	// - maglev
+	ServiceLoadBalancingAlgorithm = ServicePrefix + "/lb-algorithm"
+
+	// ServiceNodeExposure is the label name used to mark a service to only a
+	// subset of the nodes which match the same value. For all other nodes, this
+	// service is ignored and not installed into their datapath.
+	ServiceNodeExposure = ServicePrefix + "/node"
+
+	// ServiceNodeSelectorExposure is the label name used to mark a service to only a
+	// subset of the nodes which match the label selector. For all other nodes, this
+	// service is ignored and not installed into their datapath.
+	ServiceNodeSelectorExposure = ServicePrefix + "/node-selector"
+
+	// ServiceTypeExposure is the annotation name used to mark what service type
+	// to provision (only single type is allowed; allowed types: "ClusterIP",
+	// "NodePort" and "LoadBalancer").
+	//
+	// For example, a LoadBalancer service includes ClusterIP and NodePort (unless
+	// allocateLoadBalancerNodePorts is set to false). To avoid provisioning
+	// the latter two, one can set the annotation with the value "LoadBalancer".
+	ServiceTypeExposure = ServicePrefix + "/type"
+
+	// ServiceSourceRangesPolicy is the annotation name used to specify the policy
+	// of the user-provided loadBalancerSourceRanges, meaning whether this CIDR
+	// list should act as an allow- or deny-list. Both "allow" or "deny" are
+	// possible values for this annotation.
+	ServiceSourceRangesPolicy = ServicePrefix + "/src-ranges-policy"
+
+	// ServiceProxyDelegation is the annotation name used to specify whether there
+	// should be delegation to a 3rd party proxy. Allowed values are "none" (default)
+	// and "delegate-if-local". The latter pushes all service packets to a user
+	// space proxy if the selected backend IP is the IP of the local node. If the
+	// selected backend IP is non-local then the BPF datapath forwards the packet
+	// back out again with the configured BPF load-balancing mechanism.
+	ServiceProxyDelegation = ServicePrefix + "/proxy-delegation"
+
+	// ServiceForwardingMode annotations determines the way packets are pushed to the
+	// remote backends.
+	// Allowed values are of type loadbalancer.SVCForwardingMode:
+	//  - dsr
+	//		use the configured DSR method
+	//  - snat
+	//		use SNAT so that reply traffic comes back
+	ServiceForwardingMode = ServicePrefix + "/forwarding-mode"
 
 	// NoTrack / NoTrackAlias is the annotation name used to store the port and
 	// protocol that we should bypass kernel conntrack for a given pod. This
@@ -111,18 +175,56 @@ const (
 	NoTrackAlias = Prefix + ".no-track-port"
 
 	// WireguardPubKey / WireguardPubKeyAlias is the annotation name used to store
-	// the Wireguard public key in the CiliumNode CRD that we need to use to encrypt
+	// the WireGuard public key in the CiliumNode CRD that we need to use to encrypt
 	// traffic to that node.
 	WireguardPubKey      = NetworkPrefix + "/wg-pub-key"
 	WireguardPubKeyAlias = Prefix + ".network.wg-pub-key"
+
+	// BGPVRouterAnnoPrefix is the prefix used for all Virtual Router annotations
+	// Its just a prefix, because the ASN of the Router is part of the annotation itself
+	BGPVRouterAnnoPrefix = "cilium.io/bgp-virtual-router."
+
+	// IPAMPoolKey is the annotation name used to store the IPAM pool name from
+	// which workloads should allocate their IP from
+	IPAMPoolKey = IPAMPrefix + "/ip-pool"
+
+	// IPAMIPv4PoolKey is the annotation name used to store the IPAM IPv4 pool name from
+	// which workloads should allocate their IP from
+	IPAMIPv4PoolKey = IPAMPrefix + "/ipv4-pool"
+
+	// IPAMIPv6PoolKey is the annotation name used to store the IPAM IPv6 pool name from
+	// which workloads should allocate their IP from
+	IPAMIPv6PoolKey = IPAMPrefix + "/ipv6-pool"
+
+	// IPAMIgnore is the annotation used to make the Cilium operator IPAM logic
+	// ignore the given CiliumNode object
+	IPAMIgnore = IPAMPrefix + "/ignore"
+
+	LBIPAMIPsKey     = LBIPAMPrefix + "/ips"
+	LBIPAMIPKeyAlias = Prefix + "/lb-ipam-ips"
+
+	LBIPAMSharingKey                  = LBIPAMPrefix + "/sharing-key"
+	LBIPAMSharingKeyAlias             = Prefix + "/lb-ipam-sharing-key"
+	LBIPAMSharingAcrossNamespace      = LBIPAMPrefix + "/sharing-cross-namespace"
+	LBIPAMSharingAcrossNamespaceAlias = Prefix + "/lb-ipam-sharing-cross-namespace"
+
+	CECInjectCiliumFilters = CECPrefix + "/inject-cilium-filters"
 )
+
+// CiliumPrefixRegex is a regex matching Cilium specific annotations.
+var CiliumPrefixRegex = regexp.MustCompile(`^([A-Za-z0-9]+\.)*cilium.io/`)
+
+type annotatedObject interface {
+	GetAnnotations() map[string]string
+}
 
 // Get returns the annotation value associated with the given key, or any of
 // the additional aliases if not found.
-func Get(obj metav1.Object, key string, aliases ...string) (value string, ok bool) {
+func Get(obj annotatedObject, key string, aliases ...string) (value string, ok bool) {
 	keys := append([]string{key}, aliases...)
+	annotations := obj.GetAnnotations()
 	for _, k := range keys {
-		if value, ok = obj.GetAnnotations()[k]; ok {
+		if value, ok = annotations[k]; ok {
 			return value, ok
 		}
 	}

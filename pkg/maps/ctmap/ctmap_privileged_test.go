@@ -4,11 +4,17 @@
 package ctmap
 
 import (
-	"unsafe"
-
-	. "gopkg.in/check.v1"
+	"context"
+	"math/rand/v2"
+	"net/netip"
+	"testing"
 
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/cilium/fake"
+	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/stream"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/maps/nat"
@@ -19,28 +25,43 @@ import (
 	"github.com/cilium/cilium/pkg/u8proto"
 )
 
-// Hook up gocheck into the "go test" runner.
-type CTMapPrivilegedTestSuite struct{}
-
-var _ = Suite(&CTMapPrivilegedTestSuite{})
-
 func init() {
-	InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
+	InitMapInfo(true, true, true)
 }
 
-func (k *CTMapPrivilegedTestSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+func setupCTMap(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
+	logger := hivetest.Logger(tb)
 
-	bpf.CheckOrMountFS("")
+	bpf.CheckOrMountFS(logger, "")
 	err := rlimit.RemoveMemlock()
-	c.Assert(err, IsNil)
+	require.NoError(tb, err)
 }
 
-func (k *CTMapPrivilegedTestSuite) Benchmark_MapUpdate(c *C) {
+func BenchmarkMapBatchLookup(b *testing.B) {
 	m := newMap(MapNameTCP4Global+"_test", mapTypeIPv4TCPGlobal)
-	_, err := m.OpenOrCreate()
+	err := m.OpenOrCreate()
+	assert.NoError(b, m.Map.Unpin())
+	assert.NoError(b, err)
+
+	_ = populateFakeDataCTMap4(b, m, option.CTMapEntriesGlobalTCPDefault)
+
+	b.ReportAllocs()
+
+	for b.Loop() {
+		count, err := m.Count(context.TODO())
+		assert.NoError(b, err)
+		assert.Greater(b, count, option.CTMapEntriesGlobalAnyDefault)
+	}
+}
+
+func Benchmark_MapUpdate(b *testing.B) {
+	setupCTMap(b)
+
+	m := newMap(MapNameTCP4Global+"_test", mapTypeIPv4TCPGlobal)
+	err := m.OpenOrCreate()
 	defer m.Map.Unpin()
-	c.Assert(err, IsNil)
+	require.NoError(b, err)
 
 	key := &CtKey4{
 		tuple.TupleKey4{
@@ -49,16 +70,14 @@ func (k *CTMapPrivilegedTestSuite) Benchmark_MapUpdate(c *C) {
 			DestPort:   0,
 			SourcePort: 0,
 			NextHeader: u8proto.TCP,
-			Flags:      0,
+			Flags:      tuple.TUPLE_F_OUT,
 		},
 	}
 	value := &CtEntry{
-		RxPackets:        4,
-		RxBytes:          216,
-		TxPackets:        4,
-		TxBytes:          216,
+		Packets:          4 + 4,
+		Bytes:            216 + 216,
 		Lifetime:         37459,
-		Flags:            0x0011,
+		Flags:            SeenNonSyn | RxClosing,
 		RevNAT:           0,
 		TxFlagsSeen:      0x02,
 		RxFlagsSeen:      0x14,
@@ -67,12 +86,12 @@ func (k *CTMapPrivilegedTestSuite) Benchmark_MapUpdate(c *C) {
 		LastRxReport:     15856,
 	}
 
-	c.Assert(c.N < 0xFFFF*0xFFFF, Equals, true)
-	for i := 0; i < c.N; i++ {
+	require.Less(b, b.N, 0xFFFF*0xFFFF)
+	for i := 0; b.Loop(); i++ {
 		key.DestPort = uint16(i % 0xFFFF)
 		key.SourcePort = uint16(i / 0xFFFF)
-		err := bpf.UpdateElement(m.Map.GetFd(), m.Map.Name(), unsafe.Pointer(key), unsafe.Pointer(value), 0)
-		c.Assert(err, IsNil)
+		err := m.Map.Update(key, value)
+		require.NoError(b, err)
 	}
 
 	a1 := make([]CtKey, 1)
@@ -86,30 +105,40 @@ func (k *CTMapPrivilegedTestSuite) Benchmark_MapUpdate(c *C) {
 		a2[0] = value
 	}
 
-	c.ResetTimer()
+	b.ResetTimer()
 	err = m.DumpWithCallback(cb)
-	c.Assert(err, IsNil)
-	t := m.Flush()
-	c.Assert(t, Equals, c.N)
+	require.NoError(b, err)
+
+	observable4, next4, complete4 := stream.Multicast[GCEvent]()
+	observable6, next6, complete6 := stream.Multicast[GCEvent]()
+	observable4.Observe(context.Background(), NatMapNext4, func(error) {})
+	observable6.Observe(context.Background(), NatMapNext6, func(error) {})
+	t := m.Flush(next4, next6)
+	complete4(nil)
+	complete6(nil)
+
+	require.Equal(b, b.N, t)
 }
 
 // TestCtGcIcmp tests whether ICMP NAT entries are removed upon a removal of
 // their CT entry (GH#12625).
-func (k *CTMapPrivilegedTestSuite) TestCtGcIcmp(c *C) {
+func TestCtGcIcmp(t *testing.T) {
+	setupCTMap(t)
+
 	// Init maps
-	natMap := nat.NewMap("cilium_nat_any4_test", true, 1000)
-	_, err := natMap.OpenOrCreate()
-	c.Assert(err, IsNil)
+	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	err := natMap.OpenOrCreate()
+	require.NoError(t, err)
 	defer natMap.Map.Unpin()
 
 	ctMapName := MapNameAny4Global + "_test"
-	setupMapInfo(mapTypeIPv4AnyGlobal, ctMapName,
-		&CtKey4Global{}, int(unsafe.Sizeof(CtKey4Global{})),
-		100, natMap)
+	mapInfo[mapTypeIPv4AnyGlobal] = mapAttributes{
+		natMap: natMap, natMapLock: mapInfo[mapTypeIPv4AnyGlobal].natMapLock,
+	}
 
 	ctMap := newMap(ctMapName, mapTypeIPv4AnyGlobal)
-	_, err = ctMap.OpenOrCreate()
-	c.Assert(err, IsNil)
+	err = ctMap.OpenOrCreate()
+	require.NoError(t, err)
 	defer ctMap.Map.Unpin()
 
 	// Create the following entries and check that they get GC-ed:
@@ -130,13 +159,12 @@ func (k *CTMapPrivilegedTestSuite) TestCtGcIcmp(c *C) {
 		},
 	}
 	ctVal := &CtEntry{
-		TxPackets: 1,
-		TxBytes:   216,
-		Lifetime:  37459,
+		Packets:  1,
+		Bytes:    216,
+		Lifetime: 37459,
 	}
-	err = bpf.UpdateElement(ctMap.Map.GetFd(), ctMap.Map.Name(), unsafe.Pointer(ctKey),
-		unsafe.Pointer(ctVal), 0)
-	c.Assert(err, IsNil)
+	err = ctMap.Map.Update(ctKey, ctVal)
+	require.NoError(t, err)
 
 	natKey := &nat.NatKey4{
 		TupleKey4Global: tuple.TupleKey4Global{
@@ -146,19 +174,18 @@ func (k *CTMapPrivilegedTestSuite) TestCtGcIcmp(c *C) {
 				DestPort:   0,
 				SourcePort: 0x3195,
 				NextHeader: u8proto.ICMP,
-				Flags:      0,
+				Flags:      tuple.TUPLE_F_OUT,
 			},
 		},
 	}
 	natVal := &nat.NatEntry4{
-		Created:   37400,
-		HostLocal: 1,
-		Addr:      types.IPv4{192, 168, 61, 11},
-		Port:      0x3195,
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv4{192, 168, 61, 11},
+		Port:    0x3195,
 	}
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
 	natKey = &nat.NatKey4{
 		TupleKey4Global: tuple.TupleKey4Global{
 			TupleKey4: tuple.TupleKey4{
@@ -167,69 +194,281 @@ func (k *CTMapPrivilegedTestSuite) TestCtGcIcmp(c *C) {
 				SourcePort: 0,
 				DestPort:   0x3195,
 				NextHeader: u8proto.ICMP,
-				Flags:      1,
+				Flags:      tuple.TUPLE_F_IN,
 			},
 		},
 	}
 	natVal = &nat.NatEntry4{
-		Created:   37400,
-		HostLocal: 1,
-		Addr:      types.IPv4{192, 168, 61, 11},
-		Port:      0x3195,
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv4{192, 168, 61, 11},
+		Port:    0x3195,
 	}
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
 
 	buf := make(map[string][]string)
 	err = ctMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 1)
+	require.NoError(t, err)
+	require.Len(t, buf, 1)
 
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 2)
+	require.NoError(t, err)
+	require.Len(t, buf, 2)
 
 	// GC and check whether NAT entries have been collected
-	filter := &GCFilter{
+	filter := GCFilter{
 		RemoveExpired: true,
 		Time:          39000,
 	}
-	stats := doGC4(ctMap, filter)
-	c.Assert(stats.aliveEntries, Equals, uint32(0))
-	c.Assert(stats.deleted, Equals, uint32(1))
+	mcast, next, complete := stream.Multicast[GCEvent]()
+	mcast.Observe(context.Background(), NatMapNext4, func(err error) {})
+	stats := doGCForFamily(ctMap, filter, next, nil, false, false)
+	complete(nil)
+	require.Equal(t, uint32(0), stats.aliveEntries)
+	require.Equal(t, uint32(1), stats.deleted)
 
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 0)
+	require.NoError(t, err)
+	require.Empty(t, buf)
+}
+
+// TestCtGcTcp tests whether TCP SNAT entries are removed upon a removal of
+// their CT entry.
+func TestCtGcTcp(t *testing.T) {
+	setupCTMap(t)
+	// Init maps
+	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	err := natMap.OpenOrCreate()
+	require.NoError(t, err)
+	defer natMap.Map.Unpin()
+
+	ctMapName := MapNameTCP4Global + "_test"
+	mapInfo[mapTypeIPv4TCPGlobal] = mapAttributes{
+		natMap: natMap, natMapLock: mapInfo[mapTypeIPv4TCPGlobal].natMapLock,
+	}
+
+	ctMap := newMap(ctMapName, mapTypeIPv4TCPGlobal)
+	err = ctMap.OpenOrCreate()
+	require.NoError(t, err)
+	defer ctMap.Map.Unpin()
+
+	// Create the following entries and check that they get GC-ed:
+	//	- CT:	TCP OUT 192.168.61.11:38193 -> 192.168.61.12:80 <..>
+	//	- NAT: 	TCP OUT 192.168.61.11:38193 -> 192.168.61.12:80 XLATE_SRC 192.168.61.11:38194
+	//		TCP IN 192.168.61.12:80 -> 192.168.61.11:38194 XLATE_DST 192.168.61.11:38193
+
+	ctKey := &CtKey4Global{
+		tuple.TupleKey4Global{
+			TupleKey4: tuple.TupleKey4{
+				SourceAddr: types.IPv4{192, 168, 61, 12},
+				DestAddr:   types.IPv4{192, 168, 61, 11},
+				SourcePort: 0x3195,
+				DestPort:   0x50,
+				NextHeader: u8proto.TCP,
+				Flags:      tuple.TUPLE_F_OUT,
+			},
+		},
+	}
+	ctVal := &CtEntry{
+		Packets:  1,
+		Bytes:    216,
+		Lifetime: 37459,
+	}
+	err = ctMap.Map.Update(ctKey, ctVal)
+	require.NoError(t, err)
+
+	natKey := &nat.NatKey4{
+		TupleKey4Global: tuple.TupleKey4Global{
+			TupleKey4: tuple.TupleKey4{
+				DestAddr:   types.IPv4{192, 168, 61, 12},
+				SourceAddr: types.IPv4{192, 168, 61, 11},
+				DestPort:   0x50,
+				SourcePort: 0x3195,
+				NextHeader: u8proto.TCP,
+				Flags:      tuple.TUPLE_F_OUT,
+			},
+		},
+	}
+	natVal := &nat.NatEntry4{
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv4{192, 168, 61, 11},
+		Port:    0x3295,
+	}
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
+	natKey = &nat.NatKey4{
+		TupleKey4Global: tuple.TupleKey4Global{
+			TupleKey4: tuple.TupleKey4{
+				SourceAddr: types.IPv4{192, 168, 61, 12},
+				DestAddr:   types.IPv4{192, 168, 61, 11},
+				SourcePort: 0x50,
+				DestPort:   0x3295,
+				NextHeader: u8proto.TCP,
+				Flags:      tuple.TUPLE_F_IN,
+			},
+		},
+	}
+	natVal = &nat.NatEntry4{
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv4{192, 168, 61, 11},
+		Port:    0x3195,
+	}
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
+
+	buf := make(map[string][]string)
+	err = ctMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Len(t, buf, 1)
+
+	buf = make(map[string][]string)
+	err = natMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Len(t, buf, 2)
+
+	// GC and check whether NAT entries have been collected
+	filter := GCFilter{
+		RemoveExpired: true,
+		Time:          39000,
+	}
+	mcast, next, complete := stream.Multicast[GCEvent]()
+	mcast.Observe(context.Background(), NatMapNext4, func(err error) {})
+	stats := doGCForFamily(ctMap, filter, next, nil, false, false)
+	complete(nil)
+	require.Equal(t, uint32(0), stats.aliveEntries)
+	require.Equal(t, uint32(1), stats.deleted)
+
+	buf = make(map[string][]string)
+	err = natMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Empty(t, buf)
+}
+
+// TestCtGcDsr tests whether DSR NAT entries are removed upon a removal of
+// their CT entry (== CT_EGRESS).
+func TestCtGcDsr(t *testing.T) {
+	setupCTMap(t)
+
+	// Init maps
+	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	err := natMap.OpenOrCreate()
+	require.NoError(t, err)
+	defer natMap.Map.Unpin()
+
+	ctMapName := MapNameTCP4Global + "_test"
+	mapInfo[mapTypeIPv4TCPGlobal] = mapAttributes{
+		natMap: natMap, natMapLock: mapInfo[mapTypeIPv4TCPGlobal].natMapLock,
+	}
+
+	ctMap := newMap(ctMapName, mapTypeIPv4TCPGlobal)
+	err = ctMap.OpenOrCreate()
+	require.NoError(t, err)
+	defer ctMap.Map.Unpin()
+
+	// Create the following entries and check that they get GC-ed:
+	//	- CT:	TCP OUT 1.1.1.1:1111 -> 192.168.61.11:8080 <..>
+	//	- NAT: 	TCP OUT 192.168.61.11:8080 -> 1.1.1.1:1111 XLATE_SRC 2.2.2.2:80
+
+	ctKey := &CtKey4Global{
+		tuple.TupleKey4Global{
+			TupleKey4: tuple.TupleKey4{
+				SourceAddr: types.IPv4{192, 168, 61, 11},
+				DestAddr:   types.IPv4{1, 1, 1, 1},
+				SourcePort: 0x5704,
+				DestPort:   0x901f,
+				NextHeader: u8proto.TCP,
+				Flags:      tuple.TUPLE_F_OUT,
+			},
+		},
+	}
+	ctVal := &CtEntry{
+		Packets:  1,
+		Bytes:    216,
+		Lifetime: 37459,
+		Flags:    DSRInternal,
+	}
+	err = ctMap.Map.Update(ctKey, ctVal)
+	require.NoError(t, err)
+
+	natKey := &nat.NatKey4{
+		TupleKey4Global: tuple.TupleKey4Global{
+			TupleKey4: tuple.TupleKey4{
+				DestAddr:   types.IPv4{1, 1, 1, 1},
+				SourceAddr: types.IPv4{192, 168, 61, 11},
+				DestPort:   0x5704,
+				SourcePort: 0x901f,
+				NextHeader: u8proto.TCP,
+				Flags:      tuple.TUPLE_F_OUT,
+			},
+		},
+	}
+	natVal := &nat.NatEntry4{
+		Created: 37400,
+		Addr:    types.IPv4{2, 2, 2, 2},
+		Port:    0x50,
+	}
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
+
+	buf := make(map[string][]string)
+	err = ctMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Len(t, buf, 1)
+
+	buf = make(map[string][]string)
+	err = natMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Len(t, buf, 1)
+
+	// GC and check whether NAT entry has been collected
+	filter := GCFilter{
+		RemoveExpired: true,
+		Time:          39000,
+	}
+	mcast, next, complete := stream.Multicast[GCEvent]()
+	mcast.Observe(context.Background(), NatMapNext4, func(err error) {})
+	stats := doGCForFamily(ctMap, filter, next, nil, false, false)
+	complete(nil)
+	require.Equal(t, uint32(0), stats.aliveEntries)
+	require.Equal(t, uint32(1), stats.deleted)
+
+	buf = make(map[string][]string)
+	err = natMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Empty(t, buf)
 }
 
 // TestOrphanNat checks whether dangling NAT entries are GC'd (GH#12686)
-func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
+func TestOrphanNatGC(t *testing.T) {
+	setupCTMap(t)
+
 	// Init maps
-	natMap := nat.NewMap("cilium_nat_any4_test", true, 1000)
-	_, err := natMap.OpenOrCreate()
-	c.Assert(err, IsNil)
+	natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, 1000)
+	err := natMap.OpenOrCreate()
+	require.NoError(t, err)
 	defer natMap.Map.Unpin()
 
 	ctMapAnyName := MapNameAny4Global + "_test"
-	setupMapInfo(mapTypeIPv4AnyGlobal, ctMapAnyName,
-		&CtKey4Global{}, int(unsafe.Sizeof(CtKey4Global{})),
-		100, natMap)
+	mapInfo[mapTypeIPv4AnyGlobal] = mapAttributes{
+		natMap: natMap, natMapLock: mapInfo[mapTypeIPv4AnyGlobal].natMapLock,
+	}
 	ctMapAny := newMap(ctMapAnyName, mapTypeIPv4AnyGlobal)
-	_, err = ctMapAny.OpenOrCreate()
-	c.Assert(err, IsNil)
+	err = ctMapAny.OpenOrCreate()
+	require.NoError(t, err)
 	defer ctMapAny.Map.Unpin()
 
 	ctMapTCPName := MapNameTCP4Global + "_test"
-	setupMapInfo(mapTypeIPv4TCPGlobal, ctMapTCPName,
-		&CtKey4Global{}, int(unsafe.Sizeof(CtKey4Global{})),
-		100, natMap)
+	mapInfo[mapTypeIPv4TCPGlobal] = mapAttributes{
+		natMap: natMap, natMapLock: mapInfo[mapTypeIPv4TCPGlobal].natMapLock,
+	}
 	ctMapTCP := newMap(ctMapTCPName, mapTypeIPv4TCPGlobal)
-	_, err = ctMapTCP.OpenOrCreate()
-	c.Assert(err, IsNil)
+	err = ctMapTCP.OpenOrCreate()
+	require.NoError(t, err)
 	defer ctMapTCP.Map.Unpin()
 
 	// Create the following entries and check that SNAT entries are NOT GC-ed
@@ -266,13 +505,12 @@ func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
 		},
 	}
 	ctVal := &CtEntry{
-		TxPackets: 1,
-		TxBytes:   216,
-		Lifetime:  37459,
+		Packets:  1,
+		Bytes:    216,
+		Lifetime: 37459,
 	}
-	err = bpf.UpdateElement(ctMapAny.Map.GetFd(), ctMapAny.Map.Name(), unsafe.Pointer(ctKey),
-		unsafe.Pointer(ctVal), 0)
-	c.Assert(err, IsNil)
+	err = ctMapAny.Map.Update(ctKey, ctVal)
+	require.NoError(t, err)
 
 	natKey := &nat.NatKey4{
 		TupleKey4Global: tuple.TupleKey4Global{
@@ -287,14 +525,13 @@ func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
 		},
 	}
 	natVal := &nat.NatEntry4{
-		Created:   37400,
-		HostLocal: 1,
-		Addr:      types.IPv4{10, 23, 32, 45},
-		Port:      0x51d6,
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv4{10, 23, 32, 45},
+		Port:    0x51d6,
 	}
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
 	natKey = &nat.NatKey4{
 		TupleKey4Global: tuple.TupleKey4Global{
 			TupleKey4: tuple.TupleKey4{
@@ -308,127 +545,50 @@ func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
 		},
 	}
 	natVal = &nat.NatEntry4{
-		Created:   37400,
-		HostLocal: 1,
-		Addr:      types.IPv4{10, 23, 32, 45},
-		Port:      0x50d6,
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv4{10, 23, 32, 45},
+		Port:    0x50d6,
 	}
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
 
 	stats := PurgeOrphanNATEntries(ctMapTCP, ctMapAny)
-	c.Assert(stats.IngressAlive, Equals, uint32(1))
-	c.Assert(stats.IngressDeleted, Equals, uint32(0))
-	c.Assert(stats.EgressAlive, Equals, uint32(1))
-	c.Assert(stats.EgressDeleted, Equals, uint32(0))
+	require.Equal(t, uint32(1), stats.IngressAlive)
+	require.Equal(t, uint32(0), stats.IngressDeleted)
+	require.Equal(t, uint32(1), stats.EgressAlive)
+	require.Equal(t, uint32(0), stats.EgressDeleted)
 	// Check that both entries haven't removed
 	buf := make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 2)
+	require.NoError(t, err)
+	require.Len(t, buf, 2)
 
 	// Now remove the CT entry which should remove both NAT entries
-	err = bpf.DeleteElement(ctMapAny.Map.GetFd(), unsafe.Pointer(ctKey))
-	c.Assert(err, IsNil)
+	err = ctMapAny.Map.Delete(ctKey)
+	require.NoError(t, err)
 	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapAny)
-	c.Assert(stats.IngressDeleted, Equals, uint32(1))
-	c.Assert(stats.IngressAlive, Equals, uint32(0))
-	c.Assert(stats.EgressDeleted, Equals, uint32(1))
-	c.Assert(stats.EgressAlive, Equals, uint32(0))
+	require.Equal(t, uint32(1), stats.IngressDeleted)
+	require.Equal(t, uint32(0), stats.IngressAlive)
+	require.Equal(t, uint32(1), stats.EgressDeleted)
+	require.Equal(t, uint32(0), stats.EgressAlive)
 	// Check that both orphan NAT entries have been removed
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 0)
+	require.NoError(t, err)
+	require.Empty(t, buf)
 
 	// Create only CT_INGRESS NAT entry which should be removed
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
 
 	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapAny)
-	c.Assert(stats.IngressDeleted, Equals, uint32(1))
-	c.Assert(stats.EgressDeleted, Equals, uint32(0))
+	require.Equal(t, uint32(1), stats.IngressDeleted)
+	require.Equal(t, uint32(0), stats.EgressDeleted)
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 0)
-
-	// Test DSR (old, tracked by bpf_lxc)
-	//
-	// Create the following entries and check that SNAT entries are NOT GC-ed
-	// (as we have the CT entry which they belong to):
-	//
-	//     CT:	TCP IN  10.0.2.10:50000  -> 10.20.30.40:1234
-	//     NAT:	TCP OUT 10.20.30.40:1234 -> 10.0.2.10:50000 XLATE_SRC 10.0.2.20:40000
-
-	ctKey = &CtKey4Global{
-		TupleKey4Global: tuple.TupleKey4Global{
-			TupleKey4: tuple.TupleKey4{
-				DestAddr:   types.IPv4{10, 0, 2, 10},
-				SourceAddr: types.IPv4{10, 20, 30, 40},
-				SourcePort: 0x50c3,
-				DestPort:   0xd204,
-				NextHeader: u8proto.TCP,
-				Flags:      tuple.TUPLE_F_IN,
-			},
-		},
-	}
-	ctVal = &CtEntry{
-		TxPackets: 1,
-		TxBytes:   216,
-		Lifetime:  37459,
-	}
-	err = bpf.UpdateElement(ctMapTCP.Map.GetFd(), ctMapTCP.Map.Name(), unsafe.Pointer(ctKey),
-		unsafe.Pointer(ctVal), 0)
-	c.Assert(err, IsNil)
-
-	natKey = &nat.NatKey4{
-		TupleKey4Global: tuple.TupleKey4Global{
-			TupleKey4: tuple.TupleKey4{
-				SourceAddr: types.IPv4{10, 20, 30, 40},
-				DestAddr:   types.IPv4{10, 0, 2, 10},
-				SourcePort: 0xd204,
-				DestPort:   0x50c3,
-				NextHeader: u8proto.TCP,
-				Flags:      tuple.TUPLE_F_OUT,
-			},
-		},
-	}
-	natVal = &nat.NatEntry4{
-		Created: 37400,
-		Addr:    types.IPv4{10, 0, 2, 20},
-		Port:    0x409c,
-	}
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
-
-	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapTCP)
-	c.Assert(stats.IngressAlive, Equals, uint32(0))
-	c.Assert(stats.IngressDeleted, Equals, uint32(0))
-	c.Assert(stats.EgressAlive, Equals, uint32(1))
-	c.Assert(stats.EgressDeleted, Equals, uint32(0))
-	// Check that the entry hasn't been removed
-	buf = make(map[string][]string)
-	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 1)
-
-	// Now remove the CT entry which should remove the NAT entry
-	err = bpf.DeleteElement(ctMapTCP.Map.GetFd(), unsafe.Pointer(ctKey))
-	c.Assert(err, IsNil)
-	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapTCP)
-	c.Assert(stats.IngressAlive, Equals, uint32(0))
-	c.Assert(stats.IngressDeleted, Equals, uint32(0))
-	c.Assert(stats.EgressAlive, Equals, uint32(0))
-	c.Assert(stats.EgressDeleted, Equals, uint32(1))
-	// Check that the orphan NAT entry has been removed
-	buf = make(map[string][]string)
-	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 0)
+	require.NoError(t, err)
+	require.Empty(t, buf)
 
 	// Test DSR (new, tracked by nodeport.h)
 	//
@@ -451,13 +611,13 @@ func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
 		},
 	}
 	ctVal = &CtEntry{
-		TxPackets: 1,
-		TxBytes:   216,
-		Lifetime:  37459,
+		Packets:  1,
+		Bytes:    216,
+		Lifetime: 37459,
+		Flags:    DSRInternal,
 	}
-	err = bpf.UpdateElement(ctMapTCP.Map.GetFd(), ctMapTCP.Map.Name(), unsafe.Pointer(ctKey),
-		unsafe.Pointer(ctVal), 0)
-	c.Assert(err, IsNil)
+	err = ctMapTCP.Map.Update(ctKey, ctVal)
+	require.NoError(t, err)
 
 	natKey = &nat.NatKey4{
 		TupleKey4Global: tuple.TupleKey4Global{
@@ -476,58 +636,80 @@ func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
 		Addr:    types.IPv4{10, 0, 2, 20},
 		Port:    0x409c,
 	}
-	err = bpf.UpdateElement(natMap.Map.GetFd(), natMap.Map.Name(), unsafe.Pointer(natKey),
-		unsafe.Pointer(natVal), 0)
-	c.Assert(err, IsNil)
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
 
 	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapTCP)
-	c.Assert(stats.IngressAlive, Equals, uint32(0))
-	c.Assert(stats.IngressDeleted, Equals, uint32(0))
-	c.Assert(stats.EgressAlive, Equals, uint32(1))
-	c.Assert(stats.EgressDeleted, Equals, uint32(0))
+	require.Equal(t, uint32(0), stats.IngressAlive)
+	require.Equal(t, uint32(0), stats.IngressDeleted)
+	require.Equal(t, uint32(1), stats.EgressAlive)
+	require.Equal(t, uint32(0), stats.EgressDeleted)
 	// Check that the entry hasn't been removed
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 1)
+	require.NoError(t, err)
+	require.Len(t, buf, 1)
 
 	// Now remove the CT entry which should remove the NAT entry
-	err = bpf.DeleteElement(ctMapTCP.Map.GetFd(), unsafe.Pointer(ctKey))
-	c.Assert(err, IsNil)
+	err = ctMapTCP.Map.Delete(ctKey)
+	require.NoError(t, err)
 	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapTCP)
-	c.Assert(stats.IngressAlive, Equals, uint32(0))
-	c.Assert(stats.IngressDeleted, Equals, uint32(0))
-	c.Assert(stats.EgressAlive, Equals, uint32(0))
-	c.Assert(stats.EgressDeleted, Equals, uint32(1))
+	require.Equal(t, uint32(0), stats.IngressAlive)
+	require.Equal(t, uint32(0), stats.IngressDeleted)
+	require.Equal(t, uint32(0), stats.EgressAlive)
+	require.Equal(t, uint32(1), stats.EgressDeleted)
 	// Check that the orphan NAT entry has been removed
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 0)
+	require.NoError(t, err)
+	require.Empty(t, buf)
+
+	// When a connection is re-opened and switches from DSR to local-backend,
+	// its CT entry gets re-created but uses the same CT tuple as key.
+	//
+	// Validate that we clean up the stale DSR NAT entry in such a case.
+	ctVal.Flags = 0
+
+	err = ctMapTCP.Map.Update(ctKey, ctVal)
+	require.NoError(t, err)
+
+	err = natMap.Map.Update(natKey, natVal)
+	require.NoError(t, err)
+
+	stats = PurgeOrphanNATEntries(ctMapTCP, ctMapTCP)
+	require.Equal(t, uint32(0), stats.IngressAlive)
+	require.Equal(t, uint32(0), stats.IngressDeleted)
+	require.Equal(t, uint32(0), stats.EgressAlive)
+	require.Equal(t, uint32(1), stats.EgressDeleted)
+	// Check that the orphan NAT entry has been removed
+	buf = make(map[string][]string)
+	err = natMap.Map.Dump(buf)
+	require.NoError(t, err)
+	require.Empty(t, buf)
 
 	// Let's check IPv6
 
-	natMapV6 := nat.NewMap("cilium_nat_any6_test", false, 1000)
-	_, err = natMapV6.OpenOrCreate()
-	c.Assert(err, IsNil)
+	natMapV6 := nat.NewMap("cilium_nat_any6_test", nat.IPv6, 1000)
+	err = natMapV6.OpenOrCreate()
+	require.NoError(t, err)
 	defer natMapV6.Map.Unpin()
 
 	ctMapAnyName = MapNameAny6Global + "_test"
-	setupMapInfo(mapTypeIPv6AnyGlobal, ctMapAnyName,
-		&CtKey6Global{}, int(unsafe.Sizeof(CtKey6Global{})),
-		100, natMapV6)
+	mapInfo[mapTypeIPv6AnyGlobal] = mapAttributes{
+		natMap: natMapV6, natMapLock: mapInfo[mapTypeIPv6AnyGlobal].natMapLock,
+	}
 	ctMapAnyV6 := newMap(ctMapAnyName, mapTypeIPv6AnyGlobal)
-	_, err = ctMapAnyV6.OpenOrCreate()
-	c.Assert(err, IsNil)
+	err = ctMapAnyV6.OpenOrCreate()
+	require.NoError(t, err)
 	defer ctMapAnyV6.Map.Unpin()
 
 	ctMapTCPName = MapNameTCP6Global + "_test"
-	setupMapInfo(mapTypeIPv6TCPGlobal, ctMapTCPName,
-		&CtKey6Global{}, int(unsafe.Sizeof(CtKey6Global{})),
-		100, natMapV6)
+	mapInfo[mapTypeIPv6TCPGlobal] = mapAttributes{
+		natMap: natMapV6, natMapLock: mapInfo[mapTypeIPv6TCPGlobal].natMapLock,
+	}
 	ctMapTCPV6 := newMap(ctMapTCPName, mapTypeIPv6TCPGlobal)
-	_, err = ctMapTCP.OpenOrCreate()
-	c.Assert(err, IsNil)
+	err = ctMapTCP.OpenOrCreate()
+	require.NoError(t, err)
 	defer ctMapTCPV6.Map.Unpin()
 
 	natKeyV6 := &nat.NatKey6{
@@ -543,20 +725,195 @@ func (k *CTMapPrivilegedTestSuite) TestOrphanNatGC(c *C) {
 		},
 	}
 	natValV6 := &nat.NatEntry6{
-		Created:   37400,
-		HostLocal: 1,
-		Addr:      types.IPv6{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2},
-		Port:      0x51d6,
+		Created: 37400,
+		NeedsCT: 1,
+		Addr:    types.IPv6{2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2},
+		Port:    0x51d6,
 	}
-	err = bpf.UpdateElement(natMapV6.Map.GetFd(), natMapV6.Map.Name(), unsafe.Pointer(natKeyV6),
-		unsafe.Pointer(natValV6), 0)
-	c.Assert(err, IsNil)
+	err = natMapV6.Map.Update(natKeyV6, natValV6)
+	require.NoError(t, err)
 
 	stats = PurgeOrphanNATEntries(ctMapTCPV6, ctMapAnyV6)
-	c.Assert(stats.IngressDeleted, Equals, uint32(1))
-	c.Assert(stats.EgressDeleted, Equals, uint32(0))
+	require.Equal(t, uint32(1), stats.IngressDeleted)
+	require.Equal(t, uint32(0), stats.EgressDeleted)
 	buf = make(map[string][]string)
 	err = natMap.Map.Dump(buf)
-	c.Assert(err, IsNil)
-	c.Assert(len(buf), Equals, 0)
+	require.NoError(t, err)
+	require.Empty(t, buf)
+}
+
+// TestCount checks whether the CT map batch lookup dumps the count of the
+// entire map.
+func TestCount(t *testing.T) {
+	testutils.PrivilegedTest(t)
+
+	// Set the max size of the map explicitly so we can provide enough buffer
+	// for the LRU map to avoid eviction that makes the assertions within this
+	// test indeterministic and consequently cause flakes.
+	prev := option.Config.CTMapEntriesGlobalTCP
+	defer func() { option.Config.CTMapEntriesGlobalTCP = prev }()
+	option.Config.CTMapEntriesGlobalTCP = 524288
+	size := 8192 // choose a reasonbly large map that does not make test time too long.
+
+	m := newMap(MapNameTCP4Global+"_test", mapTypeIPv4TCPGlobal)
+	err := m.OpenOrCreate()
+	assert.NoError(t, err)
+	assert.NoError(t, m.Map.Unpin())
+
+	cache := populateFakeDataCTMap4(t, m, size)
+	initial := len(cache)
+
+	batchCount, err := m.Count(context.TODO())
+	assert.Equal(t, initial, batchCount)
+	assert.NoError(t, err)
+
+	toDelete := size / 4
+	for k := range cache {
+		if err := m.Delete(k); err != nil {
+			t.Fatal(err)
+		}
+		delete(cache, k)
+
+		batchCount, err := m.Count(context.TODO())
+		assert.Equal(t, len(cache), batchCount)
+		assert.NoError(t, err)
+
+		toDelete--
+		if toDelete <= 0 {
+			break
+		}
+	}
+
+	batchCount, err = m.Count(context.TODO())
+	assert.Equal(t, len(cache), batchCount)
+	assert.NoError(t, err)
+
+	var count int
+	assert.NoError(t, m.DumpWithCallback(func(_ bpf.MapKey, _ bpf.MapValue) { count++ }))
+	assert.Equal(t, count, batchCount)
+	assert.Equal(t, len(cache), batchCount)
+}
+
+func populateFakeDataCTMap4(tb testing.TB, m CtMap, size int) map[*CtKey4Global]struct{} {
+	tb.Helper()
+
+	protos := []int{int(u8proto.ANY), int(u8proto.ICMP), int(u8proto.TCP), int(u8proto.UDP), int(u8proto.ICMPv6), int(u8proto.SCTP)}
+	flags := []int{tuple.TUPLE_F_IN, tuple.TUPLE_F_OUT, tuple.TUPLE_F_RELATED, tuple.TUPLE_F_SERVICE}
+	genKey := func() *CtKey4Global {
+		return &CtKey4Global{
+			TupleKey4Global: tuple.TupleKey4Global{
+				TupleKey4: tuple.TupleKey4{
+					DestAddr:   netip.MustParseAddr(fake.IP(fake.WithIPv4())).As4(),
+					SourceAddr: netip.MustParseAddr(fake.IP(fake.WithIPv4())).As4(),
+					DestPort:   uint16(fake.Port()),
+					SourcePort: uint16(fake.Port()),
+					NextHeader: u8proto.U8proto(protos[rand.IntN(len(protos))]),
+					Flags:      uint8(flags[rand.IntN(len(flags))]),
+				},
+			},
+		}
+	}
+	value := &CtEntry{
+		Packets:          4 + 4,
+		Bytes:            216 + 216,
+		Lifetime:         37459,
+		Flags:            SeenNonSyn | RxClosing,
+		RevNAT:           0,
+		TxFlagsSeen:      0x02,
+		RxFlagsSeen:      0x14,
+		SourceSecurityID: 40653,
+		LastTxReport:     15856,
+		LastRxReport:     15856,
+	}
+
+	cache := make(map[*CtKey4Global]struct{}, size)
+	for len(cache) < size {
+		key := genKey()
+		if _, needGenerate := cache[key]; needGenerate {
+			continue
+		}
+		if err := m.Update(key, value); err != nil {
+			tb.Fatal(err)
+		}
+		cache[key] = struct{}{}
+	}
+
+	return cache
+}
+
+func BenchmarkCtGcTcpXL(t *testing.B) {
+	benchmarkCtGc(t, 1<<24) // max size
+}
+
+func BenchmarkCtGcTcpL(t *testing.B) {
+	benchmarkCtGc(t, 1<<22)
+}
+
+func BenchmarkCtGcTcpM(t *testing.B) {
+	benchmarkCtGc(t, 1<<17)
+}
+
+func benchmarkCtGc(t *testing.B, size int) {
+	for t.Loop() {
+		t.StopTimer()
+		setupCTMap(t)
+		// Init maps
+		natMap := nat.NewMap("cilium_nat_any4_test", nat.IPv4, size)
+		err := natMap.OpenOrCreate()
+		assert.NoError(t, err)
+		defer natMap.Map.Unpin()
+
+		ctMapName := MapNameTCP4Global + "_test"
+		mapInfo[mapTypeIPv4TCPGlobal] = mapAttributes{
+			natMap: natMap, natMapLock: mapInfo[mapTypeIPv4TCPGlobal].natMapLock,
+		}
+
+		prev := option.Config.CTMapEntriesGlobalTCP
+		option.Config.CTMapEntriesGlobalTCP = size
+		defer func() {
+			option.Config.CTMapEntriesGlobalTCP = prev
+		}()
+		ctMap := newMap(ctMapName, mapTypeIPv4TCPGlobal)
+		err = ctMap.OpenOrCreate()
+		assert.NoError(t, err)
+		defer ctMap.Map.Unpin()
+
+		t.Logf("populating test map (size=%d)", size)
+		for i := range size {
+			var dest types.IPv4
+			dest[0] = byte(i >> 24)
+			dest[1] = byte(i >> 16)
+			dest[2] = byte(i >> 8)
+			dest[3] = byte(i)
+			ctKey := &CtKey4Global{
+				tuple.TupleKey4Global{
+					TupleKey4: tuple.TupleKey4{
+						SourceAddr: types.IPv4{192, 168, 61, 12},
+						DestAddr:   dest,
+						SourcePort: 0x3195,
+						DestPort:   0x50,
+						NextHeader: u8proto.TCP,
+						Flags:      tuple.TUPLE_F_OUT,
+					},
+				},
+			}
+			ctVal := &CtEntry{
+				Packets:  1,
+				Bytes:    216,
+				Lifetime: 2,
+			}
+			err = ctMap.Map.Update(ctKey, ctVal)
+			assert.NoError(t, err)
+		}
+		// GC and check whether NAT entries have been collected
+		filter := GCFilter{
+			RemoveExpired: true,
+			Time:          1,
+		}
+
+		t.Logf("starting gc")
+		defer t.Logf("done gc pass!")
+		t.StartTimer()
+		doGCForFamily(ctMap, filter, func(g GCEvent) {}, nil, false, false)
+	}
 }

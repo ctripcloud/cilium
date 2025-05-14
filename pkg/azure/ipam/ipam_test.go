@@ -4,44 +4,38 @@
 package ipam
 
 import (
-	"context"
 	"fmt"
+	"log/slog"
+	"net/netip"
 	"testing"
 	"time"
 
-	"gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	apimock "github.com/cilium/cilium/pkg/azure/api/mock"
 	"github.com/cilium/cilium/pkg/azure/types"
-	"github.com/cilium/cilium/pkg/cidr"
 	"github.com/cilium/cilium/pkg/ipam"
 	metricsmock "github.com/cilium/cilium/pkg/ipam/metrics/mock"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/testutils"
 )
-
-func Test(t *testing.T) {
-	check.TestingT(t)
-}
-
-type IPAMSuite struct{}
-
-var _ = check.Suite(&IPAMSuite{})
 
 var (
 	testSubnet = &ipamTypes.Subnet{
 		ID:               "subnet-1",
 		VirtualNetworkID: "vpc-1",
-		CIDR:             cidr.MustParseCIDR("1.1.0.0/16"),
+		CIDR:             netip.MustParsePrefix("1.1.0.0/16"),
 	}
 
 	testSubnets = []*ipamTypes.Subnet{
-		{ID: "s-1", CIDR: cidr.MustParseCIDR("1.1.0.0/16"), VirtualNetworkID: "vpc-1"},
-		{ID: "s-2", CIDR: cidr.MustParseCIDR("2.2.0.0/16"), VirtualNetworkID: "vpc-1"},
-		{ID: "s-3", CIDR: cidr.MustParseCIDR("3.3.3.3/16"), VirtualNetworkID: "vpc-1"},
+		{ID: "s-1", CIDR: netip.MustParsePrefix("1.1.0.0/16"), VirtualNetworkID: "vpc-1"},
+		{ID: "s-2", CIDR: netip.MustParsePrefix("2.2.0.0/16"), VirtualNetworkID: "vpc-1"},
+		{ID: "s-3", CIDR: netip.MustParsePrefix("3.3.3.3/16"), VirtualNetworkID: "vpc-1"},
 	}
 
 	testVnet = &ipamTypes.VirtualNetwork{
@@ -123,7 +117,7 @@ func newCiliumNode(node, instanceID string, preAllocate, minAllocate int) *v2.Ci
 	return cn
 }
 
-func updateCiliumNode(cn *v2.CiliumNode, used int) *v2.CiliumNode {
+func updateCiliumNode(logger *slog.Logger, cn *v2.CiliumNode, used int) *v2.CiliumNode {
 	cn.Status.IPAM.Used = ipamTypes.AllocationMap{}
 	for ip, ipAllocation := range cn.Spec.IPAM.Pool {
 		if used > 0 {
@@ -134,7 +128,7 @@ func updateCiliumNode(cn *v2.CiliumNode, used int) *v2.CiliumNode {
 		}
 	}
 
-	log.Fatalf("Not enough adddresses available to simulate usage")
+	logging.Fatal(logger, "Not enough addresses available to simulate usage")
 
 	return cn
 }
@@ -147,14 +141,14 @@ func reachedAddressesNeeded(mngr *ipam.NodeManager, nodeName string, needed int)
 }
 
 // TestIpamPreAllocate8 tests IPAM with pre-allocation=8, min-allocate=0
-func (e *IPAMSuite) TestIpamPreAllocate8(c *check.C) {
+func TestIpamPreAllocate8(t *testing.T) {
 	preAllocate := 8
 	minAllocate := 0
 	toUse := 7
 
 	api := apimock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVnet})
-	instances := NewInstancesManager(api)
-	c.Assert(instances, check.Not(check.IsNil))
+	instances := NewInstancesManager(hivetest.Logger(t), api)
+	require.NotNil(t, instances)
 
 	m := ipamTypes.NewInstanceMap()
 
@@ -171,52 +165,53 @@ func (e *IPAMSuite) TestIpamPreAllocate8(c *check.C) {
 		State: types.StateSucceeded,
 	}
 	resource.SetID("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm1/networkInterfaces/vmss11")
-	m.Update("vm1", ipamTypes.InterfaceRevision{
+	vm1ID := "/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm1"
+	m.Update(vm1ID, ipamTypes.InterfaceRevision{
 		Resource: resource.DeepCopy(),
 	})
 	api.UpdateInstances(m)
 
-	instances.Resync(context.TODO())
+	instances.Resync(t.Context())
 
 	k8sapi := newK8sMock()
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsmock.NewMockMetrics(), 10, false, false)
-	c.Assert(err, check.IsNil)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsmock.NewMockMetrics(), 10, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, mngr)
 
-	cn := newCiliumNode("node1", "vm1", preAllocate, minAllocate)
+	cn := newCiliumNode("node1", vm1ID, preAllocate, minAllocate)
 	statusRevision := k8sapi.statusRevision()
-	mngr.Update(cn)
-	c.Assert(testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second), check.IsNil)
+	mngr.Upsert(cn)
+	require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second))
 	// Wait for k8s status to be updated
-	c.Assert(testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second), check.IsNil)
+	require.NoError(t, testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second))
 	statusRevision = k8sapi.statusRevision()
 
 	node := mngr.Get("node1")
-	c.Assert(node, check.Not(check.IsNil))
-	c.Assert(node.Stats().AvailableIPs, check.Equals, preAllocate)
-	c.Assert(node.Stats().UsedIPs, check.Equals, 0)
+	require.NotNil(t, node)
+	require.Equal(t, preAllocate, node.Stats().IPv4.AvailableIPs)
+	require.Equal(t, 0, node.Stats().IPv4.UsedIPs)
 
 	// Use 7 out of 8 IPs
-	mngr.Update(updateCiliumNode(k8sapi.getLatestNode("node1"), toUse))
-	c.Assert(testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second), check.IsNil)
+	mngr.Upsert(updateCiliumNode(hivetest.Logger(t), k8sapi.getLatestNode("node1"), toUse))
+	require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second))
 	// Wait for k8s status to be updated
-	c.Assert(testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second), check.IsNil)
+	require.NoError(t, testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second))
 
 	node = mngr.Get("node1")
-	c.Assert(node, check.Not(check.IsNil))
-	c.Assert(node.Stats().AvailableIPs, check.Equals, toUse+preAllocate)
-	c.Assert(node.Stats().UsedIPs, check.Equals, toUse)
+	require.NotNil(t, node)
+	require.Equal(t, toUse+preAllocate, node.Stats().IPv4.AvailableIPs)
+	require.Equal(t, toUse, node.Stats().IPv4.UsedIPs)
 }
 
 // TestIpamMinAllocate10 tests IPAM with pre-allocation=8, min-allocate=10
-func (e *IPAMSuite) TestIpamMinAllocate10(c *check.C) {
+func TestIpamMinAllocate10(t *testing.T) {
 	preAllocate := 8
 	minAllocate := 10
 	toUse := 7
 
 	api := apimock.NewAPI([]*ipamTypes.Subnet{testSubnet}, []*ipamTypes.VirtualNetwork{testVnet})
-	instances := NewInstancesManager(api)
-	c.Assert(instances, check.Not(check.IsNil))
+	instances := NewInstancesManager(hivetest.Logger(t), api)
+	require.NotNil(t, instances)
 
 	m := ipamTypes.NewInstanceMap()
 
@@ -233,45 +228,47 @@ func (e *IPAMSuite) TestIpamMinAllocate10(c *check.C) {
 		State: types.StateSucceeded,
 	}
 	resource.SetID("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm1/networkInterfaces/vmss11")
-	m.Update("vm1", ipamTypes.InterfaceRevision{
+	vm1ID := "/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm1"
+	m.Update(vm1ID, ipamTypes.InterfaceRevision{
 		Resource: resource.DeepCopy(),
 	})
 	api.UpdateInstances(m)
 
-	instances.Resync(context.TODO())
+	instances.Resync(t.Context())
 
 	k8sapi := newK8sMock()
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metricsmock.NewMockMetrics(), 10, false, false)
-	c.Assert(err, check.IsNil)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metricsmock.NewMockMetrics(), 10, false, false)
+	require.NoError(t, err)
+	require.NotNil(t, mngr)
 
-	cn := newCiliumNode("node1", "vm1", preAllocate, minAllocate)
+	cn := newCiliumNode("node1", vm1ID, preAllocate, minAllocate)
 	statusRevision := k8sapi.statusRevision()
-	mngr.Update(cn)
-	c.Assert(testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second), check.IsNil)
+	mngr.Upsert(cn)
+	require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second))
 	// Wait for k8s status to be updated
-	c.Assert(testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second), check.IsNil)
+	require.NoError(t, testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second))
 	statusRevision = k8sapi.statusRevision()
 
 	node := mngr.Get("node1")
-	c.Assert(node, check.Not(check.IsNil))
-	c.Assert(node.Stats().AvailableIPs, check.Equals, minAllocate)
-	c.Assert(node.Stats().UsedIPs, check.Equals, 0)
+	require.NotNil(t, node)
+	require.Equal(t, minAllocate, node.Stats().IPv4.AvailableIPs)
+	require.Equal(t, 0, node.Stats().IPv4.UsedIPs)
 
 	// Use 7 out of 10 IPs
-	mngr.Update(updateCiliumNode(k8sapi.getLatestNode("node1"), toUse))
-	c.Assert(testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second), check.IsNil)
+	mngr.Upsert(updateCiliumNode(hivetest.Logger(t), k8sapi.getLatestNode("node1"), toUse))
+	require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, "node1", 0) }, 5*time.Second))
 	// Wait for k8s status to be updated
-	c.Assert(testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second), check.IsNil)
+	require.NoError(t, testutils.WaitUntil(func() bool { return statusRevision < k8sapi.statusRevision() }, 5*time.Second))
 
 	node = mngr.Get("node1")
-	c.Assert(node, check.Not(check.IsNil))
-	c.Assert(node.Stats().AvailableIPs, check.Equals, toUse+preAllocate)
-	c.Assert(node.Stats().UsedIPs, check.Equals, toUse)
+	require.NotNil(t, node)
+	require.Equal(t, toUse+preAllocate, node.Stats().IPv4.AvailableIPs)
+	require.Equal(t, toUse, node.Stats().IPv4.UsedIPs)
 
 	quota := instances.GetPoolQuota()
-	c.Assert(len(quota), check.Equals, 1)
-	c.Assert(quota["subnet-1"].AvailableIPs, check.Equals, (1<<16)-16)
+	require.NotNil(t, quota)
+	require.Len(t, quota, 1)
+	require.Equal(t, (1<<16)-16, quota["subnet-1"].AvailableIPs)
 }
 
 type nodeState struct {
@@ -281,100 +278,111 @@ type nodeState struct {
 }
 
 // TestIpamManyNodes tests IP allocation of 100 nodes across 3 subnets
-func (e *IPAMSuite) TestIpamManyNodes(c *check.C) {
-	const (
-		numNodes    = 100
-		minAllocate = 10
-	)
+func TestIpamManyNodes(t *testing.T) {
+	for _, test := range []struct {
+		numNodes, minAllocate, concurrency int
+	}{
+		{numNodes: 100, minAllocate: 10, concurrency: 10},
+		// The code being tested is prone to race conditions, increasing the number
+		// of nodes seems to actually hide these bugs (presumably due to a higher
+		// chance that racey tasks get corrected by another trigger).
+		// Thus we test using a smaller node/addr domain to help catch regressions.
+		{numNodes: 2, minAllocate: 1, concurrency: 10},
+	} {
+		t.Run(fmt.Sprintf("numNodes=%d, minAllocate=%d", test.numNodes, test.minAllocate), func(t *testing.T) {
+			var (
+				numNodes    = 2
+				minAllocate = 1
+			)
+			api := apimock.NewAPI(testSubnets, []*ipamTypes.VirtualNetwork{testVnet})
+			instances := NewInstancesManager(hivetest.Logger(t), api)
+			require.NotNil(t, instances)
 
-	api := apimock.NewAPI(testSubnets, []*ipamTypes.VirtualNetwork{testVnet})
-	instances := NewInstancesManager(api)
-	c.Assert(instances, check.Not(check.IsNil))
+			k8sapi := newK8sMock()
+			metrics := metricsmock.NewMockMetrics()
+			mngr, err := ipam.NewNodeManager(hivetest.Logger(t), instances, k8sapi, metrics, int64(test.concurrency), false, false)
+			require.NoError(t, err)
+			require.NotNil(t, mngr)
 
-	k8sapi := newK8sMock()
-	metrics := metricsmock.NewMockMetrics()
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metrics, 10, false, false)
-	c.Assert(err, check.IsNil)
-	c.Assert(mngr, check.Not(check.IsNil))
+			state := make([]*nodeState, numNodes)
+			allInstances := ipamTypes.NewInstanceMap()
 
-	state := make([]*nodeState, numNodes)
-	allInstances := ipamTypes.NewInstanceMap()
+			for i := range state {
+				resource := &types.AzureInterface{
+					Name:          "eth0",
+					SecurityGroup: "sg1",
+					Addresses:     []types.AzureAddress{},
+					State:         types.StateSucceeded,
+				}
+				resource.SetID(fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d/networkInterfaces/vmss11", i))
+				allInstances.Update(fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d", i), ipamTypes.InterfaceRevision{
+					Resource: resource.DeepCopy(),
+				})
+			}
 
-	for i := range state {
-		resource := &types.AzureInterface{
-			Name:          "eth0",
-			SecurityGroup: "sg1",
-			Addresses:     []types.AzureAddress{},
-			State:         types.StateSucceeded,
-		}
-		resource.SetID(fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d/networkInterfaces/vmss11", i))
-		allInstances.Update(fmt.Sprintf("vm%d", i), ipamTypes.InterfaceRevision{
-			Resource: resource.DeepCopy(),
+			api.UpdateInstances(allInstances)
+			instances.Resync(t.Context())
+
+			for i := range state {
+				state[i] = &nodeState{name: fmt.Sprintf("node%d", i), instanceName: fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d", i)}
+				state[i].cn = newCiliumNode(state[i].name, state[i].instanceName, 1, minAllocate)
+				mngr.Upsert(state[i].cn)
+			}
+
+			for _, s := range state {
+				require.NoError(t, testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, s.name, 0) }, 5*time.Second))
+
+				node := mngr.Get(s.name)
+				require.NotNil(t, node)
+				if node.Stats().IPv4.AvailableIPs != minAllocate {
+					t.Errorf("Node %s allocation mismatch. expected: %d allocated: %d", s.name, minAllocate, node.Stats().IPv4.AvailableIPs)
+					t.Fail()
+				}
+				require.Equal(t, 0, node.Stats().IPv4.UsedIPs)
+			}
+
+			// The above check returns as soon as the address requirements are met.
+			// The metrics may still be outdated, resync all nodes to update
+			// metrics.
+			mngr.Resync(t.Context(), time.Now())
+			require.Equal(t, numNodes, metrics.Nodes("total"))
+			require.Equal(t, 0, metrics.Nodes("in-deficit"))
+			require.Equal(t, 0, metrics.Nodes("at-capacity"))
+
+			require.Equal(t, numNodes*minAllocate, metrics.AllocatedIPs("available"))
+			require.Equal(t, 0, metrics.AllocatedIPs("needed"))
+			require.Equal(t, 0, metrics.AllocatedIPs("used"))
+
+			// All subnets must have been used for allocation
+			for _, subnet := range subnets {
+				require.NotEqual(t, 0, metrics.GetAllocationAttempts("createInterfaceAndAllocateIP", "success", subnet.ID))
+				require.NotEqual(t, 0, metrics.IPAllocations(subnet.ID))
+			}
+			require.NotEqual(t, 0, metrics.ResyncCount())
+			require.NotEqual(t, 0, metrics.AvailableInterfaces())
 		})
+
 	}
-
-	api.UpdateInstances(allInstances)
-	instances.Resync(context.TODO())
-
-	for i := range state {
-		state[i] = &nodeState{name: fmt.Sprintf("node%d", i), instanceName: fmt.Sprintf("vm%d", i)}
-		state[i].cn = newCiliumNode(state[i].name, state[i].instanceName, 1, minAllocate)
-		mngr.Update(state[i].cn)
-	}
-
-	for _, s := range state {
-		c.Assert(testutils.WaitUntil(func() bool { return reachedAddressesNeeded(mngr, s.name, 0) }, 5*time.Second), check.IsNil)
-
-		node := mngr.Get(s.name)
-		c.Assert(node, check.Not(check.IsNil))
-		if node.Stats().AvailableIPs != minAllocate {
-			c.Errorf("Node %s allocation mismatch. expected: %d allocated: %d", s.name, minAllocate, node.Stats().AvailableIPs)
-			c.Fail()
-		}
-		c.Assert(node.Stats().UsedIPs, check.Equals, 0)
-	}
-
-	// The above check returns as soon as the address requirements are met.
-	// The metrics may still be outdated, resync all nodes to update
-	// metrics.
-	mngr.Resync(context.TODO(), time.Now())
-
-	c.Assert(metrics.Nodes("total"), check.Equals, numNodes)
-	c.Assert(metrics.Nodes("in-deficit"), check.Equals, 0)
-	c.Assert(metrics.Nodes("at-capacity"), check.Equals, 0)
-
-	c.Assert(metrics.AllocatedIPs("available"), check.Equals, numNodes*minAllocate)
-	c.Assert(metrics.AllocatedIPs("needed"), check.Equals, 0)
-	c.Assert(metrics.AllocatedIPs("used"), check.Equals, 0)
-
-	// All subnets must have been used for allocation
-	for _, subnet := range subnets {
-		c.Assert(metrics.GetAllocationAttempts("createInterfaceAndAllocateIP", "success", subnet.ID), check.Not(check.Equals), 0)
-		c.Assert(metrics.IPAllocations(subnet.ID), check.Not(check.Equals), 0)
-	}
-
-	c.Assert(metrics.ResyncCount(), check.Not(check.Equals), 0)
-	c.Assert(metrics.AvailableInterfaces(), check.Not(check.Equals), 0)
 }
 
-func benchmarkAllocWorker(c *check.C, workers int64, delay time.Duration, rateLimit float64, burst int) {
+func benchmarkAllocWorker(b *testing.B, workers int64, delay time.Duration, rateLimit float64, burst int) {
 	api := apimock.NewAPI(testSubnets, []*ipamTypes.VirtualNetwork{testVnet})
 	api.SetDelay(apimock.AllOperations, delay)
 	api.SetLimiter(rateLimit, burst)
 
-	instances := NewInstancesManager(api)
-	c.Assert(instances, check.Not(check.IsNil))
+	instances := NewInstancesManager(hivetest.Logger(b), api)
+	require.NotNil(b, instances)
 
 	k8sapi := newK8sMock()
 	metrics := metricsmock.NewMockMetrics()
-	mngr, err := ipam.NewNodeManager(instances, k8sapi, metrics, workers, false, false)
-	c.Assert(err, check.IsNil)
-	c.Assert(mngr, check.Not(check.IsNil))
+	mngr, err := ipam.NewNodeManager(hivetest.Logger(b), instances, k8sapi, metrics, workers, false, false)
+	require.NoError(b, err)
+	require.NotNil(b, mngr)
 
-	state := make([]*nodeState, c.N)
+	state := make([]*nodeState, b.N)
 	allInstances := ipamTypes.NewInstanceMap()
 
-	c.ResetTimer()
+	b.ResetTimer()
 
 	for i := range state {
 		resource := &types.AzureInterface{
@@ -384,18 +392,18 @@ func benchmarkAllocWorker(c *check.C, workers int64, delay time.Duration, rateLi
 			State:         types.StateSucceeded,
 		}
 		resource.SetID(fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d/networkInterfaces/vmss11", i))
-		allInstances.Update(fmt.Sprintf("vm%d", i), ipamTypes.InterfaceRevision{
+		allInstances.Update(fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d", i), ipamTypes.InterfaceRevision{
 			Resource: resource.DeepCopy(),
 		})
 	}
 
 	api.UpdateInstances(allInstances)
-	instances.Resync(context.Background())
+	instances.Resync(b.Context())
 
 	for i := range state {
-		state[i] = &nodeState{name: fmt.Sprintf("node%d", i), instanceName: fmt.Sprintf("vm%d", i)}
+		state[i] = &nodeState{name: fmt.Sprintf("node%d", i), instanceName: fmt.Sprintf("/subscriptions/xxx/resourceGroups/g1/providers/Microsoft.Compute/virtualMachineScaleSets/vmss11/virtualMachines/vm%d", i)}
 		state[i].cn = newCiliumNode(state[i].name, state[i].instanceName, 1, 10)
-		mngr.Update(state[i].cn)
+		mngr.Upsert(state[i].cn)
 	}
 
 restart:
@@ -405,29 +413,29 @@ restart:
 			goto restart
 		}
 	}
-	c.StopTimer()
+	b.StopTimer()
 }
 
-func (e *IPAMSuite) BenchmarkAllocDelay20Worker1(c *check.C) {
-	benchmarkAllocWorker(c, 1, 20*time.Millisecond, 100.0, 4)
+func BenchmarkAllocDelay20Worker1(b *testing.B) {
+	benchmarkAllocWorker(b, 1, 20*time.Millisecond, 100.0, 4)
 }
 
-func (e *IPAMSuite) BenchmarkAllocDelay20Worker10(c *check.C) {
-	benchmarkAllocWorker(c, 10, 20*time.Millisecond, 100.0, 4)
+func BenchmarkAllocDelay20Worker10(b *testing.B) {
+	benchmarkAllocWorker(b, 10, 20*time.Millisecond, 100.0, 4)
 }
 
-func (e *IPAMSuite) BenchmarkAllocDelay20Worker50(c *check.C) {
-	benchmarkAllocWorker(c, 50, 20*time.Millisecond, 100.0, 4)
+func BenchmarkAllocDelay20Worker50(b *testing.B) {
+	benchmarkAllocWorker(b, 50, 20*time.Millisecond, 100.0, 4)
 }
 
-func (e *IPAMSuite) BenchmarkAllocDelay50Worker1(c *check.C) {
-	benchmarkAllocWorker(c, 1, 50*time.Millisecond, 100.0, 4)
+func BenchmarkAllocDelay50Worker1(b *testing.B) {
+	benchmarkAllocWorker(b, 1, 50*time.Millisecond, 100.0, 4)
 }
 
-func (e *IPAMSuite) BenchmarkAllocDelay50Worker10(c *check.C) {
-	benchmarkAllocWorker(c, 10, 50*time.Millisecond, 100.0, 4)
+func BenchmarkAllocDelay50Worker10(b *testing.B) {
+	benchmarkAllocWorker(b, 10, 50*time.Millisecond, 100.0, 4)
 }
 
-func (e *IPAMSuite) BenchmarkAllocDelay50Worker50(c *check.C) {
-	benchmarkAllocWorker(c, 50, 50*time.Millisecond, 100.0, 4)
+func BenchmarkAllocDelay50Worker50(b *testing.B) {
+	benchmarkAllocWorker(b, 50, 50*time.Millisecond, 100.0, 4)
 }

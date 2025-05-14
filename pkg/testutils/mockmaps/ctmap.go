@@ -4,6 +4,8 @@
 package mockmaps
 
 import (
+	"context"
+
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/maps/ctmap"
 )
@@ -49,5 +51,14 @@ func (m *CtMockMap) DumpWithCallback(cb bpf.DumpCallback) error {
 	for _, e := range m.Entries {
 		cb(e.Key, &e.Value)
 	}
+	return nil
+}
+
+// Count returns the length of the map entries.
+func (m *CtMockMap) Count(_ context.Context) (int, error) {
+	return len(m.Entries), nil
+}
+
+func (m *CtMockMap) Update(key bpf.MapKey, value bpf.MapValue) error {
 	return nil
 }

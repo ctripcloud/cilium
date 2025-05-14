@@ -7,6 +7,7 @@ import (
 	"fmt"
 
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/time"
 	"github.com/cilium/cilium/pkg/trigger"
 )
 
@@ -195,6 +196,33 @@ func (m *mockMetrics) SetIPNeeded(s string, n int) {
 	m.mutex.Lock()
 	m.nodeIPNeeded[s] = n
 	m.mutex.Unlock()
+}
+
+func (m *mockMetrics) GetPerNodeMetrics(n string) (*int, *int, *int) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	var avail, used, needed *int
+	if c, ok := m.nodeIPAvailable[n]; ok {
+		avail = &c
+	}
+	if c, ok := m.nodeIPUsed[n]; ok {
+		used = &c
+	}
+	if c, ok := m.nodeIPNeeded[n]; ok {
+		needed = &c
+	}
+	return avail, used, needed
+}
+
+func (m *mockMetrics) DeleteNode(n string) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	delete(m.nodeIPAvailable, n)
+	delete(m.nodeIPUsed, n)
+	delete(m.nodeIPNeeded, n)
+}
+
+func (m *mockMetrics) ObserveBackgroundSync(status string, duration time.Duration) {
 }
 
 func (m *mockMetrics) PoolMaintainerTrigger() trigger.MetricsObserver {

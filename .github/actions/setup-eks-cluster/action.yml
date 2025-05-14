@@ -7,6 +7,9 @@ inputs:
   region:
     description: ''
     required: true
+  zones:
+    description: 'Space-separated list of availability zones (auto-selected if unspecified)'
+    required: false
   owner:
     description: ''
     required: true
@@ -14,10 +17,14 @@ inputs:
     description: ''
     required: false
     default: ''
+  addons:
+    description: 'Space-separated list of add-ons to include'
+    required: false
+    default: 'coredns kube-proxy vpc-cni'
 runs:
   using: composite
   steps:
-    - name: Create EKS cluster
+    - name: Create EKS cluster with ${{ inputs.addons }}
       shell: bash
       run: |
         cat <<EOF > eks-config.yaml
@@ -32,31 +39,25 @@ runs:
            usage: "${{ github.repository_owner }}-${{ github.event.repository.name }}"
            owner: "${{ inputs.owner }}"
 
-        managedNodeGroups:
-        - name: ng-amd64
-          instanceTypes:
-           - t3.medium
-          desiredCapacity: 1
-          spot: true
-          privateNetworking: true
-          volumeType: "gp3"
-          volumeSize: 10
-          taints:
-           - key: "node.cilium.io/agent-not-ready"
-             value: "true"
-             effect: "NoExecute"
-        - name: ng-arm64
-          instanceTypes:
-           - t4g.medium
-          desiredCapacity: 1
-          spot: true
-          privateNetworking: true
-          volumeType: "gp3"
-          volumeSize: 10
-          taints:
-           - key: "node.cilium.io/agent-not-ready"
-             value: "true"
-             effect: "NoExecute"
+        vpc:
+          clusterEndpoints:
+            publicAccess: true
+            privateAccess: true
+
+        addonsConfig:
+          disableDefaultAddons: true
+        addons:
         EOF
+
+        for addon in ${{ inputs.addons }}; do
+          echo "- name: $addon" >> eks-config.yaml
+        done
+
+        if [[ -n "${{ inputs.zones }}"  ]]; then
+          echo "availabilityZones:" >> eks-config.yaml
+          for zone in ${{ inputs.zones }}; do
+            echo "- $zone" >> eks-config.yaml
+          done
+        fi
 
         eksctl create cluster -f ./eks-config.yaml

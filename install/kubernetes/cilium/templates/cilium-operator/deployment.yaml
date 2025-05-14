@@ -4,12 +4,19 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: cilium-operator
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ include "cilium.namespace" . }}
+  {{- with .Values.operator.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
   labels:
     io.cilium/app: operator
     name: cilium-operator
     app.kubernetes.io/part-of: cilium
     app.kubernetes.io/name: cilium-operator
+    {{- with .Values.commonLabels }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
 spec:
   # See docs on ServerCapabilities.LeasesResourceLock in file pkg/k8s/version/version.go
   # for more details.
@@ -53,6 +60,9 @@ spec:
         name: cilium-operator
         app.kubernetes.io/part-of: cilium
         app.kubernetes.io/name: cilium-operator
+        {{- with .Values.commonLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
         {{- with .Values.operator.podLabels }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
@@ -88,6 +98,10 @@ spec:
             fieldRef:
               apiVersion: v1
               fieldPath: metadata.namespace
+        {{- if or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.enableMCSAPISupport }}
+        - name: CILIUM_CLUSTERMESH_CONFIG
+          value: /var/lib/cilium/clustermesh/
+        {{- end }}
         - name: CILIUM_DEBUG
           valueFrom:
             configMapKeyRef:
@@ -128,13 +142,20 @@ spec:
               key: ALIBABA_CLOUD_ACCESS_KEY_SECRET
               optional: true
         {{- end }}
+        {{- if and .Values.k8sServiceHostRef.name .Values.k8sServiceHostRef.key }}
+        - name: KUBERNETES_SERVICE_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: {{ .Values.k8sServiceHostRef.name }}
+              key: {{ .Values.k8sServiceHostRef.key }}
+        - name: KUBERNETES_SERVICE_PORT
+          value: {{ include "k8sServicePort" . }}
+        {{- end }}
         {{- if .Values.k8sServiceHost }}
         - name: KUBERNETES_SERVICE_HOST
-          value: {{ .Values.k8sServiceHost | quote }}
-        {{- end }}
-        {{- if .Values.k8sServicePort }}
+          value: {{ include "k8sServiceHost" . }}
         - name: KUBERNETES_SERVICE_PORT
-          value: {{ .Values.k8sServicePort | quote }}
+          value: {{ include "k8sServicePort" . }}
         {{- end }}
         {{- if .Values.azure.enabled }}
         {{- if .Values.azure.subscriptionID }}
@@ -167,12 +188,16 @@ spec:
         ports:
         - name: prometheus
           containerPort: {{ .Values.operator.prometheus.port }}
+        {{- if .Values.operator.hostNetwork }}
           hostPort: {{ .Values.operator.prometheus.port }}
+        {{- end }}
           protocol: TCP
         {{- end }}
         livenessProbe:
           httpGet:
+        {{- if .Values.operator.hostNetwork }}
             host: {{ .Values.ipv4.enabled | ternary "127.0.0.1" "::1" | quote }}
+        {{- end }}
             path: /healthz
             port: 9234
             scheme: HTTP
@@ -181,7 +206,9 @@ spec:
           timeoutSeconds: 3
         readinessProbe:
           httpGet:
+        {{- if .Values.operator.hostNetwork }}
             host: {{ .Values.ipv4.enabled | ternary "127.0.0.1" "::1" | quote }}
+        {{- end }}
             path: /healthz
             port: 9234
             scheme: HTTP
@@ -197,20 +224,25 @@ spec:
         - name: etcd-config-path
           mountPath: /var/lib/etcd-config
           readOnly: true
-        {{- if or .Values.etcd.ssl .Values.etcd.managed }}
+        {{- if .Values.etcd.ssl }}
         - name: etcd-secrets
           mountPath: /var/lib/etcd-secrets
           readOnly: true
         {{- end }}
+        {{- end }}
+        {{- if or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.enableMCSAPISupport }}
+        - name: clustermesh-secrets
+          mountPath: /var/lib/cilium/clustermesh
+          readOnly: true
         {{- end }}
         {{- if .Values.kubeConfigPath }}
         - name: kube-config
           mountPath: {{ .Values.kubeConfigPath }}
           readOnly: true
         {{- end }}
-        {{- if .Values.auth.mTLS.spire.enabled }}
+        {{- if .Values.authentication.mutual.spire.enabled }}
         - name: spire-agent-socket
-          mountPath: {{ dir .Values.auth.mTLS.spire.agentSocketPath }}
+          mountPath: {{ dir .Values.authentication.mutual.spire.agentSocketPath }}
           readOnly: true
         {{- end }}
         {{- range .Values.operator.extraHostPathMounts }}
@@ -220,11 +252,6 @@ spec:
           {{- if .mountPropagation }}
           mountPropagation: {{ .mountPropagation }}
           {{- end }}
-        {{- end }}
-        {{- if .Values.bgp.enabled }}
-        - name: bgp-config-path
-          mountPath: /var/lib/cilium/bgp
-          readOnly: true
         {{- end }}
         {{- with .Values.operator.extraVolumeMounts }}
         {{- toYaml . | nindent 8 }}
@@ -238,17 +265,12 @@ spec:
           {{- toYaml . | trim | nindent 10 }}
         {{- end }}
         terminationMessagePolicy: FallbackToLogsOnError
-      hostNetwork: true
-      {{- if or (and .Values.etcd.managed (not .Values.etcd.k8sService)) .Values.auth.mTLS.spire.enabled }}
-      # Cilium must be able to resolve the DNS name of the etcd service in managed etcd mode,
-      # and the DNS name of the SPIRE server in mTLS mode.
-      dnsPolicy: ClusterFirstWithHostNet
-      {{- else if .Values.operator.dnsPolicy }}
+      hostNetwork: {{ .Values.operator.hostNetwork }}
+      {{- if .Values.operator.dnsPolicy }}
       dnsPolicy: {{ .Values.operator.dnsPolicy }}
       {{- end }}
       restartPolicy: Always
       priorityClassName: {{ include "cilium.priorityClass" (list $ .Values.operator.priorityClassName "system-cluster-critical") }}
-      serviceAccount: {{ .Values.serviceAccounts.operator.name | quote }}
       serviceAccountName: {{ .Values.serviceAccounts.operator.name | quote }}
       automountServiceAccountToken: {{ .Values.serviceAccounts.operator.automount }}
       {{- with .Values.operator.affinity }}
@@ -273,6 +295,15 @@ spec:
       nodeSelector:
         {{- toYaml . | trim | nindent 8 }}
       {{- end }}
+      {{- if and (or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.enableMCSAPISupport) .Values.clustermesh.config.enabled (not (and .Values.clustermesh.useAPIServer .Values.clustermesh.apiserver.kvstoremesh.enabled )) }}
+      hostAliases:
+      {{- range $cluster := .Values.clustermesh.config.clusters }}
+      {{- range $ip := $cluster.ips }}
+      - ip: {{ $ip }}
+        hostnames: [ "{{ $cluster.name }}.{{ $.Values.clustermesh.config.domain }}" ]
+      {{- end }}
+      {{- end }}
+      {{- end }}
       {{- with .Values.operator.tolerations }}
       tolerations:
         {{- toYaml . | trim | nindent 8 }}
@@ -292,7 +323,7 @@ spec:
           items:
           - key: etcd-config
             path: etcd.config
-      {{- if or .Values.etcd.ssl .Values.etcd.managed }}
+      {{- if .Values.etcd.ssl }}
         # To read the k8s etcd secrets in case the user might want to use TLS
       - name: etcd-secrets
         secret:
@@ -316,18 +347,70 @@ spec:
           type: {{ .hostPathType }}
           {{- end }}
       {{- end }}
-      {{- if .Values.bgp.enabled }}
-      - name: bgp-config-path
-        configMap:
-          name: bgp-config
-      {{- end }}
-      {{- if .Values.auth.mTLS.spire.enabled }}
+      {{- if .Values.authentication.mutual.spire.enabled }}
       - name: spire-agent-socket
         hostPath:
-          path: {{ dir .Values.auth.mTLS.spire.agentSocketPath }}
+          path: {{ dir .Values.authentication.mutual.spire.agentSocketPath }}
           type: DirectoryOrCreate
       {{- end }}
       {{- with .Values.operator.extraVolumes }}
       {{- toYaml . | nindent 6 }}
+      {{- end }}
+      {{- if or .Values.clustermesh.enableEndpointSliceSynchronization .Values.clustermesh.enableMCSAPISupport }}
+        # To read the clustermesh configuration
+      - name: clustermesh-secrets
+        projected:
+          # note: the leading zero means this number is in octal representation: do not remove it
+          defaultMode: 0400
+          sources:
+          - secret:
+              name: cilium-clustermesh
+              optional: true
+              # note: items are not explicitly listed here, since the entries of this secret
+              # depend on the peers configured, and that would cause a restart of all operators
+              # at every addition/removal. Leaving the field empty makes each secret entry
+              # to be automatically projected into the volume as a file whose name is the key.
+          - secret:
+              name: clustermesh-apiserver-remote-cert
+              optional: true
+              items:
+              - key: tls.key
+                path: common-etcd-client.key
+              - key: tls.crt
+                path: common-etcd-client.crt
+          {{- if not .Values.tls.caBundle.enabled }}
+              - key: ca.crt
+                path: common-etcd-client-ca.crt
+          {{- else }}
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
+              name: {{ .Values.tls.caBundle.name }}
+              optional: true
+              items:
+              - key: {{ .Values.tls.caBundle.key }}
+                path: common-etcd-client-ca.crt
+          {{- end }}
+          # note: we configure the volume for the kvstoremesh-specific certificate
+          # regardless of whether KVStoreMesh is enabled or not, so that it can be
+          # automatically mounted in case KVStoreMesh gets subsequently enabled,
+          # without requiring an operator restart.
+          - secret:
+              name: clustermesh-apiserver-local-cert
+              optional: true
+              items:
+              - key: tls.key
+                path: local-etcd-client.key
+              - key: tls.crt
+                path: local-etcd-client.crt
+          {{- if not .Values.tls.caBundle.enabled }}
+              - key: ca.crt
+                path: local-etcd-client-ca.crt
+          {{- else }}
+          - {{ .Values.tls.caBundle.useSecret | ternary "secret" "configMap" }}:
+              name: {{ .Values.tls.caBundle.name }}
+              optional: true
+              items:
+              - key: {{ .Values.tls.caBundle.key }}
+                path: local-etcd-client-ca.crt
+          {{- end }}
       {{- end }}
 {{- end }}

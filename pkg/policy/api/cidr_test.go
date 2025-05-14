@@ -5,87 +5,158 @@ package api
 
 import (
 	"regexp"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/checker"
+	v1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/labels"
-	cidrpkg "github.com/cilium/cilium/pkg/labels/cidr"
+	"github.com/cilium/cilium/pkg/option"
 )
 
-func (s *PolicyAPITestSuite) TestCIDRMatchesAll(c *C) {
-	cidr := CIDR("0.0.0.0/0")
-	c.Assert(cidr.MatchesAll(), Equals, true)
-
-	cidr = CIDR("::/0")
-	c.Assert(cidr.MatchesAll(), Equals, true)
-
-	cidr = CIDR("192.0.2.0/24")
-	c.Assert(cidr.MatchesAll(), Equals, false)
-	cidr = CIDR("192.0.2.3/32")
-	c.Assert(cidr.MatchesAll(), Equals, false)
-}
-
-func (s *PolicyAPITestSuite) TestGetAsEndpointSelectors(c *C) {
+func TestGetAsEndpointSelectors(t *testing.T) {
 	world := labels.ParseLabelArray("reserved:world")
 
 	labelWorld := labels.ParseSelectLabel("reserved:world")
 	esWorld := NewESFromLabels(labelWorld)
 
-	labelAllV4, err := cidrpkg.IPStringToLabel("0.0.0.0/0")
-	c.Assert(err, IsNil)
+	labelWorldIPv4 := labels.ParseSelectLabel("reserved:world-ipv4")
+	esWorldIPv4 := NewESFromLabels(labelWorldIPv4)
+
+	labelWorldIPv6 := labels.ParseSelectLabel("reserved:world-ipv6")
+	esWorldIPv6 := NewESFromLabels(labelWorldIPv6)
+
+	labelAllV4, err := labels.IPStringToLabel("0.0.0.0/0")
+	require.NoError(t, err)
 	v4World := NewESFromLabels(labelAllV4)
 
-	labelAllV6, err := cidrpkg.IPStringToLabel("::/0")
-	c.Assert(err, IsNil)
+	labelAllV6, err := labels.IPStringToLabel("::/0")
+	require.NoError(t, err)
 	v6World := NewESFromLabels(labelAllV6)
 
-	labelOtherCIDR, err := cidrpkg.IPStringToLabel("192.168.128.0/24")
-	c.Assert(err, IsNil)
+	labelOtherCIDR, err := labels.IPStringToLabel("192.168.128.0/24")
+	require.NoError(t, err)
 	esOtherCIDR := NewESFromLabels(labelOtherCIDR)
 
-	cidrs := CIDRSlice{
-		"0.0.0.0/0",
+	tt := []struct {
+		name              string
+		cidrs             CIDRSlice
+		expectedSelectors EndpointSelectorSlice
+		matchesWorld,
+		enableIPv4, enableIPv6 bool
+	}{
+		{
+			name: "ipv4 dualstack",
+			cidrs: CIDRSlice{
+				"0.0.0.0/0",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v4World,
+				esWorldIPv4,
+			},
+			matchesWorld: false,
+			enableIPv4:   true,
+			enableIPv6:   true,
+		},
+		{
+			name: "ipv6 dualstack",
+			cidrs: CIDRSlice{
+				"::/0",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v6World,
+				esWorldIPv6,
+			},
+			matchesWorld: false,
+			enableIPv4:   true,
+			enableIPv6:   true,
+		},
+		{
+			name: "ipv4 and ipv6 dualstack",
+			cidrs: CIDRSlice{
+				"0.0.0.0/0",
+				"::/0",
+				"192.168.128.10/24",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v4World,
+				v6World,
+				esOtherCIDR,
+				esWorld,
+				esWorldIPv4,
+				esWorldIPv6,
+			},
+			matchesWorld: true,
+			enableIPv4:   true,
+			enableIPv6:   true,
+		},
+		{
+			name: "ipv4 in ipv4 only",
+			cidrs: CIDRSlice{
+				"0.0.0.0/0",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v4World,
+				esWorld,
+			},
+			matchesWorld: true,
+			enableIPv4:   true,
+			enableIPv6:   false,
+		},
+		{
+			name: "ipv6 in ipv4 only",
+			cidrs: CIDRSlice{
+				"::/0",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v6World,
+			},
+			matchesWorld: false,
+			enableIPv4:   true,
+			enableIPv6:   false,
+		},
+		{
+			name: "ipv4 in ipv6 only",
+			cidrs: CIDRSlice{
+				"0.0.0.0/0",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v4World,
+			},
+			matchesWorld: false,
+			enableIPv4:   false,
+			enableIPv6:   true,
+		},
+		{
+			name: "ipv6 in ipv6 only",
+			cidrs: CIDRSlice{
+				"::/0",
+			},
+			expectedSelectors: EndpointSelectorSlice{
+				v6World,
+				esWorld,
+			},
+			matchesWorld: true,
+			enableIPv4:   false,
+			enableIPv6:   true,
+		},
 	}
 
-	expectedSelectors := EndpointSelectorSlice{
-		esWorld,
-		v4World,
+	for _, test := range tt {
+		t.Logf("running test %s:", test.name)
+		option.Config.EnableIPv6 = test.enableIPv6
+		option.Config.EnableIPv4 = test.enableIPv4
+		result := test.cidrs.GetAsEndpointSelectors()
+		require.Equal(t, test.matchesWorld, result.Matches(world))
+		require.Equal(t, test.expectedSelectors, result)
 	}
-	result := cidrs.GetAsEndpointSelectors()
-	c.Assert(result.Matches(world), Equals, true)
-	c.Assert(result, checker.DeepEquals, expectedSelectors)
-
-	cidrs = CIDRSlice{
-		"::/0",
-	}
-	expectedSelectors = EndpointSelectorSlice{
-		esWorld,
-		v6World,
-	}
-	result = cidrs.GetAsEndpointSelectors()
-	c.Assert(result.Matches(world), Equals, true)
-	c.Assert(result, checker.DeepEquals, expectedSelectors)
-
-	cidrs = CIDRSlice{
-		"0.0.0.0/0",
-		"::/0",
-		"192.168.128.10/24",
-	}
-	expectedSelectors = EndpointSelectorSlice{
-		esWorld,
-		v4World,
-		v6World,
-		esOtherCIDR,
-	}
-	result = cidrs.GetAsEndpointSelectors()
-	c.Assert(result.Matches(world), Equals, true)
-	c.Assert(result, checker.DeepEquals, expectedSelectors)
+	option.Config.EnableIPv4 = true
+	option.Config.EnableIPv6 = true
 }
 
 const CIDRRegex = `^(?:(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.){3}(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\/([0-9]|[1-2][0-9]|3[0-2])$|^s*((([0-9A-Fa-f]{1,4}:){7}(:|([0-9A-Fa-f]{1,4})))|(([0-9A-Fa-f]{1,4}:){6}:([0-9A-Fa-f]{1,4})?)|(([0-9A-Fa-f]{1,4}:){5}(((:[0-9A-Fa-f]{1,4}){0,1}):([0-9A-Fa-f]{1,4})?))|(([0-9A-Fa-f]{1,4}:){4}(((:[0-9A-Fa-f]{1,4}){0,2}):([0-9A-Fa-f]{1,4})?))|(([0-9A-Fa-f]{1,4}:){3}(((:[0-9A-Fa-f]{1,4}){0,3}):([0-9A-Fa-f]{1,4})?))|(([0-9A-Fa-f]{1,4}:){2}(((:[0-9A-Fa-f]{1,4}){0,4}):([0-9A-Fa-f]{1,4})?))|(([0-9A-Fa-f]{1,4}:){1}(((:[0-9A-Fa-f]{1,4}){0,5}):([0-9A-Fa-f]{1,4})?))|(:(:|((:[0-9A-Fa-f]{1,4}){1,7}))))(%.+)?s*/([0-9]|[1-9][0-9]|1[0-1][0-9]|12[0-8])$`
 
-func (s *PolicyAPITestSuite) TestCIDRRegex(c *C) {
+func TestCIDRRegex(t *testing.T) {
 	reg := regexp.MustCompile(CIDRRegex)
 
 	goodCIDRs := []string{
@@ -111,7 +182,7 @@ continueTest:
 		}
 		// The below is always false, valid CIDR prefixes should
 		// always skip this by continuing in the above loop.
-		c.Assert(input, Equals, "failed to match CIDR.OneOf[*].Pattern")
+		require.Equal(t, "failed to match CIDR.OneOf[*].Pattern", input)
 	}
 
 	badCIDRs := []string{
@@ -145,7 +216,98 @@ continueTest:
 		if matched := reg.MatchString(input); matched {
 			// The below is always false, invalid CIDR
 			// prefixes are not supposed to match the regex.
-			c.Assert(input, Equals, "unexpectedly matched CIDR.OneOf[*].Pattern")
+			require.Equal(t, "unexpectedly matched CIDR.OneOf[*].Pattern", input)
 		}
+	}
+}
+
+func TestGetAsEndpointSelectorsWithExceptions(t *testing.T) {
+
+	tt := []struct {
+		name             string
+		rule             CIDRRule
+		matchesLabels    []string
+		notMatchesLabels []string
+	}{
+		{
+			name: "no exclude",
+			rule: CIDRRule{
+				Cidr: "1.0.0.0/24",
+			},
+			matchesLabels:    []string{"cidr:1.0.0.0/24", "cidr:1.0.0.0/25"},
+			notMatchesLabels: []string{"cidr:2.0.0.0/24"},
+		},
+		{
+			name: "exclude-cidr",
+			rule: CIDRRule{
+				Cidr:        "1.0.0.0/24",
+				ExceptCIDRs: []CIDR{"1.0.0.4/30"},
+			},
+			matchesLabels:    []string{"cidr:1.0.0.0/24", "cidr:1.0.0.0/25", "cidr:1.0.0.1/32"},
+			notMatchesLabels: []string{"cidr:2.0.0.0/24", "cidr:1.0.0.4/30", "cidr:1.0.0.4/32", "cidr:1.0.0.5/32"},
+		},
+		{
+			name: "cidrgroup-exclude-cidr",
+			rule: CIDRRule{
+				CIDRGroupRef: "testing",
+				ExceptCIDRs:  []CIDR{"1.0.0.4/30"},
+			},
+			matchesLabels: []string{
+				"cidrgroup:io.cilium.policy.cidrgroupname/testing",
+				"cidrgroup:io.cilium.policy.cidrgroupname/testing;cidr:1.0.0.0/8",
+			},
+			notMatchesLabels: []string{"cidr:2.0.0.0/24",
+				"cidrgroup:io.cilium.policy.cidrgroupname/testing;cidr:1.0.0.4/30",
+				"cidrgroup:io.cilium.policy.cidrgroupname/testing;cidr:1.0.0.4/32",
+				"cidrgroup:io.cilium.policy.cidrgroupname/testing;cidr:1.0.0.5/32",
+			},
+		},
+		{
+			name: "cidrgroup-ref",
+			rule: CIDRRule{
+				CIDRGroupSelector: &v1.LabelSelector{
+					MatchLabels: map[string]string{
+						"foo": "bar",
+					},
+				},
+			},
+			matchesLabels:    []string{"cidrgroup:foo=bar"},
+			notMatchesLabels: []string{"cidr:1.1.1.1/32"},
+		},
+		{
+			name: "cidrgroup-ref-except",
+			rule: CIDRRule{
+				CIDRGroupSelector: &v1.LabelSelector{
+					MatchLabels: map[string]string{
+						"foo": "bar",
+					},
+				},
+				ExceptCIDRs: []CIDR{"1.0.0.4/30"},
+			},
+			matchesLabels: []string{"cidrgroup:foo=bar"},
+			notMatchesLabels: []string{
+				"cidrgroup:foo=bar;cidr:1.0.0.4/30",
+				"cidrgroup:foo=bar;cidr:1.0.0.6/31",
+			},
+		},
+	}
+
+	for _, tc := range tt {
+		t.Run(tc.name, func(t *testing.T) {
+			es := (CIDRRuleSlice{tc.rule}).GetAsEndpointSelectors()[0]
+			for _, l := range tc.matchesLabels {
+				lblArr := labels.NewLabelArrayFromSortedList(l)
+				if !es.Matches(lblArr) {
+					t.Fatalf("Expected to match %+v, but did not", lblArr[0])
+				}
+			}
+			for _, l := range tc.notMatchesLabels {
+				lblArr := labels.NewLabelArrayFromSortedList(l)
+				if es.Matches(lblArr) {
+					t.Fatalf("Expected not to match %s, but did", l)
+				}
+			}
+
+		})
 	}
 }

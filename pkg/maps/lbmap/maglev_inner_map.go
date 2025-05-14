@@ -5,22 +5,26 @@ package lbmap
 
 import (
 	"fmt"
+	"log/slog"
 	"unsafe"
 
+	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/ebpf"
 	"github.com/cilium/cilium/pkg/loadbalancer"
 )
 
-// maglevBackendLen represents the length of a single backend ID
+const MaglevInnerMapName = "cilium_maglev_inner"
+
+// MaglevBackendLen represents the length of a single backend ID
 // in a Maglev lookup table.
-var maglevBackendLen = uint32(unsafe.Sizeof(loadbalancer.BackendID(0)))
+var MaglevBackendLen = uint32(unsafe.Sizeof(loadbalancer.BackendID(0)))
 
 // MaglevInnerMap represents a maglev inner map.
 type MaglevInnerMap ebpf.Map
 
 // TableSize returns the amount of backends this map can hold as a value.
 func (m *MaglevInnerMap) TableSize() uint32 {
-	return m.Map.ValueSize() / uint32(maglevBackendLen)
+	return m.Map.ValueSize() / uint32(MaglevBackendLen)
 }
 
 // UpdateBackends updates the maglev inner map's list of backends.
@@ -35,6 +39,10 @@ type MaglevInnerKey struct {
 	Zero uint32
 }
 
+// New and String implement bpf.MapKey
+func (k *MaglevInnerKey) New() bpf.MapKey { return &MaglevInnerKey{} }
+func (k *MaglevInnerKey) String() string  { return fmt.Sprintf("%d", k.Zero) }
+
 // MaglevInnerVal is the value of a maglev inner map.
 type MaglevInnerVal struct {
 	BackendIDs []loadbalancer.BackendID
@@ -43,20 +51,20 @@ type MaglevInnerVal struct {
 // newMaglevInnerMapSpec returns the spec for a maglev inner map.
 func newMaglevInnerMapSpec(tableSize uint32) *ebpf.MapSpec {
 	return &ebpf.MapSpec{
-		Name:       "cilium_maglev_inner",
+		Name:       MaglevInnerMapName,
 		Type:       ebpf.Array,
 		KeySize:    uint32(unsafe.Sizeof(MaglevInnerKey{})),
-		ValueSize:  maglevBackendLen * tableSize,
+		ValueSize:  MaglevBackendLen * tableSize,
 		MaxEntries: 1,
 	}
 }
 
 // createMaglevInnerMap creates a new Maglev inner map in the kernel
 // using the given table size.
-func createMaglevInnerMap(tableSize uint32) (*MaglevInnerMap, error) {
+func createMaglevInnerMap(logger *slog.Logger, tableSize uint32) (*MaglevInnerMap, error) {
 	spec := newMaglevInnerMapSpec(tableSize)
 
-	m := ebpf.NewMap(spec)
+	m := ebpf.NewMap(logger, spec)
 	if err := m.OpenOrCreate(); err != nil {
 		return nil, err
 	}
@@ -66,8 +74,8 @@ func createMaglevInnerMap(tableSize uint32) (*MaglevInnerMap, error) {
 
 // MaglevInnerMapFromID returns a new object representing the maglev inner map
 // identified by an ID.
-func MaglevInnerMapFromID(id uint32) (*MaglevInnerMap, error) {
-	m, err := ebpf.MapFromID(int(id))
+func MaglevInnerMapFromID(logger *slog.Logger, id uint32) (*MaglevInnerMap, error) {
+	m, err := ebpf.MapFromID(logger, int(id))
 	if err != nil {
 		return nil, err
 	}

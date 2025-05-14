@@ -46,6 +46,7 @@ same TCP/UDP connection.
 We can achieve that with the following CiliumNetworkPolicy:
 
 .. literalinclude:: ../../examples/minikube/sw_l3_l4_policy.yaml
+   :language: yaml
 
 CiliumNetworkPolicies match on pod labels using an "endpointSelector" to identify the sources and destinations to which the policy applies.
 The above policy whitelists traffic sent from any pods with label (``org=empire``) to *deathstar* pods with label (``org=empire, class=deathstar``) on TCP port 80.
@@ -76,11 +77,11 @@ This request will hang, so press Control-C to kill the curl request, or wait for
 Inspecting the Policy
 =====================
 
-If we run ``cilium endpoint list`` again we will see that the pods with the label ``org=empire`` and ``class=deathstar`` now have ingress policy enforcement enabled as per the policy above.
+If we run ``cilium-dbg endpoint list`` again we will see that the pods with the label ``org=empire`` and ``class=deathstar`` now have ingress policy enforcement enabled as per the policy above.
 
 .. code-block:: shell-session
 
-    $ kubectl -n kube-system exec cilium-1c2cz -- cilium endpoint list
+    $ kubectl -n kube-system exec cilium-1c2cz -- cilium-dbg endpoint list
     ENDPOINT   POLICY (ingress)   POLICY (egress)   IDENTITY   LABELS (source:key[=value])                       IPv6   IPv4         STATUS
                ENFORCEMENT        ENFORCEMENT
     232        Enabled            Disabled          16530      k8s:class=deathstar                                      10.0.0.147   ready
@@ -209,6 +210,7 @@ extends our original policy by limiting *tiefighter* to making only a POST /v1/r
 API call, but disallowing all other calls (including PUT /v1/exhaust-port).
 
 .. literalinclude:: ../../examples/minikube/sw_l3_l4_l7_policy.yaml
+   :language: yaml
 
 Update the existing rule to apply L7-aware policy to protect *deathstar* using:
 
@@ -308,11 +310,11 @@ You can observe the L7 policy via ``kubectl``:
               Path:    /v1/request-landing
     Events:            <none>
 
-and ``cilium`` CLI:
+and ``cilium-dbg`` CLI:
 
 .. code-block:: shell-session
 
-    $ kubectl -n kube-system exec cilium-qh5l2 -- cilium policy get
+    $ kubectl -n kube-system exec cilium-qh5l2 -- cilium-dbg policy get
     [
       {
         "endpointSelector": {
@@ -378,19 +380,19 @@ and ``cilium`` CLI:
     ]
     Revision: 11
 
-It is also possible to monitor the HTTP requests live by using ``cilium monitor``:
+It is also possible to monitor the HTTP requests live by using ``cilium-dbg monitor``:
 
 .. code-block:: shell-session
 
-    $ kubectl exec -it -n kube-system cilium-kzgdx -- cilium monitor -v --type l7
+    $ kubectl exec -it -n kube-system cilium-kzgdx -- cilium-dbg monitor -v --type l7
     <- Response http to 0 ([k8s:class=tiefighter k8s:io.cilium.k8s.policy.cluster=default k8s:io.cilium.k8s.policy.serviceaccount=default k8s:io.kubernetes.pod.namespace=default k8s:org=empire]) from 2756 ([k8s:io.cilium.k8s.policy.cluster=default k8s:class=deathstar k8s:org=empire k8s:io.kubernetes.pod.namespace=default k8s:io.cilium.k8s.policy.serviceaccount=default]), identity 8876->43854, verdict Forwarded POST http://deathstar.default.svc.cluster.local/v1/request-landing => 200
     <- Request http from 0 ([k8s:class=tiefighter k8s:io.cilium.k8s.policy.cluster=default k8s:io.cilium.k8s.policy.serviceaccount=default k8s:io.kubernetes.pod.namespace=default k8s:org=empire]) to 2756 ([k8s:io.cilium.k8s.policy.cluster=default k8s:class=deathstar k8s:org=empire k8s:io.kubernetes.pod.namespace=default k8s:io.cilium.k8s.policy.serviceaccount=default]), identity 8876->43854, verdict Denied PUT http://deathstar.default.svc.cluster.local/v1/request-landing => 403
 
 The above output demonstrates a successful response to a POST request followed by a PUT request that is denied by the L7 policy.
 
 We hope you enjoyed the tutorial.  Feel free to play more with the setup, read
-the rest of the documentation, and reach out to us on the `Cilium
-Slack channel <https://cilium.herokuapp.com>`_ with any questions!
+the rest of the documentation, and reach out to us on the `Cilium Slack`_ with
+any questions!
 
 Clean-up
 ========
@@ -399,3 +401,6 @@ Clean-up
 
    $ kubectl delete -f \ |SCM_WEB|\/examples/minikube/http-sw-app.yaml
    $ kubectl delete cnp rule1
+
+
+.. include:: ../installation/next-steps.rst

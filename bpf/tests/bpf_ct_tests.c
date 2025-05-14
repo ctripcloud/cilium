@@ -8,10 +8,8 @@
 
 #define ENABLE_IPV4
 #define ENABLE_NODEPORT
-#include <node_config.h>
+#include <bpf/config/node.h>
 
-#undef EVENTS_MAP
-#define EVENTS_MAP test_events_map
 #define DEBUG
 
 #include <lib/dbg.h>
@@ -77,7 +75,7 @@ __always_inline int mkpkt(void *dst, bool first)
 	memcpy(dst, tcp_data, sizeof(tcp_data));
 	dst += sizeof(tcp_data);
 
-	return dst - orig;
+	return (int)(dst - orig);
 }
 
 static char pkt[100];
@@ -126,20 +124,24 @@ int test_ct4_rst1_check(__maybe_unused struct __ctx_buff *ctx)
 		tuple.saddr = ip4->saddr;
 		l4_off = l3_off + ipv4_hdrlen(ip4);
 
-		ret = ct_lookup4(get_ct_map4(&tuple), &tuple, ctx, l4_off, CT_EGRESS,
-				 &ct_state, &monitor);
+		ret = ct_lookup4(get_ct_map4(&tuple), &tuple, ctx, ip4, l4_off,
+				 CT_EGRESS, SCOPE_BIDIR, &ct_state, &monitor);
 		switch (ret) {
 		case CT_NEW:
 			ct_state_new.node_port = ct_state.node_port;
-			ct_state_new.ifindex = ct_state.ifindex;
-			ret = ct_create4(get_ct_map4(&tuple), &CT_MAP_ANY4, &tuple, ctx,
-					 CT_EGRESS, &ct_state_new, false, false, NULL);
+			ret = ct_create4(get_ct_map4(&tuple), &cilium_ct_any4_global, &tuple, ctx,
+					 CT_EGRESS, &ct_state_new, NULL);
 			break;
 
 		default:
 			test_log("ct_lookup4, expected CT_NEW, got %d", ret);
 			test_fail();
 		}
+
+		struct ct_entry *entry = map_lookup_elem(get_ct_map4(&tuple), &tuple);
+
+		assert(entry);
+		assert(entry->tx_flags_seen == tcp_flags_to_u8(TCP_FLAG_SYN));
 
 		if (data + pkt_size > data_end)
 			test_fatal("packet shrank");
@@ -168,7 +170,6 @@ int test_ct4_rst1_check(__maybe_unused struct __ctx_buff *ctx)
 		struct iphdr *ip4;
 		int l3_off = ETH_HLEN;
 		int l4_off;
-		struct ct_state ct_state = {};
 		__u16 proto;
 		__u32 monitor = 0;
 
@@ -181,8 +182,8 @@ int test_ct4_rst1_check(__maybe_unused struct __ctx_buff *ctx)
 		tuple.saddr = ip4->saddr;
 		l4_off = l3_off + ipv4_hdrlen(ip4);
 
-		ct_lookup4(get_ct_map4(&tuple), &tuple, ctx, l4_off, CT_INGRESS,
-			   &ct_state, &monitor);
+		ct_lookup4(get_ct_map4(&tuple), &tuple, ctx, ip4, l4_off,
+			   CT_INGRESS, SCOPE_BIDIR, NULL, &monitor);
 
 		if (data + pkt_size > data_end)
 			test_fatal("packet shrank");
@@ -200,8 +201,9 @@ int test_ct4_rst1_check(__maybe_unused struct __ctx_buff *ctx)
 		struct ct_entry *entry = map_lookup_elem(get_ct_map4(&tuple), &tuple);
 
 		assert(entry);
+		assert(entry->rx_flags_seen == tcp_flags_to_u8(TCP_FLAG_SYN | TCP_FLAG_RST));
 
-		__u32 expires = entry->lifetime - bpf_ktime_get_sec();
+		__u32 expires = (__u32)(entry->lifetime - bpf_ktime_get_sec());
 
 		if (expires > 10)
 			test_fatal("Expiration is %ds even if RST flag was set", expires);

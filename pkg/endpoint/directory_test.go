@@ -4,39 +4,42 @@
 package endpoint
 
 import (
+	"fmt"
+	"math"
 	"os"
 	"path/filepath"
+	"testing"
 
-	"gopkg.in/check.v1"
-
-	"github.com/cilium/cilium/pkg/checker"
+	"github.com/stretchr/testify/require"
 )
 
-func (s *EndpointSuite) TestMoveNewFilesTo(c *check.C) {
-	oldDir := c.MkDir()
-	newDir := c.MkDir()
+func TestMoveNewFilesTo(t *testing.T) {
+	setupEndpointSuite(t)
+
+	oldDir := t.TempDir()
+	newDir := t.TempDir()
 	f1, err := os.CreateTemp(oldDir, "")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 	f2, err := os.CreateTemp(oldDir, "")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 	f3, err := os.CreateTemp(newDir, "")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	// Copy the same file in both directories to make sure the same files
 	// are not moved from the old directory into the new directory.
 	err = os.WriteFile(filepath.Join(oldDir, "foo"), []byte(""), os.FileMode(0644))
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 	err = os.WriteFile(filepath.Join(newDir, "foo"), []byte(""), os.FileMode(0644))
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	compareDir := func(dir string, wantedFiles []string) {
 		files, err := os.ReadDir(dir)
-		c.Assert(err, check.IsNil)
+		require.NoError(t, err)
 		filesNames := make([]string, 0, len(wantedFiles))
 		for _, file := range files {
 			filesNames = append(filesNames, file.Name())
 		}
-		c.Assert(wantedFiles, checker.DeepEquals, filesNames)
+		require.Equal(t, wantedFiles, filesNames)
 	}
 
 	type args struct {
@@ -69,10 +72,51 @@ func (s *EndpointSuite) TestMoveNewFilesTo(c *check.C) {
 		},
 	}
 	for _, tt := range tests {
-		if err := moveNewFilesTo(tt.args.oldDir, tt.args.newDir); (err != nil) != tt.wantErr {
-			c.Assert(err != nil, check.Equals, tt.wantErr)
+		if err := copyExistingState(tt.args.oldDir, tt.args.newDir); (err != nil) != tt.wantErr {
+			require.Equal(t, tt.wantErr, err != nil)
 			compareDir(tt.args.oldDir, tt.wantOldDir)
 			compareDir(tt.args.newDir, tt.wantNewDir)
 		}
 	}
+}
+
+func benchmarkMoveNewFilesTo(b *testing.B, numFiles int) {
+	oldDir := b.TempDir()
+	newDir := b.TempDir()
+	numDuplicates := int(math.Round(float64(numFiles) * 0.25))
+
+	for n := range numFiles {
+		name := fmt.Sprintf("file%d", n)
+		if err := os.WriteFile(filepath.Join(oldDir, name), []byte{}, os.FileMode(0644)); err != nil {
+			b.Fatal(err)
+		}
+
+		if n < numDuplicates {
+			if err := os.WriteFile(filepath.Join(newDir, name), []byte{}, os.FileMode(0644)); err != nil {
+				b.Fatal(err)
+			}
+		}
+	}
+
+	for b.Loop() {
+		if err := copyExistingState(oldDir, newDir); err != nil {
+			b.Fatal(err)
+		}
+	}
+	b.StopTimer()
+
+	os.RemoveAll(oldDir)
+	os.RemoveAll(newDir)
+}
+
+func BenchmarkMoveNewFilesTo1(b *testing.B) {
+	benchmarkMoveNewFilesTo(b, 1)
+}
+
+func BenchmarkMoveNewFilesTo5(b *testing.B) {
+	benchmarkMoveNewFilesTo(b, 5)
+}
+
+func BenchmarkMoveNewFilesTo10(b *testing.B) {
+	benchmarkMoveNewFilesTo(b, 10)
 }

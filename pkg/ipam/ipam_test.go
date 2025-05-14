@@ -4,26 +4,22 @@
 package ipam
 
 import (
+	"fmt"
+	"maps"
 	"net"
 	"net/netip"
+	"strings"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/checker"
-	"github.com/cilium/cilium/pkg/cidr"
-	"github.com/cilium/cilium/pkg/datapath/fake"
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
 	"github.com/cilium/cilium/pkg/datapath/types"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 )
-
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type IPAMSuite struct{}
-
-var _ = Suite(&IPAMSuite{})
 
 func fakeIPv4AllocCIDRIP(fakeAddressing types.NodeAddressing) netip.Addr {
 	return netip.MustParseAddr(fakeAddressing.IPv4().AllocationCIDR().IP.String())
@@ -33,19 +29,101 @@ func fakeIPv6AllocCIDRIP(fakeAddressing types.NodeAddressing) netip.Addr {
 	return netip.MustParseAddr(fakeAddressing.IPv6().AllocationCIDR().IP.String())
 }
 
-type testConfiguration struct{}
+var testConfiguration = &option.DaemonConfig{
+	EnableIPv4:              true,
+	EnableIPv6:              true,
+	EnableHealthChecking:    true,
+	EnableUnreachableRoutes: false,
+	IPAM:                    ipamOption.IPAMClusterPool,
+}
 
-func (t *testConfiguration) IPv4Enabled() bool                        { return true }
-func (t *testConfiguration) IPv6Enabled() bool                        { return true }
-func (t *testConfiguration) HealthCheckingEnabled() bool              { return true }
-func (t *testConfiguration) UnreachableRoutesEnabled() bool           { return false }
-func (t *testConfiguration) IPAMMode() string                         { return ipamOption.IPAMClusterPool }
-func (t *testConfiguration) SetIPv4NativeRoutingCIDR(cidr *cidr.CIDR) {}
-func (t *testConfiguration) GetIPv4NativeRoutingCIDR() *cidr.CIDR     { return nil }
+type fakeMetadataFunc func(owner string, family Family) (pool string, err error)
 
-func (s *IPAMSuite) TestLock(c *C) {
-	fakeAddressing := fake.NewNodeAddressing()
-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+func (f fakeMetadataFunc) GetIPPoolForPod(owner string, family Family) (pool string, err error) {
+	return f(owner, family)
+}
+
+type fakePoolAllocator struct {
+	pools map[Pool]Allocator
+}
+
+func newFakePoolAllocator(poolMap map[string]string) *fakePoolAllocator {
+	pools := make(map[Pool]Allocator, len(poolMap))
+	for name, cidr := range poolMap {
+		_, ipnet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			panic(fmt.Sprintf("failed to parse test cidr %s for pool %s", cidr, name))
+		}
+		pools[Pool(name)] = newHostScopeAllocator(ipnet)
+	}
+	return &fakePoolAllocator{pools: pools}
+}
+
+func (f *fakePoolAllocator) Allocate(ip net.IP, owner string, pool Pool) (*AllocationResult, error) {
+	alloc, ok := f.pools[pool]
+	if !ok {
+		return nil, fmt.Errorf("unknown pool %s", pool)
+	}
+	result, err := alloc.Allocate(ip, owner, pool)
+	if err != nil {
+		return nil, err
+	}
+	result.IPPoolName = pool
+	return result, nil
+}
+
+func (f fakePoolAllocator) AllocateWithoutSyncUpstream(ip net.IP, owner string, pool Pool) (*AllocationResult, error) {
+	return f.Allocate(ip, owner, pool)
+}
+
+func (f fakePoolAllocator) Release(ip net.IP, pool Pool) error {
+	alloc, ok := f.pools[pool]
+	if !ok {
+		return fmt.Errorf("unknown pool %s", pool)
+	}
+	return alloc.Release(ip, pool)
+}
+
+func (f fakePoolAllocator) AllocateNext(owner string, pool Pool) (*AllocationResult, error) {
+	alloc, ok := f.pools[pool]
+	if !ok {
+		return nil, fmt.Errorf("unknown pool %s", pool)
+	}
+	result, err := alloc.AllocateNext(owner, pool)
+	if err != nil {
+		return nil, err
+	}
+	result.IPPoolName = pool
+	return result, nil
+}
+
+func (f fakePoolAllocator) AllocateNextWithoutSyncUpstream(owner string, pool Pool) (*AllocationResult, error) {
+	return f.AllocateNext(owner, pool)
+}
+
+func (f fakePoolAllocator) Dump() (map[Pool]map[string]string, string) {
+	result := map[Pool]map[string]string{}
+	for name, alloc := range f.pools {
+		dump, _ := alloc.Dump()
+		if _, ok := result[name]; !ok {
+			result[name] = map[string]string{}
+		}
+		maps.Copy(result[name], dump[name])
+	}
+	return result, fmt.Sprintf("%d pools", len(f.pools))
+}
+
+func (f fakePoolAllocator) Capacity() uint64 {
+	return uint64(0)
+}
+
+func (f fakePoolAllocator) RestoreFinished() {}
+
+func TestLock(t *testing.T) {
+	fakeAddressing := fakeTypes.NewNodeAddressing()
+	localNodeStore := node.NewTestLocalNodeStore(node.LocalNode{})
+	ipam := NewIPAM(hivetest.Logger(t), fakeAddressing, testConfiguration, &ownerMock{}, localNodeStore, &ownerMock{}, &resourceMock{}, &mtuMock, nil, nil, nil)
+	ipam.ConfigureAllocator()
 
 	// Since the IPs we have allocated to the endpoints might or might not
 	// be in the allocrange specified in cilium, we need to specify them
@@ -56,72 +134,161 @@ func (s *IPAMSuite) TestLock(c *C) {
 	ipv6 = ipv6.Next()
 
 	// Forcefully release possible allocated IPs
-	err := ipam.IPv4Allocator.Release(ipv4.AsSlice(), PoolDefault)
-	c.Assert(err, IsNil)
-	err = ipam.IPv6Allocator.Release(ipv6.AsSlice(), PoolDefault)
-	c.Assert(err, IsNil)
+	ipam.IPv4Allocator.Release(ipv4.AsSlice(), PoolDefault())
+	ipam.IPv6Allocator.Release(ipv6.AsSlice(), PoolDefault())
 
 	// Let's allocate the IP first so we can see the tests failing
-	result, err := ipam.IPv4Allocator.Allocate(ipv4.AsSlice(), "test", PoolDefault)
-	c.Assert(err, IsNil)
-	c.Assert(result.IP, checker.DeepEquals, net.IP(ipv4.AsSlice()))
-
-	err = ipam.IPv4Allocator.Release(ipv4.AsSlice(), PoolDefault)
-	c.Assert(err, IsNil)
+	result, err := ipam.IPv4Allocator.Allocate(ipv4.AsSlice(), "test", PoolDefault())
+	require.NoError(t, err)
+	require.Equal(t, net.IP(ipv4.AsSlice()), result.IP)
 }
 
-func (s *IPAMSuite) TestExcludeIP(c *C) {
-	fakeAddressing := fake.NewNodeAddressing()
-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+func TestExcludeIP(t *testing.T) {
+	fakeAddressing := fakeTypes.NewNodeAddressing()
+	localNodeStore := node.NewTestLocalNodeStore(node.LocalNode{})
+	ipam := NewIPAM(hivetest.Logger(t), fakeAddressing, testConfiguration, &ownerMock{}, localNodeStore, &ownerMock{}, &resourceMock{}, &mtuMock, nil, nil, nil)
+	ipam.ConfigureAllocator()
 
 	ipv4 := fakeIPv4AllocCIDRIP(fakeAddressing)
 	ipv4 = ipv4.Next()
 
-	ipam.ExcludeIP(ipv4.AsSlice(), "test-foo", PoolDefault)
-	err := ipam.AllocateIP(ipv4.AsSlice(), "test-bar", PoolDefault)
-	c.Assert(err, Not(IsNil))
-	c.Assert(err, ErrorMatches, ".* owned by test-foo")
-	err = ipam.ReleaseIP(ipv4.AsSlice(), PoolDefault)
-	c.Assert(err, IsNil)
+	ipam.ExcludeIP(ipv4.AsSlice(), "test-foo", PoolDefault())
+	err := ipam.AllocateIP(ipv4.AsSlice(), "test-bar", PoolDefault())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "owned by test-foo")
+	err = ipam.ReleaseIP(ipv4.AsSlice(), PoolDefault())
+	require.NoError(t, err)
 
 	ipv6 := fakeIPv6AllocCIDRIP(fakeAddressing)
 	ipv6 = ipv6.Next()
 
-	ipam.ExcludeIP(ipv6.AsSlice(), "test-foo", PoolDefault)
-	err = ipam.AllocateIP(ipv6.AsSlice(), "test-bar", PoolDefault)
-	c.Assert(err, Not(IsNil))
-	c.Assert(err, ErrorMatches, ".* owned by test-foo")
-	ipam.ReleaseIP(ipv6.AsSlice(), PoolDefault)
-	err = ipam.ReleaseIP(ipv4.AsSlice(), PoolDefault)
-	c.Assert(err, IsNil)
+	ipam.ExcludeIP(ipv6.AsSlice(), "test-foo", PoolDefault())
+	err = ipam.AllocateIP(ipv6.AsSlice(), "test-bar", PoolDefault())
+	require.Error(t, err)
+	require.ErrorContains(t, err, "owned by test-foo")
+	ipam.ReleaseIP(ipv6.AsSlice(), PoolDefault())
+	err = ipam.ReleaseIP(ipv4.AsSlice(), PoolDefault())
+	require.NoError(t, err)
 }
 
-func (s *IPAMSuite) TestDeriveFamily(c *C) {
-	c.Assert(DeriveFamily(net.ParseIP("1.1.1.1")), Equals, IPv4)
-	c.Assert(DeriveFamily(net.ParseIP("f00d::1")), Equals, IPv6)
+func TestDeriveFamily(t *testing.T) {
+	require.Equal(t, IPv4, DeriveFamily(net.ParseIP("1.1.1.1")))
+	require.Equal(t, IPv6, DeriveFamily(net.ParseIP("f00d::1")))
 }
 
-func (s *IPAMSuite) TestOwnerRelease(c *C) {
-	fakeAddressing := fake.NewNodeAddressing()
-	ipam := NewIPAM(fakeAddressing, &testConfiguration{}, &ownerMock{}, &ownerMock{}, &mtuMock, nil)
+func TestIPAMMetadata(t *testing.T) {
+	fakeAddressing := fakeTypes.NewNodeAddressing()
+	localNodeStore := node.NewTestLocalNodeStore(node.LocalNode{})
+	fakeMetadata := fakeMetadataFunc(func(owner string, family Family) (pool string, err error) {
+		// use namespace to determine pool name
+		namespace, _, _ := strings.Cut(owner, "/")
+		switch namespace {
+		case "test":
+			return "test", nil
+		case "special":
+			return "special", nil
+		case "error":
+			return "", fmt.Errorf("unable to determine pool for %s", owner)
+		default:
+			return PoolDefault().String(), nil
+		}
+	})
 
+	ipam := NewIPAM(hivetest.Logger(t), fakeAddressing, testConfiguration, &ownerMock{}, localNodeStore, &ownerMock{}, &resourceMock{}, &mtuMock, nil, fakeMetadata, nil)
+	ipam.ConfigureAllocator()
+	ipam.IPv4Allocator = newFakePoolAllocator(map[string]string{
+		"default": "10.10.0.0/16",
+		"test":    "192.168.178.0/24",
+		"special": "172.18.19.0/24",
+	})
+	ipam.IPv6Allocator = newFakePoolAllocator(map[string]string{
+		"default": "fd00:100::/80",
+		"test":    "fc00:100::/96",
+		"special": "fe00:100::/80",
+	})
+
+	// Checks AllocateIP
+	specialIP := net.ParseIP("172.18.19.20")
+	_, err := ipam.AllocateIPWithoutSyncUpstream(specialIP, "special/wants-special-ip", "")
+	require.Error(t, err) // pool required
+	resIPv4, err := ipam.AllocateIPWithoutSyncUpstream(specialIP, "special/wants-special-ip", "special")
+	require.NoError(t, err)
+	require.Equal(t, Pool("special"), resIPv4.IPPoolName)
+	require.True(t, resIPv4.IP.Equal(specialIP))
+
+	// Checks ReleaseIP
+	err = ipam.ReleaseIP(specialIP, "")
+	require.Error(t, err) // pool required
+	err = ipam.ReleaseIP(specialIP, "special")
+	require.NoError(t, err)
+
+	// Checks if pool metadata is used if pool is empty
+	resIPv4, resIPv6, err := ipam.AllocateNext("", "test/some-other-pod", "")
+	require.NoError(t, err)
+	require.Equal(t, Pool("test"), resIPv4.IPPoolName)
+	require.Equal(t, Pool("test"), resIPv6.IPPoolName)
+
+	// Checks if pool can be overwritten
+	resIPv4, resIPv6, err = ipam.AllocateNext("", "test/special-pod", "special")
+	require.NoError(t, err)
+	require.Equal(t, Pool("special"), resIPv4.IPPoolName)
+	require.Equal(t, Pool("special"), resIPv6.IPPoolName)
+
+	// Checks if fallback to default works
+	resIPv4, resIPv6, err = ipam.AllocateNext("", "other/special-pod", "")
+	require.NoError(t, err)
+	require.Equal(t, PoolDefault(), resIPv4.IPPoolName)
+	require.Equal(t, PoolDefault(), resIPv6.IPPoolName)
+
+	// Checks if metadata errors are propagated
+	_, _, err = ipam.AllocateNext("", "error/special-value", "")
+	require.Error(t, err)
+}
+
+func TestLegacyAllocatorIPAMMetadata(t *testing.T) {
+	// This test uses a regular hostScope allocator which does not support
+	// IPAM pools. We assert that in this scenario, the pool returned in the
+	// AllocationResult is always set to PoolDefault(), regardless of the requested
+	// pool
+	fakeAddressing := fakeTypes.NewNodeAddressing()
+	localNodeStore := node.NewTestLocalNodeStore(node.LocalNode{})
+	fakeMetadata := fakeMetadataFunc(func(owner string, family Family) (pool string, err error) { return "some-pool", nil })
+	ipam := NewIPAM(hivetest.Logger(t), fakeAddressing, testConfiguration, &ownerMock{}, localNodeStore, &ownerMock{}, &resourceMock{}, &mtuMock, nil, fakeMetadata, nil)
+	ipam.ConfigureAllocator()
+
+	// AllocateIP requires explicit pool
 	ipv4 := fakeIPv4AllocCIDRIP(fakeAddressing)
 	ipv4 = ipv4.Next()
-	err := ipam.AllocateIP(ipv4.AsSlice(), "default/test", PoolDefault)
-	c.Assert(err, IsNil)
+	_, err := ipam.AllocateIPWithoutSyncUpstream(ipv4.AsSlice(), "default/specific-ip", "")
+	require.Error(t, err)
 
-	ipv6 := fakeIPv6AllocCIDRIP(fakeAddressing)
-	ipv6 = ipv6.Next()
-	err = ipam.AllocateIP(ipv6.AsSlice(), "default/test", PoolDefault)
-	c.Assert(err, IsNil)
+	// AllocateIP with specific pool
+	ipv4 = ipv4.Next()
+	resIPv4, err := ipam.AllocateIPWithoutSyncUpstream(ipv4.AsSlice(), "default/specific-ip", "override")
+	require.NoError(t, err)
+	require.Equal(t, PoolDefault(), resIPv4.IPPoolName)
 
-	// unknown owner, must fail
-	err = ipam.ReleaseIPString("default/test2", PoolDefault)
-	c.Assert(err, Not(IsNil))
-	// 1st release by correct owner, must succeed
-	err = ipam.ReleaseIPString("default/test", PoolDefault)
-	c.Assert(err, IsNil)
-	// 2nd release by owner, must now fail
-	err = ipam.ReleaseIPString("default/test", PoolDefault)
-	c.Assert(err, Not(IsNil))
+	// AllocateIP with default pool
+	ipv4 = ipv4.Next()
+	resIPv4, err = ipam.AllocateIPWithoutSyncUpstream(ipv4.AsSlice(), "default/specific-ip", "default")
+	require.NoError(t, err)
+	require.Equal(t, PoolDefault(), resIPv4.IPPoolName)
+
+	// AllocateNext with empty pool
+	resIPv4, resIPv6, err := ipam.AllocateNext("", "test/some-pod", "")
+	require.NoError(t, err)
+	require.Equal(t, PoolDefault(), resIPv4.IPPoolName)
+	require.Equal(t, PoolDefault(), resIPv6.IPPoolName)
+
+	// AllocateNext with specific pool
+	resIPv4, resIPv6, err = ipam.AllocateNext("", "test/some-other-pod", "override")
+	require.NoError(t, err)
+	require.Equal(t, PoolDefault(), resIPv4.IPPoolName)
+	require.Equal(t, PoolDefault(), resIPv6.IPPoolName)
+
+	// AllocateNext with default pool
+	resIPv4, resIPv6, err = ipam.AllocateNext("", "test/some-other-pod", "default")
+	require.NoError(t, err)
+	require.Equal(t, PoolDefault(), resIPv4.IPPoolName)
+	require.Equal(t, PoolDefault(), resIPv6.IPPoolName)
 }

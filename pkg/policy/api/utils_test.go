@@ -6,133 +6,270 @@ package api
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/cilium/proxy/pkg/policy/api/kafka"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/fqdn/re"
-	"github.com/cilium/cilium/pkg/policy/api/kafka"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
+func setUpSuite(b testing.TB) {
+	re.InitRegexCompileLRU(hivetest.Logger(b), defaults.FQDNRegexCompileLRUSize)
 }
 
-func (s *PolicyAPITestSuite) SetUpSuite(c *C) {
-	re.InitRegexCompileLRU(defaults.FQDNRegexCompileLRUSize)
-}
+func TestHTTPEqual(t *testing.T) {
+	setUpSuite(t)
 
-type PolicyAPITestSuite struct{}
-
-var _ = Suite(&PolicyAPITestSuite{})
-
-func (s *PolicyAPITestSuite) TestHTTPEqual(c *C) {
 	rule1 := PortRuleHTTP{Path: "/foo$", Method: "GET", Headers: []string{"X-Test: Foo"}}
 	rule2 := PortRuleHTTP{Path: "/bar$", Method: "GET", Headers: []string{"X-Test: Foo"}}
 	rule3 := PortRuleHTTP{Path: "/foo$", Method: "GET", Headers: []string{"X-Test: Bar"}}
 
-	c.Assert(rule1.Equal(rule1), Equals, true)
-	c.Assert(rule1.Equal(rule2), Equals, false)
-	c.Assert(rule1.Equal(rule3), Equals, false)
+	require.True(t, rule1.Equal(rule1))
+	require.False(t, rule1.Equal(rule2))
+	require.False(t, rule1.Equal(rule3))
 
 	rules := L7Rules{
 		HTTP: []PortRuleHTTP{rule1, rule2},
 	}
 
-	c.Assert(rule1.Exists(rules), Equals, true)
-	c.Assert(rule2.Exists(rules), Equals, true)
-	c.Assert(rule3.Exists(rules), Equals, false)
+	require.True(t, rule1.Exists(rules))
+	require.True(t, rule2.Exists(rules))
+	require.False(t, rule3.Exists(rules))
 }
 
-func (s *PolicyAPITestSuite) TestKafkaEqual(c *C) {
+func TestKafkaEqual(t *testing.T) {
+	setUpSuite(t)
+
 	rule1 := kafka.PortRule{APIVersion: "1", APIKey: "foo", Topic: "topic1"}
 	rule2 := kafka.PortRule{APIVersion: "1", APIKey: "bar", Topic: "topic1"}
 	rule3 := kafka.PortRule{APIVersion: "1", APIKey: "foo", Topic: "topic2"}
-
-	c.Assert(rule1, Equals, rule1)
-	c.Assert(rule1, Not(Equals), rule2)
-	c.Assert(rule1, Not(Equals), rule3)
 
 	rules := L7Rules{
 		Kafka: []kafka.PortRule{rule1, rule2},
 	}
 
-	c.Assert(rule1.Exists(rules.Kafka), Equals, true)
-	c.Assert(rule2.Exists(rules.Kafka), Equals, true)
-	c.Assert(rule3.Exists(rules.Kafka), Equals, false)
+	require.True(t, rule1.Exists(rules.Kafka))
+	require.True(t, rule2.Exists(rules.Kafka))
+	require.False(t, rule3.Exists(rules.Kafka))
 }
 
-func (s *PolicyAPITestSuite) TestL7Equal(c *C) {
+func TestL7Equal(t *testing.T) {
+	setUpSuite(t)
+
 	rule1 := PortRuleL7{"Path": "/foo$", "Method": "GET"}
 	rule2 := PortRuleL7{"Path": "/bar$", "Method": "GET"}
 	rule3 := PortRuleL7{"Path": "/foo$", "Method": "GET", "extra": ""}
 
-	c.Assert(rule1.Equal(rule1), Equals, true)
-	c.Assert(rule2.Equal(rule2), Equals, true)
-	c.Assert(rule3.Equal(rule3), Equals, true)
-	c.Assert(rule1.Equal(rule2), Equals, false)
-	c.Assert(rule2.Equal(rule1), Equals, false)
-	c.Assert(rule1.Equal(rule3), Equals, false)
-	c.Assert(rule3.Equal(rule1), Equals, false)
-	c.Assert(rule2.Equal(rule3), Equals, false)
-	c.Assert(rule3.Equal(rule2), Equals, false)
+	require.True(t, rule1.Equal(rule1))
+	require.True(t, rule2.Equal(rule2))
+	require.True(t, rule3.Equal(rule3))
+	require.False(t, rule1.Equal(rule2))
+	require.False(t, rule2.Equal(rule1))
+	require.False(t, rule1.Equal(rule3))
+	require.False(t, rule3.Equal(rule1))
+	require.False(t, rule2.Equal(rule3))
+	require.False(t, rule3.Equal(rule2))
 
 	rules := L7Rules{
 		L7Proto: "testing",
 		L7:      []PortRuleL7{rule1, rule2},
 	}
 
-	c.Assert(rule1.Exists(rules), Equals, true)
-	c.Assert(rule2.Exists(rules), Equals, true)
-	c.Assert(rule3.Exists(rules), Equals, false)
+	require.True(t, rule1.Exists(rules))
+	require.True(t, rule2.Exists(rules))
+	require.False(t, rule3.Exists(rules))
 }
 
-func (s *PolicyAPITestSuite) TestValidateL4Proto(c *C) {
-	c.Assert(L4Proto("TCP").Validate(), IsNil)
-	c.Assert(L4Proto("UDP").Validate(), IsNil)
-	c.Assert(L4Proto("ANY").Validate(), IsNil)
-	c.Assert(L4Proto("TCP2").Validate(), Not(IsNil))
-	c.Assert(L4Proto("t").Validate(), Not(IsNil))
+func TestValidateL4Proto(t *testing.T) {
+	setUpSuite(t)
+
+	require.NoError(t, L4Proto("TCP").Validate())
+	require.NoError(t, L4Proto("UDP").Validate())
+	require.NoError(t, L4Proto("ANY").Validate())
+	require.Error(t, L4Proto("TCP2").Validate())
+	require.Error(t, L4Proto("t").Validate())
 }
 
-func (s *PolicyAPITestSuite) TestParseL4Proto(c *C) {
+func TestParseL4Proto(t *testing.T) {
+	setUpSuite(t)
+
 	p, err := ParseL4Proto("tcp")
-	c.Assert(p, Equals, ProtoTCP)
-	c.Assert(err, IsNil)
+	require.Equal(t, ProtoTCP, p)
+	require.NoError(t, err)
 
 	p, err = ParseL4Proto("Any")
-	c.Assert(p, Equals, ProtoAny)
-	c.Assert(err, IsNil)
+	require.Equal(t, ProtoAny, p)
+	require.NoError(t, err)
 
 	p, err = ParseL4Proto("")
-	c.Assert(p, Equals, ProtoAny)
-	c.Assert(err, IsNil)
+	require.Equal(t, ProtoAny, p)
+	require.NoError(t, err)
 
 	_, err = ParseL4Proto("foo2")
-	c.Assert(err, Not(IsNil))
+	require.Error(t, err)
 }
 
-func (s *PolicyAPITestSuite) TestResourceQualifiedName(c *C) {
-	var fullName, namespace, name, resource string
+func TestResourceQualifiedName(t *testing.T) {
+	setUpSuite(t)
 
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-resource")
+	// Empty resource name is passed through
+	name, updated := ResourceQualifiedName("", "", "")
+	require.Empty(t, name)
+	require.False(t, updated)
 
-	name = "test-name"
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-name/test-resource")
+	name, updated = ResourceQualifiedName("a", "", "")
+	require.Empty(t, name)
+	require.False(t, updated)
 
-	namespace = "test-namespace"
-	name = ""
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-namespace/test-resource")
+	name, updated = ResourceQualifiedName("", "b", "")
+	require.Empty(t, name)
+	require.False(t, updated)
 
-	namespace = "test-namespace"
-	name = "test-name"
-	resource = "test-resource"
-	fullName = ResourceQualifiedName(namespace, name, resource)
-	c.Assert(fullName, Equals, "test-namespace/test-name/test-resource")
+	name, updated = ResourceQualifiedName("", "", "", ForceNamespace)
+	require.Empty(t, name)
+	require.False(t, updated)
+
+	name, updated = ResourceQualifiedName("a", "", "", ForceNamespace)
+	require.Empty(t, name)
+	require.False(t, updated)
+
+	name, updated = ResourceQualifiedName("", "b", "", ForceNamespace)
+	require.Empty(t, name)
+	require.False(t, updated)
+
+	// Cluster-scope resources have no namespace
+	name, updated = ResourceQualifiedName("", "", "test-resource")
+	require.Equal(t, "//test-resource", name)
+	require.True(t, updated)
+
+	// Every resource has a name of a CEC they originate from
+	name, updated = ResourceQualifiedName("", "test-name", "test-resource")
+	require.Equal(t, "/test-name/test-resource", name)
+	require.True(t, updated)
+
+	// namespaced resources have a namespace
+	name, updated = ResourceQualifiedName("test-namespace", "", "test-resource")
+	require.Equal(t, "test-namespace//test-resource", name)
+	require.True(t, updated)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test-resource")
+	require.Equal(t, "test-namespace/test-name/test-resource", name)
+	require.True(t, updated)
+
+	// resource names with slashes is considered to already be qualified, and will not be prepended with namespace/cec-name
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test/resource")
+	require.Equal(t, "test/resource", name)
+	require.False(t, updated)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "/resource")
+	require.Equal(t, "/resource", name)
+	require.False(t, updated)
+
+	name, updated = ResourceQualifiedName("", "test-name", "test/resource")
+	require.Equal(t, "test/resource", name)
+	require.False(t, updated)
+
+	name, updated = ResourceQualifiedName("", "test-name", "/resource")
+	require.Equal(t, "/resource", name)
+	require.False(t, updated)
+
+	// forceNamespacing has no effect when the resource name is non-qualified
+	name, updated = ResourceQualifiedName("", "", "test-resource", ForceNamespace)
+	require.Equal(t, "//test-resource", name)
+	require.True(t, updated)
+
+	name, updated = ResourceQualifiedName("", "test-name", "test-resource", ForceNamespace)
+	require.Equal(t, "/test-name/test-resource", name)
+	require.True(t, updated)
+
+	name, updated = ResourceQualifiedName("test-namespace", "", "test-resource", ForceNamespace)
+	require.Equal(t, "test-namespace//test-resource", name)
+	require.True(t, updated)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test-resource", ForceNamespace)
+	require.Equal(t, "test-namespace/test-name/test-resource", name)
+	require.True(t, updated)
+
+	// forceNamespacing qualifies names in foreign namespaces
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test/resource", ForceNamespace)
+	require.Equal(t, "test-namespace/test-name/test/resource", name)
+	require.True(t, updated)
+
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "/resource", ForceNamespace)
+	require.Equal(t, "test-namespace/test-name//resource", name)
+	require.True(t, updated)
+
+	name, updated = ResourceQualifiedName("", "test-name", "test/resource", ForceNamespace)
+	require.Equal(t, "/test-name/test/resource", name)
+	require.True(t, updated)
+
+	// forceNamespacing skips prepending if namespace matches
+	name, updated = ResourceQualifiedName("test-namespace", "test-name", "test-namespace/resource", ForceNamespace)
+	require.Equal(t, "test-namespace/resource", name)
+	require.False(t, updated)
+	name, updated = ResourceQualifiedName("", "test-name", "/resource", ForceNamespace)
+	require.Equal(t, "/resource", name)
+	require.False(t, updated)
+}
+
+func TestParseQualifiedName(t *testing.T) {
+	setUpSuite(t)
+
+	// Empty name is passed through
+	namespace, name, resourceName := ParseQualifiedName("")
+	require.Empty(t, namespace)
+	require.Empty(t, name)
+	require.Empty(t, resourceName)
+
+	// Unqualified name is passed through
+	namespace, name, resourceName = ParseQualifiedName("resource")
+	require.Empty(t, namespace)
+	require.Empty(t, name)
+	require.Equal(t, "resource", resourceName)
+
+	// Cluster-scope resources have no namespace
+	namespace, name, resourceName = ParseQualifiedName("//test-resource")
+	require.Empty(t, namespace)
+	require.Empty(t, name)
+	require.Equal(t, "test-resource", resourceName)
+
+	// Every resource has a name of a CEC they originate from
+	namespace, name, resourceName = ParseQualifiedName("/test-name/test-resource")
+	require.Empty(t, namespace)
+	require.Equal(t, "test-name", name)
+	require.Equal(t, "test-resource", resourceName)
+
+	// namespaced resources have a namespace
+	namespace, name, resourceName = ParseQualifiedName("test-namespace//test-resource")
+	require.Equal(t, "test-namespace", namespace)
+	require.Empty(t, name)
+	require.Equal(t, "test-resource", resourceName)
+
+	namespace, name, resourceName = ParseQualifiedName("test-namespace/test-name/test-resource")
+	require.Equal(t, "test-namespace", namespace)
+	require.Equal(t, "test-name", name)
+	require.Equal(t, "test-resource", resourceName)
+
+	// resource names with slashes is considered to already be qualified, and will not be prepended with namespace/cec-name
+	namespace, name, resourceName = ParseQualifiedName("test/resource")
+	require.Empty(t, namespace)
+	require.Empty(t, name)
+	require.Equal(t, "test/resource", resourceName)
+
+	namespace, name, resourceName = ParseQualifiedName("/resource")
+	require.Empty(t, namespace)
+	require.Empty(t, name)
+	require.Equal(t, "/resource", resourceName)
+
+	// extra slashes are part of the resource name
+	namespace, name, resourceName = ParseQualifiedName("test-namespace/test-name//resource")
+	require.Equal(t, "test-namespace", namespace)
+	require.Equal(t, "test-name", name)
+	require.Equal(t, "/resource", resourceName)
+
+	namespace, name, resourceName = ParseQualifiedName("/test-name/test/resource")
+	require.Empty(t, namespace)
+	require.Equal(t, "test-name", name)
+	require.Equal(t, "test/resource", resourceName)
 }

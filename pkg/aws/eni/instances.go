@@ -7,52 +7,77 @@ package eni
 
 import (
 	"context"
-	"time"
+	"log/slog"
+	"maps"
+	"slices"
 
-	"github.com/sirupsen/logrus"
+	ec2_types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 
+	"github.com/cilium/cilium/pkg/aws/eni/limits"
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	"github.com/cilium/cilium/pkg/aws/types"
 	"github.com/cilium/cilium/pkg/ipam"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // EC2API is the API surface used of the EC2 API
 type EC2API interface {
+	GetInstance(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap, instanceID string) (*ipamTypes.Instance, error)
 	GetInstances(ctx context.Context, vpcs ipamTypes.VirtualNetworkMap, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error)
 	GetSubnets(ctx context.Context) (ipamTypes.SubnetMap, error)
 	GetVpcs(ctx context.Context) (ipamTypes.VirtualNetworkMap, error)
+	GetRouteTables(ctx context.Context) (ipamTypes.RouteTableMap, error)
 	GetSecurityGroups(ctx context.Context) (types.SecurityGroupMap, error)
 	GetDetachedNetworkInterfaces(ctx context.Context, tags ipamTypes.Tags, maxResults int32) ([]string, error)
 	CreateNetworkInterface(ctx context.Context, toAllocate int32, subnetID, desc string, groups []string, allocatePrefixes bool) (string, *eniTypes.ENI, error)
 	AttachNetworkInterface(ctx context.Context, index int32, instanceID, eniID string) (string, error)
 	DeleteNetworkInterface(ctx context.Context, eniID string) error
 	ModifyNetworkInterface(ctx context.Context, eniID, attachmentID string, deleteOnTermination bool) error
-	AssignPrivateIpAddresses(ctx context.Context, eniID string, addresses int32) error
+	AssignPrivateIpAddresses(ctx context.Context, eniID string, addresses int32) ([]string, error)
 	UnassignPrivateIpAddresses(ctx context.Context, eniID string, addresses []string) error
 	AssignENIPrefixes(ctx context.Context, eniID string, prefixes int32) error
 	UnassignENIPrefixes(ctx context.Context, eniID string, prefixes []string) error
+	GetInstanceTypes(context.Context) ([]ec2_types.InstanceTypeInfo, error)
+	AssociateEIP(ctx context.Context, instanceID string, eipTags ipamTypes.Tags) (string, error)
 }
 
 // InstancesManager maintains the list of instances. It must be kept up to date
 // by calling resync() regularly.
 type InstancesManager struct {
+	logger *slog.Logger
+	// resyncLock ensures instance incremental resync do not run at the same time as a full API resync
+	resyncLock lock.RWMutex
+
+	// mutex protects the fields below
 	mutex          lock.RWMutex
 	instances      *ipamTypes.InstanceMap
 	subnets        ipamTypes.SubnetMap
 	vpcs           ipamTypes.VirtualNetworkMap
+	routeTables    ipamTypes.RouteTableMap
 	securityGroups types.SecurityGroupMap
 	api            EC2API
+	limitsGetter   *limits.LimitsGetter
 }
 
 // NewInstancesManager returns a new instances manager
-func NewInstancesManager(api EC2API) *InstancesManager {
-	return &InstancesManager{
+func NewInstancesManager(logger *slog.Logger, api EC2API) (*InstancesManager, error) {
+
+	m := &InstancesManager{
+		logger:    logger.With(subsysLogAttr...),
 		instances: ipamTypes.NewInstanceMap(),
 		api:       api,
 	}
+
+	limitsGetter, err := limits.NewLimitsGetter(logger, api, limits.TriggerMinInterval, limits.EC2apiTimeout, limits.EC2apiRetryCount)
+	if err != nil {
+		return nil, err
+	}
+	m.limitsGetter = limitsGetter
+	return m, nil
 }
 
 // CreateNode is called on discovery of a new node and returns the ENI node
@@ -98,9 +123,7 @@ func (m *InstancesManager) GetSubnets(ctx context.Context) ipamTypes.SubnetMap {
 	defer m.mutex.RUnlock()
 
 	subnetsCopy := make(ipamTypes.SubnetMap)
-	for k, v := range m.subnets {
-		subnetsCopy[k] = v
-	}
+	maps.Copy(subnetsCopy, m.subnets)
 
 	return subnetsCopy
 }
@@ -169,47 +192,96 @@ func (m *InstancesManager) FindSecurityGroupByTags(vpcID string, required ipamTy
 // cache in the instanceManager. It returns the time when the resync has
 // started or time.Time{} if it did not complete.
 func (m *InstancesManager) Resync(ctx context.Context) time.Time {
+	// Full API resync should block the instance incremental resync from all nodes.
+	m.resyncLock.Lock()
+	defer m.resyncLock.Unlock()
+	// An empty instanceID indicates the full resync.
+	return m.resync(ctx, "")
+}
+
+func (m *InstancesManager) resync(ctx context.Context, instanceID string) time.Time {
 	resyncStart := time.Now()
 
 	vpcs, err := m.api.GetVpcs(ctx)
 	if err != nil {
-		log.WithError(err).Warning("Unable to synchronize EC2 VPC list")
+		m.logger.Warn("Unable to synchronize EC2 VPC list", logfields.Error, err)
 		return time.Time{}
 	}
 
 	subnets, err := m.api.GetSubnets(ctx)
 	if err != nil {
-		log.WithError(err).Warning("Unable to retrieve EC2 subnets list")
+		m.logger.Warn("Unable to retrieve EC2 subnets list", logfields.Error, err)
 		return time.Time{}
 	}
 
 	securityGroups, err := m.api.GetSecurityGroups(ctx)
 	if err != nil {
-		log.WithError(err).Warning("Unable to retrieve EC2 security group list")
+		m.logger.Warn("Unable to retrieve EC2 security group list", logfields.Error, err)
 		return time.Time{}
 	}
-
-	instances, err := m.api.GetInstances(ctx, vpcs, subnets)
+	routeTables, err := m.api.GetRouteTables(ctx)
 	if err != nil {
-		log.WithError(err).Warning("Unable to synchronize EC2 interface list")
+		m.logger.Warn("Unable to retrieve EC2 route table list", logfields.Error, err)
 		return time.Time{}
 	}
 
-	log.WithFields(logrus.Fields{
-		"numInstances":      instances.NumInstances(),
-		"numVPCs":           len(vpcs),
-		"numSubnets":        len(subnets),
-		"numSecurityGroups": len(securityGroups),
-	}).Info("Synchronized ENI information")
+	// An empty instanceID indicates that this is full resync, ENIs from all instances
+	// will be refetched from EC2 API and updated to the local cache. Otherwise only
+	// the given instance will be updated.
+	if instanceID == "" {
+		instances, err := m.api.GetInstances(ctx, vpcs, subnets)
+		if err != nil {
+			m.logger.Warn("Unable to synchronize EC2 interface list", logfields.Error, err)
+			return time.Time{}
+		}
 
-	m.mutex.Lock()
-	m.instances = instances
+		m.logger.Info(
+			"Synchronized ENI information",
+			logfields.NumInstances, instances.NumInstances(),
+			logfields.NumVPCs, len(vpcs),
+			logfields.NumSubnets, len(subnets),
+			logfields.NumRouteTables, len(routeTables),
+			logfields.NumSecurityGroups, len(securityGroups),
+		)
+
+		m.mutex.Lock()
+		defer m.mutex.Unlock()
+		m.instances = instances
+	} else {
+		instance, err := m.api.GetInstance(ctx, vpcs, subnets, instanceID)
+		if err != nil {
+			m.logger.Warn("Unable to synchronize EC2 interface list", logfields.Error, err)
+			return time.Time{}
+		}
+
+		m.logger.Info(
+			"Synchronized ENI information for the corresponding instance",
+			logfields.InstanceID, instanceID,
+			logfields.NumVPCs, len(vpcs),
+			logfields.NumSubnets, len(subnets),
+			logfields.NumRouteTables, len(routeTables),
+			logfields.NumSecurityGroups, len(securityGroups),
+		)
+
+		m.mutex.Lock()
+		defer m.mutex.Unlock()
+		m.instances.UpdateInstance(instanceID, instance)
+	}
+
 	m.subnets = subnets
 	m.vpcs = vpcs
 	m.securityGroups = securityGroups
-	m.mutex.Unlock()
+	m.routeTables = routeTables
 
 	return resyncStart
+}
+
+func (m *InstancesManager) InstanceSync(ctx context.Context, instanceID string) time.Time {
+	// Instance incremental resync from different nodes should be executed in parallel,
+	// but must block the full API resync.
+	m.resyncLock.RLock()
+	defer m.resyncLock.RUnlock()
+	return m.resync(ctx, instanceID)
 }
 
 // UpdateENI updates the ENI definition of an ENI for a particular instance. If
@@ -222,6 +294,53 @@ func (m *InstancesManager) UpdateENI(instanceID string, eni *eniTypes.ENI) {
 	m.mutex.Unlock()
 }
 
+func (m *InstancesManager) AddIPsToENI(instanceID string, eniID string, ips []string) {
+	m.modifyIPsToENI(instanceID, eniID, ips, true)
+}
+
+func (m *InstancesManager) RemoveIPsFromENI(instanceID string, eniID string, ips []string) {
+	m.modifyIPsToENI(instanceID, eniID, ips, false)
+}
+
+func (m *InstancesManager) modifyIPsToENI(instanceID string, eniID string, ips []string, isAdd bool) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	ifaces, ok := m.instances.GetInterface(instanceID, eniID)
+	if !ok {
+		m.logger.Warn(
+			"ENI not found",
+			logfields.InstanceID, instanceID,
+			logfields.ENI, eniID,
+		)
+		return
+	}
+
+	eniIntf := ifaces.Resource.DeepCopyInterface()
+	eni, ok := eniIntf.(*eniTypes.ENI)
+	if !ok {
+		m.logger.Warn(
+			"Unexpected resource type, expected *eniTypes.ENI",
+			logfields.InstanceID, instanceID,
+			logfields.ENI, eniID,
+		)
+		return
+	}
+	if isAdd {
+		for _, ip := range ips {
+			if !slices.Contains(eni.Addresses, ip) {
+				eni.Addresses = append(eni.Addresses, ip)
+			}
+		}
+	} else {
+		for _, ip := range ips {
+			eni.Addresses = slices.DeleteFunc(eni.Addresses, func(addr string) bool {
+				return addr == ip
+			})
+		}
+	}
+	m.instances.Update(instanceID, ipamTypes.InterfaceRevision{Resource: eni})
+}
+
 // ForeachInstance will iterate over each interface for a particular instance inside `instances`
 // and call `fn`.
 // This function is read-locked for the entire execution.
@@ -231,7 +350,7 @@ func (m *InstancesManager) ForeachInstance(instanceID string, fn ipamTypes.Inter
 	// list of ENIs attached to this instance. Without this,
 	// ForeachInstance() would return the ENIs of all instances.
 	if instanceID == "" {
-		log.Error("BUG: Inconsistent CiliumNode state. The InstanceID is not known")
+		m.logger.Error("BUG: Inconsistent CiliumNode state. The InstanceID is not known")
 		return
 	}
 

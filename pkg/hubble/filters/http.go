@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
@@ -21,13 +22,9 @@ func httpMatchCompatibleEventFilter(types []*flowpb.EventTypeFilter) bool {
 		return true
 	}
 
-	for _, t := range types {
-		if t.GetType() == api.MessageTypeAccessLog {
-			return true
-		}
-	}
-
-	return false
+	return slices.ContainsFunc(types, func(t *flowpb.EventTypeFilter) bool {
+		return t.GetType() == api.MessageTypeAccessLog
+	})
 }
 
 var (
@@ -57,22 +54,16 @@ func filterByHTTPStatusCode(statusCodePrefixes []string) (FilterFunc, error) {
 
 		// Check for both full matches or prefix matches
 		httpStatusCode := fmt.Sprintf("%03d", http.Code)
-		for _, f := range full {
-			if httpStatusCode == f {
-				return true
-			}
+		if slices.Contains(full, httpStatusCode) {
+			return true
 		}
-		for _, p := range prefix {
-			if strings.HasPrefix(httpStatusCode, p) {
-				return true
-			}
-		}
-
-		return false
+		return slices.ContainsFunc(prefix, func(p string) bool {
+			return strings.HasPrefix(httpStatusCode, p)
+		})
 	}, nil
 }
 
-func filterByHTTPMethods(methods []string) (FilterFunc, error) {
+func filterByHTTPMethods(methods []string) FilterFunc {
 	return func(ev *v1.Event) bool {
 		http := ev.GetFlow().GetL7().GetHttp()
 
@@ -81,14 +72,54 @@ func filterByHTTPMethods(methods []string) (FilterFunc, error) {
 			return false
 		}
 
-		for _, method := range methods {
-			if strings.EqualFold(http.Method, method) {
+		return slices.ContainsFunc(methods, func(method string) bool {
+			return strings.EqualFold(http.Method, method)
+		})
+	}
+}
+
+func filterByHTTPUrls(urlRegexpStrs []string) (FilterFunc, error) {
+	urlRegexps := make([]*regexp.Regexp, 0, len(urlRegexpStrs))
+	for _, urlRegexpStr := range urlRegexpStrs {
+		urlRegexp, err := regexp.Compile(urlRegexpStr)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", urlRegexpStr, err)
+		}
+		urlRegexps = append(urlRegexps, urlRegexp)
+	}
+
+	return func(ev *v1.Event) bool {
+		http := ev.GetFlow().GetL7().GetHttp()
+
+		if http == nil || http.Url == "" {
+			return false
+		}
+
+		return slices.ContainsFunc(urlRegexps, func(urlRegexp *regexp.Regexp) bool {
+			return urlRegexp.MatchString(http.Url)
+		})
+	}, nil
+}
+
+func filterByHTTPHeaders(headers []*flowpb.HTTPHeader) FilterFunc {
+	return func(ev *v1.Event) bool {
+		http := ev.GetFlow().GetL7().GetHttp()
+
+		if http == nil || http.GetHeaders() == nil {
+			// Not an HTTP or headers are missing
+			return false
+		}
+
+		for _, httpHeader := range http.GetHeaders() {
+			if slices.ContainsFunc(headers, func(header *flowpb.HTTPHeader) bool {
+				return header.Key == httpHeader.Key && header.Value == httpHeader.Value
+			}) {
 				return true
 			}
 		}
 
 		return false
-	}, nil
+	}
 }
 
 func filterByHTTPPaths(pathRegexpStrs []string) (FilterFunc, error) {
@@ -96,7 +127,7 @@ func filterByHTTPPaths(pathRegexpStrs []string) (FilterFunc, error) {
 	for _, pathRegexpStr := range pathRegexpStrs {
 		pathRegexp, err := regexp.Compile(pathRegexpStr)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %v", pathRegexpStr, err)
+			return nil, fmt.Errorf("%s: %w", pathRegexpStr, err)
 		}
 		pathRegexps = append(pathRegexps, pathRegexp)
 	}
@@ -114,13 +145,9 @@ func filterByHTTPPaths(pathRegexpStrs []string) (FilterFunc, error) {
 			// do.
 			return false
 		}
-		for _, pathRegexp := range pathRegexps {
-			if pathRegexp.MatchString(uri.Path) {
-				return true
-			}
-		}
-
-		return false
+		return slices.ContainsFunc(pathRegexps, func(pathRegexp *regexp.Regexp) bool {
+			return pathRegexp.MatchString(uri.Path)
+		})
 	}, nil
 }
 
@@ -139,7 +166,7 @@ func (h *HTTPFilter) OnBuildFilter(ctx context.Context, ff *flowpb.FlowFilter) (
 
 		hsf, err := filterByHTTPStatusCode(ff.GetHttpStatusCode())
 		if err != nil {
-			return nil, fmt.Errorf("invalid http status code filter: %v", err)
+			return nil, fmt.Errorf("invalid http status code filter: %w", err)
 		}
 		fs = append(fs, hsf)
 	}
@@ -150,11 +177,7 @@ func (h *HTTPFilter) OnBuildFilter(ctx context.Context, ff *flowpb.FlowFilter) (
 				"the event type filter to only match 'l7' events")
 		}
 
-		methodf, err := filterByHTTPMethods(ff.GetHttpMethod())
-		if err != nil {
-			return nil, fmt.Errorf("invalid http method filter: %v", err)
-		}
-		fs = append(fs, methodf)
+		fs = append(fs, filterByHTTPMethods(ff.GetHttpMethod()))
 	}
 
 	if ff.GetHttpPath() != nil {
@@ -165,9 +188,31 @@ func (h *HTTPFilter) OnBuildFilter(ctx context.Context, ff *flowpb.FlowFilter) (
 
 		pathf, err := filterByHTTPPaths(ff.GetHttpPath())
 		if err != nil {
-			return nil, fmt.Errorf("invalid http path filter: %v", err)
+			return nil, fmt.Errorf("invalid http path filter: %w", err)
 		}
 		fs = append(fs, pathf)
+	}
+
+	if ff.GetHttpUrl() != nil {
+		if !httpMatchCompatibleEventFilter(ff.GetEventType()) {
+			return nil, errors.New("filtering by http url requires " +
+				"the event type filter to only match 'l7' events")
+		}
+
+		pathf, err := filterByHTTPUrls(ff.GetHttpUrl())
+		if err != nil {
+			return nil, fmt.Errorf("invalid http url filter: %w", err)
+		}
+		fs = append(fs, pathf)
+	}
+
+	if ff.GetHttpHeader() != nil {
+		if !httpMatchCompatibleEventFilter(ff.GetEventType()) {
+			return nil, errors.New("filtering by http headers requires " +
+				"the event type filter to only match 'l7' events")
+		}
+
+		fs = append(fs, filterByHTTPHeaders(ff.GetHttpHeader()))
 	}
 
 	return fs, nil

@@ -4,10 +4,8 @@
 package types
 
 import (
-	"context"
 	"crypto/tls"
 	"io"
-	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -26,7 +24,7 @@ type Client interface {
 
 // ClientBuilder creates a new Client.
 type ClientBuilder interface {
-	// Client builds a new Client that connects to the given target.
+	// Client builds a new Client.
 	Client(target string) (Client, error)
 }
 
@@ -42,35 +40,37 @@ func (c *client) Close() error {
 	return c.conn.Close()
 }
 
+var _ ClientBuilder = (*LocalClientBuilder)(nil)
+
 // LocalClientBuilder is a ClientBuilder that is suitable when the gRPC
 // connection to the Peer service is local (typically a Unix Domain Socket).
-type LocalClientBuilder struct {
-	DialTimeout time.Duration
-}
+type LocalClientBuilder struct{}
 
 // Client implements ClientBuilder.Client.
 func (b LocalClientBuilder) Client(target string) (Client, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), b.DialTimeout)
-	defer cancel()
-	// the connection is local so we assume WithInsecure() is safe in this context
-	conn, err := grpc.DialContext(ctx, target, grpc.WithInsecure(), grpc.WithBlock())
+	// The connection is local, so we assume using insecure connection is safe in
+	// this context.
+	conn, err := grpc.NewClient(target,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+	)
 	if err != nil {
 		return nil, err
 	}
 	return &client{conn, peerpb.NewPeerClient(conn)}, nil
 }
 
+var _ ClientBuilder = (*RemoteClientBuilder)(nil)
+
 // RemoteClientBuilder is a ClientBuilder that is suitable when the gRPC
 // connection to the Peer service is remote (typically a K8s Service).
 type RemoteClientBuilder struct {
-	DialTimeout   time.Duration
 	TLSConfig     certloader.ClientConfigBuilder
 	TLSServerName string
 }
 
-// Client implements ClientBuilder.Client.
+// Client implements the ClientBuilder interface.
 func (b RemoteClientBuilder) Client(target string) (Client, error) {
-	opts := []grpc.DialOption{grpc.WithBlock()}
+	var opts []grpc.DialOption
 	if b.TLSConfig == nil {
 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	} else {
@@ -82,9 +82,7 @@ func (b RemoteClientBuilder) Client(target string) (Client, error) {
 		})
 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(tlsConfig)))
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), b.DialTimeout)
-	defer cancel()
-	conn, err := grpc.DialContext(ctx, target, opts...)
+	conn, err := grpc.NewClient(target, opts...)
 	if err != nil {
 		return nil, err
 	}

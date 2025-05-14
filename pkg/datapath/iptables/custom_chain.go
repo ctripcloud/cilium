@@ -6,18 +6,13 @@ package iptables
 import (
 	"fmt"
 	"strings"
-
-	"github.com/mattn/go-shellwords"
-
-	"github.com/cilium/cilium/pkg/option"
 )
 
 type customChain struct {
-	name       string
-	table      string
-	hook       string
-	feederArgs []string
-	ipv6       bool // ip6tables chain in addition to iptables chain
+	name  string
+	table string
+	hook  string
+	ipv6  bool // ip6tables chain in addition to iptables chain
 }
 
 // ciliumChains is the list of custom iptables chain used by Cilium. Custom
@@ -28,75 +23,65 @@ type customChain struct {
 // flushing and removing the custom chains will fail.
 var ciliumChains = []customChain{
 	{
-		name:       ciliumInputChain,
-		table:      "filter",
-		hook:       "INPUT",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumInputChain,
+		table: "filter",
+		hook:  "INPUT",
+		ipv6:  true,
 	},
 	{
-		name:       ciliumOutputChain,
-		table:      "filter",
-		hook:       "OUTPUT",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumOutputChain,
+		table: "filter",
+		hook:  "OUTPUT",
+		ipv6:  true,
 	},
 	{
-		name:       ciliumOutputRawChain,
-		table:      "raw",
-		hook:       "OUTPUT",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumOutputRawChain,
+		table: "raw",
+		hook:  "OUTPUT",
+		ipv6:  true,
 	},
 	{
-		name:       ciliumPostNatChain,
-		table:      "nat",
-		hook:       "POSTROUTING",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumPostNatChain,
+		table: "nat",
+		hook:  "POSTROUTING",
+		ipv6:  true,
 	},
 	{
-		name:       ciliumOutputNatChain,
-		table:      "nat",
-		hook:       "OUTPUT",
-		feederArgs: []string{""},
+		name:  ciliumOutputNatChain,
+		table: "nat",
+		hook:  "OUTPUT",
 	},
 	{
-		name:       ciliumPreNatChain,
-		table:      "nat",
-		hook:       "PREROUTING",
-		feederArgs: []string{""},
+		name:  ciliumPreNatChain,
+		table: "nat",
+		hook:  "PREROUTING",
 	},
 	{
-		name:       ciliumPostMangleChain,
-		table:      "mangle",
-		hook:       "POSTROUTING",
-		feederArgs: []string{""},
+		name:  ciliumPostMangleChain,
+		table: "mangle",
+		hook:  "POSTROUTING",
 	},
 	{
-		name:       ciliumPreMangleChain,
-		table:      "mangle",
-		hook:       "PREROUTING",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumPreMangleChain,
+		table: "mangle",
+		hook:  "PREROUTING",
+		ipv6:  true,
 	},
 	{
-		name:       ciliumPreRawChain,
-		table:      "raw",
-		hook:       "PREROUTING",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumPreRawChain,
+		table: "raw",
+		hook:  "PREROUTING",
+		ipv6:  true,
 	},
 	{
-		name:       ciliumForwardChain,
-		table:      "filter",
-		hook:       "FORWARD",
-		feederArgs: []string{""},
-		ipv6:       true,
+		name:  ciliumForwardChain,
+		table: "filter",
+		hook:  "FORWARD",
+		ipv6:  true,
 	},
 }
 
-func (c *customChain) exists(prog iptablesInterface) (bool, error) {
+func (c *customChain) exists(prog runnable) (bool, error) {
 	args := []string{"-t", c.table, "-S", c.name}
 
 	output, err := prog.runProgOutput(args)
@@ -116,14 +101,25 @@ func (c *customChain) exists(prog iptablesInterface) (bool, error) {
 		if strings.Contains(err.Error(), fmt.Sprintf("chain `%s' in table `%s' is incompatible, use 'nft' tool.", c.name, c.table)) {
 			return false, nil
 		}
-
+		// with iptables-nft = 1.8.10, when we try to list the rules of a non existing
+		// chain, the command will return an error in the format:
+		//
+		// iptables: Incompatible with this kernel.
+		// ip6tables: Incompatible with this kernel.
+		//
+		// rather than the usual one.
+		// This is fixed in 1.8.11. RHEL 9.4 ships however 1.8.10 and is used by all the latest OpenShift versions at
+		// the time of writing: 4.16, 4.17 and 4.18
+		if strings.Contains(err.Error(), "tables: Incompatible with this kernel.") {
+			return false, nil
+		}
 		return false, fmt.Errorf("unable to list %s chain: %s (%w)", c.name, string(output), err)
 	}
 
 	return true, nil
 }
 
-func (c *customChain) doAdd(prog iptablesInterface) error {
+func (c *customChain) doAdd(prog runnable) error {
 	args := []string{"-t", c.table, "-N", c.name}
 
 	output, err := prog.runProgOutput(args)
@@ -149,7 +145,7 @@ func (c *customChain) add(ipv4, ipv6 bool) error {
 	return nil
 }
 
-func (c *customChain) doRename(prog iptablesInterface, newName string) error {
+func (c *customChain) doRename(prog runnable, newName string) error {
 	if exists, err := c.exists(prog); err != nil {
 		return err
 	} else if !exists {
@@ -220,22 +216,13 @@ func (c *customChain) remove(ipv4, ipv6 bool) error {
 	return nil
 }
 
-func (c *customChain) doInstallFeeder(prog iptablesInterface, feedArgs string) error {
+func (c *customChain) doInstallFeeder(prog iptablesInterface, prepend bool) error {
 	installMode := "-A"
-	if option.Config.PrependIptablesChains {
+	if prepend {
 		installMode = "-I"
 	}
 
 	feedRule := []string{"-m", "comment", "--comment", feederDescription + " " + c.name, "-j", c.name}
-	if feedArgs != "" {
-		argsList, err := shellwords.Parse(feedArgs)
-		if err != nil {
-			return fmt.Errorf("cannot parse '%s' rule into argument slice: %w", feedArgs, err)
-		}
-
-		feedRule = append(argsList, feedRule...)
-	}
-
 	args := append([]string{"-t", c.table, installMode, c.hook}, feedRule...)
 
 	output, err := prog.runProgOutput(args)
@@ -246,19 +233,16 @@ func (c *customChain) doInstallFeeder(prog iptablesInterface, feedArgs string) e
 	return nil
 }
 
-func (c *customChain) installFeeder(ipv4, ipv6 bool) error {
-	for _, feedArgs := range c.feederArgs {
-		if ipv4 {
-			if err := c.doInstallFeeder(ip4tables, feedArgs); err != nil {
-				return err
-			}
-		}
-		if ipv6 && c.ipv6 {
-			if err := c.doInstallFeeder(ip6tables, feedArgs); err != nil {
-				return err
-			}
+func (c *customChain) installFeeder(ipv4, ipv6, prepend bool) error {
+	if ipv4 {
+		if err := c.doInstallFeeder(ip4tables, prepend); err != nil {
+			return err
 		}
 	}
-
+	if ipv6 && c.ipv6 {
+		if err := c.doInstallFeeder(ip6tables, prepend); err != nil {
+			return err
+		}
+	}
 	return nil
 }

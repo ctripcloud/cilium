@@ -19,14 +19,19 @@ understand the workflow of getting these changes reviewed and merged upstream.
    :maxdepth: 2
 
    contributing_guide
+   reviewers_committers/index
    dev_setup
    images
    codeoverview
+   datapath_config
    hive
+   statedb
    debugging
    hubble
    introducing_new_crds
+   bgp_cplane
+   renovate
 
-The best way to get help if you get stuck is to ask a question on the `Cilium
-Slack channel <https://cilium.herokuapp.com>`_.  With Cilium contributors
-across the globe, there is almost always someone available to help.
+The best way to get help if you get stuck is to ask a question on `Cilium
+Slack`_. With Cilium contributors across the globe, there is almost always
+someone available to help.

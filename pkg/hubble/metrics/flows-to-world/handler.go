@@ -5,35 +5,52 @@ package flows_to_world
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"strings"
 
+	"github.com/prometheus/client_golang/prometheus"
+
+	"google.golang.org/protobuf/types/known/timestamppb"
+
 	flowpb "github.com/cilium/cilium/api/v1/flow"
 	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
+	"github.com/cilium/cilium/pkg/hubble/filters"
 	"github.com/cilium/cilium/pkg/hubble/metrics/api"
 	pkglabels "github.com/cilium/cilium/pkg/labels"
+)
 
-	"github.com/prometheus/client_golang/prometheus"
+const (
+	reservedWorldLbl     = pkglabels.LabelSourceReserved + ":" + pkglabels.IDNameWorld
+	reservedWorldIPv4Lbl = pkglabels.LabelSourceReserved + ":" + pkglabels.IDNameWorldIPv4
+	reservedWorldIPv6Lbl = pkglabels.LabelSourceReserved + ":" + pkglabels.IDNameWorldIPv6
 )
 
 type flowsToWorldHandler struct {
 	flowsToWorld *prometheus.CounterVec
 	context      *api.ContextOptions
-	worldLabel   string
+	AllowList    filters.FilterFuncs
+	DenyList     filters.FilterFuncs
 	anyDrop      bool
 	port         bool
 	synOnly      bool
 }
 
-func (h *flowsToWorldHandler) Init(registry *prometheus.Registry, options api.Options) error {
-	c, err := api.ParseContextOptions(options)
+func (h *flowsToWorldHandler) Init(registry *prometheus.Registry, options *api.MetricConfig) error {
+	c, err := api.ParseContextOptions(options.ContextOptionConfigs)
 	if err != nil {
 		return err
 	}
 	h.context = c
-	for key := range options {
-		switch strings.ToLower(key) {
+	err = h.HandleConfigurationUpdate(options)
+	if err != nil {
+		return err
+	}
+
+	for _, opt := range options.ContextOptionConfigs {
+		switch strings.ToLower(opt.Name) {
 		case "any-drop":
 			h.anyDrop = true
 		case "port":
@@ -53,7 +70,6 @@ func (h *flowsToWorldHandler) Init(registry *prometheus.Registry, options api.Op
 		Name:      "flows_to_world_total",
 		Help:      "Total number of flows to reserved:world",
 	}, labels)
-	h.worldLabel = fmt.Sprintf("%s:%s", pkglabels.LabelSourceReserved, pkglabels.IDNameWorld)
 	registry.MustRegister(h.flowsToWorld)
 	return nil
 }
@@ -82,7 +98,8 @@ func (h *flowsToWorldHandler) ListMetricVec() []*prometheus.MetricVec {
 
 func (h *flowsToWorldHandler) isReservedWorld(endpoint *flowpb.Endpoint) bool {
 	for _, label := range endpoint.Labels {
-		if label == h.worldLabel {
+		switch label {
+		case reservedWorldLbl, reservedWorldIPv4Lbl, reservedWorldIPv6Lbl:
 			return true
 		}
 	}
@@ -112,6 +129,10 @@ func (h *flowsToWorldHandler) ProcessFlow(_ context.Context, flow *flowpb.Flow) 
 		return nil
 	}
 
+	if !filters.Apply(h.AllowList, h.DenyList, &v1.Event{Event: flow, Timestamp: &timestamppb.Timestamp{}}) {
+		return nil
+	}
+
 	labelValues, err := h.context.GetLabelValues(flow)
 	if err != nil {
 		return err
@@ -133,5 +154,30 @@ func (h *flowsToWorldHandler) ProcessFlow(_ context.Context, flow *flowpb.Flow) 
 	}
 	labels = append(labels, labelValues...)
 	h.flowsToWorld.WithLabelValues(labels...).Inc()
+	return nil
+}
+
+func (h *flowsToWorldHandler) Deinit(registry *prometheus.Registry) error {
+	var errs error
+	if !registry.Unregister(h.flowsToWorld) {
+		errs = errors.Join(errs, fmt.Errorf("failed to unregister metric: %v,", "flows_to_world_total"))
+	}
+	return errs
+}
+
+func (h *flowsToWorldHandler) HandleConfigurationUpdate(cfg *api.MetricConfig) error {
+	return h.SetFilters(cfg)
+}
+
+func (h *flowsToWorldHandler) SetFilters(cfg *api.MetricConfig) error {
+	var err error
+	h.AllowList, err = filters.BuildFilterList(context.Background(), cfg.IncludeFilters, filters.DefaultFilters(slog.Default()))
+	if err != nil {
+		return err
+	}
+	h.DenyList, err = filters.BuildFilterList(context.Background(), cfg.ExcludeFilters, filters.DefaultFilters(slog.Default()))
+	if err != nil {
+		return err
+	}
 	return nil
 }

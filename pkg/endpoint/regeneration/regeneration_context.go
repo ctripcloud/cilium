@@ -18,15 +18,9 @@ const (
 	// RegenerateWithoutDatapath indicates that datapath rebuild or reload
 	// is not required to implement this regeneration.
 	RegenerateWithoutDatapath
-	// RegenerateWithDatapathLoad indicates that the datapath must be
-	// reloaded but not recompiled to implement this regeneration.
-	RegenerateWithDatapathLoad
-	// RegenerateWithDatapathRewrite indicates that the datapath must be
+	// RegenerateWithDatapath indicates that the datapath must be
 	// recompiled and reloaded to implement this regeneration.
-	RegenerateWithDatapathRewrite
-	// RegenerateWithDatapathRebuild indicates that the datapath must be
-	// fully recompiled and reloaded without using any cached templates.
-	RegenerateWithDatapathRebuild
+	RegenerateWithDatapath
 )
 
 // String converts a DatapathRegenerationLevel into a human-readable string.
@@ -36,12 +30,8 @@ func (r DatapathRegenerationLevel) String() string {
 		return "invalid"
 	case RegenerateWithoutDatapath:
 		return "no-rebuild"
-	case RegenerateWithDatapathLoad:
-		return "reload"
-	case RegenerateWithDatapathRewrite:
+	case RegenerateWithDatapath:
 		return "rewrite+load"
-	case RegenerateWithDatapathRebuild:
-		return "compile+load"
 	default:
 		break
 	}

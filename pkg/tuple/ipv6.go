@@ -5,8 +5,8 @@ package tuple
 
 import (
 	"fmt"
+	"net/netip"
 	"strings"
-	"unsafe"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/byteorder"
@@ -17,22 +17,26 @@ import (
 // TupleKey6 represents the key for IPv6 entries in the local BPF conntrack map.
 // Address field names are correct for return traffic, i.e., they are reversed
 // compared to the original direction traffic.
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
-type TupleKey6 struct {
-	DestAddr   types.IPv6      `align:"daddr"`
-	SourceAddr types.IPv6      `align:"saddr"`
-	DestPort   uint16          `align:"dport"`
-	SourcePort uint16          `align:"sport"`
-	NextHeader u8proto.U8proto `align:"nexthdr"`
-	Flags      uint8           `align:"flags"`
+type TupleKey6 tupleKey[types.IPv6]
+
+func (t *TupleKey6) GetDestAddr() netip.Addr {
+	return t.DestAddr.Addr()
 }
 
-// GetKeyPtr returns the unsafe.Pointer for k.
-func (k *TupleKey6) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
+func (t *TupleKey6) GetDestPort() uint16 {
+	return t.DestPort
+}
 
-// NewValue creates a new bpf.MapValue.
-func (k *TupleKey6) NewValue() bpf.MapValue { return &TupleValStub{} }
+func (t *TupleKey6) GetSourceAddr() netip.Addr {
+	return t.SourceAddr.Addr()
+}
+func (t *TupleKey6) GetSourcePort() uint16 {
+	return t.SourcePort
+}
+
+func (t *TupleKey6) GetNextHeader() u8proto.U8proto {
+	return t.NextHeader
+}
 
 // ToNetwork converts TupleKey6 ports to network byte order.
 func (k *TupleKey6) ToNetwork() TupleKey {
@@ -59,6 +63,8 @@ func (k *TupleKey6) GetFlags() uint8 {
 func (k *TupleKey6) String() string {
 	return fmt.Sprintf("[%s]:%d, %d, %d, %d", k.DestAddr, k.SourcePort, k.DestPort, k.NextHeader, k.Flags)
 }
+
+func (k *TupleKey6) New() bpf.MapKey { return &TupleKey6{} }
 
 // Dump writes the contents of key to sb and returns true if the value for next
 // header in the key is nonzero.
@@ -107,8 +113,6 @@ func (t *TupleKey6) SwapAddresses() {
 }
 
 // TupleKey6Global represents the key for IPv6 entries in the global BPF conntrack map.
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type TupleKey6Global struct {
 	TupleKey6
 }

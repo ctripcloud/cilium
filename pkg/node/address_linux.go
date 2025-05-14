@@ -7,14 +7,16 @@ package node
 
 import (
 	"fmt"
+	"log/slog"
 	"net"
 	"sort"
 
-	"github.com/sirupsen/logrus"
 	"github.com/vishvananda/netlink"
 	"golang.org/x/sys/unix"
 
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/ip"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 func firstGlobalAddr(intf string, preferredIP net.IP, family int, preferPublic bool) (net.IP, error) {
@@ -31,7 +33,7 @@ func firstGlobalAddr(intf string, preferredIP net.IP, family int, preferPublic b
 	}
 
 	if intf != "" && intf != "undefined" {
-		link, err = netlink.LinkByName(intf)
+		link, err = safenetlink.LinkByName(intf)
 		if err != nil {
 			link = nil
 		} else {
@@ -40,7 +42,7 @@ func firstGlobalAddr(intf string, preferredIP net.IP, family int, preferPublic b
 	}
 
 retryInterface:
-	addr, err := netlink.AddrList(link, family)
+	addr, err := safenetlink.AddrList(link, family)
 	if err != nil {
 		return nil, err
 	}
@@ -166,12 +168,12 @@ func firstGlobalV6Addr(intf string, preferredIP net.IP, preferPublic bool) (net.
 
 // getCiliumHostIPsFromNetDev returns the first IPv4 link local and returns
 // it
-func getCiliumHostIPsFromNetDev(devName string) (ipv4GW, ipv6Router net.IP) {
-	hostDev, err := netlink.LinkByName(devName)
+func getCiliumHostIPsFromNetDev(logger *slog.Logger, devName string) (ipv4GW, ipv6Router net.IP) {
+	hostDev, err := safenetlink.LinkByName(devName)
 	if err != nil {
 		return nil, nil
 	}
-	addrs, err := netlink.AddrList(hostDev, netlink.FAMILY_ALL)
+	addrs, err := safenetlink.AddrList(hostDev, netlink.FAMILY_ALL)
 	if err != nil {
 		return nil, nil
 	}
@@ -188,11 +190,12 @@ func getCiliumHostIPsFromNetDev(devName string) (ipv4GW, ipv6Router net.IP) {
 	}
 
 	if ipv4GW != nil || ipv6Router != nil {
-		log.WithFields(logrus.Fields{
-			"ipv4":   ipv4GW,
-			"ipv6":   ipv6Router,
-			"device": devName,
-		}).Info("Restored router address from device")
+		logger.Info(
+			"Restored router address from device",
+			logfields.IPv4, ipv4GW,
+			logfields.IPv6, ipv6Router,
+			logfields.Device, devName,
+		)
 	}
 
 	return ipv4GW, ipv6Router

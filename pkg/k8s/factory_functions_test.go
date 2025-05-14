@@ -4,9 +4,11 @@
 package k8s
 
 import (
+	"fmt"
+	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 	core_v1 "k8s.io/api/core/v1"
 	networkingv1 "k8s.io/api/networking/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -14,18 +16,20 @@ import (
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/annotation"
-	"github.com/cilium/cilium/pkg/checker"
-	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
 	v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
-	slim_networkingv1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/networking/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	"github.com/cilium/cilium/pkg/k8s/types"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/policy/api"
 )
 
-func (s *K8sSuite) Test_EqualV2CNP(c *C) {
+var (
+	unknownObj    = 100
+	unknownObjErr = fmt.Errorf("unknown object type %T", unknownObj)
+)
+
+func Test_EqualV2CNP(t *testing.T) {
 	type args struct {
 		o1 *types.SlimCNP
 		o2 *types.SlimCNP
@@ -64,7 +68,7 @@ func (s *K8sSuite) Test_EqualV2CNP(c *C) {
 							Name: "rule1",
 						},
 						Spec: &api.Rule{
-							EndpointSelector: api.NewESFromLabels(labels.NewLabel("foo", "bar", "k8s")),
+							EndpointSelector: api.NewESFromLabels(labels.NewLabel("foo", "bar", labels.LabelSourceK8s)),
 						},
 					},
 				},
@@ -132,11 +136,11 @@ func (s *K8sSuite) Test_EqualV2CNP(c *C) {
 	}
 	for _, tt := range tests {
 		got := tt.args.o1.DeepEqual(tt.args.o2)
-		c.Assert(got, Equals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equal(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_EqualV1Endpoints(c *C) {
+func Test_EqualV1Endpoints(t *testing.T) {
 	type args struct {
 		o1 *slim_corev1.Endpoints
 		o2 *slim_corev1.Endpoints
@@ -264,11 +268,11 @@ func (s *K8sSuite) Test_EqualV1Endpoints(c *C) {
 	}
 	for _, tt := range tests {
 		got := tt.args.o1.DeepEqual(tt.args.o2)
-		c.Assert(got, Equals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equal(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_EqualV1Pod(c *C) {
+func Test_EqualV1Pod(t *testing.T) {
 	type args struct {
 		o1 *slim_corev1.Pod
 		o2 *slim_corev1.Pod
@@ -278,7 +282,6 @@ func (s *K8sSuite) Test_EqualV1Pod(c *C) {
 		args args
 		want bool
 	}{
-
 		{
 			name: "Pods with the same name",
 			args: args{
@@ -433,7 +436,7 @@ func (s *K8sSuite) Test_EqualV1Pod(c *C) {
 			want: true,
 		},
 		{
-			name: "Pods with differing proxy-visibility annotations",
+			name: "Pods with differing no-track-port annotations",
 			args: args{
 				o1: &slim_corev1.Pod{
 					ObjectMeta: slim_metav1.ObjectMeta{
@@ -458,7 +461,7 @@ func (s *K8sSuite) Test_EqualV1Pod(c *C) {
 							"foo": "bar",
 						},
 						Annotations: map[string]string{
-							annotation.ProxyVisibility: "80/HTTP",
+							annotation.NoTrack: "53",
 						},
 					},
 					Status: slim_corev1.PodStatus{
@@ -517,11 +520,11 @@ func (s *K8sSuite) Test_EqualV1Pod(c *C) {
 	}
 	for _, tt := range tests {
 		got := tt.args.o1.DeepEqual(tt.args.o2)
-		c.Assert(got, Equals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equal(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_EqualV1Node(c *C) {
+func Test_EqualV1Node(t *testing.T) {
 	type args struct {
 		o1 *slim_corev1.Node
 		o2 *slim_corev1.Node
@@ -770,11 +773,11 @@ func (s *K8sSuite) Test_EqualV1Node(c *C) {
 	}
 	for _, tt := range tests {
 		got := tt.args.o1.DeepEqual(tt.args.o2)
-		c.Assert(got, Equals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equal(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_EqualV1Namespace(c *C) {
+func Test_EqualV1Namespace(t *testing.T) {
 	type args struct {
 		o1 *slim_corev1.Namespace
 		o2 *slim_corev1.Namespace
@@ -863,102 +866,11 @@ func (s *K8sSuite) Test_EqualV1Namespace(c *C) {
 	}
 	for _, tt := range tests {
 		got := tt.args.o1.DeepEqual(tt.args.o2)
-		c.Assert(got, Equals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equal(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_EqualV1Service(c *C) {
-	type args struct {
-		o1 *slim_corev1.Service
-		o2 *slim_corev1.Service
-	}
-	tests := []struct {
-		name string
-		args args
-		want bool
-	}{
-		{
-			name: "Service with different annotations",
-			args: args{
-				o1: &slim_corev1.Service{
-					ObjectMeta: slim_metav1.ObjectMeta{
-						Annotations: map[string]string{},
-					},
-				},
-				o2: &slim_corev1.Service{
-					ObjectMeta: slim_metav1.ObjectMeta{
-						Annotations: map[string]string{
-							"service.cilium.io/shared": "true",
-						},
-					},
-				},
-			},
-			want: false,
-		},
-	}
-	for _, tt := range tests {
-		got := EqualV1Services(tt.args.o1, tt.args.o2, fakeDatapath.NewNodeAddressing())
-		c.Assert(got, Equals, tt.want, Commentf("Test Name: %s", tt.name))
-	}
-}
-
-func (s *K8sSuite) Test_ConvertToK8sService(c *C) {
-	type args struct {
-		obj interface{}
-	}
-	tests := []struct {
-		name string
-		args args
-		want interface{}
-	}{
-		{
-			name: "normal conversion",
-			args: args{
-				obj: &core_v1.Service{},
-			},
-			want: &slim_corev1.Service{},
-		},
-		{
-			name: "delete final state unknown conversion",
-			args: args{
-				obj: cache.DeletedFinalStateUnknown{
-					Key: "foo",
-					Obj: &core_v1.Service{},
-				},
-			},
-			want: cache.DeletedFinalStateUnknown{
-				Key: "foo",
-				Obj: &slim_corev1.Service{},
-			},
-		},
-		{
-			name: "unknown object type in delete final state unknown conversion",
-			args: args{
-				obj: cache.DeletedFinalStateUnknown{
-					Key: "foo",
-					Obj: 100,
-				},
-			},
-			want: cache.DeletedFinalStateUnknown{
-				Key: "foo",
-				Obj: 100,
-			},
-		},
-		{
-			name: "unknown object type in conversion",
-			args: args{
-				obj: 100,
-			},
-			want: 100,
-		},
-	}
-	for _, tt := range tests {
-		got := ConvertToK8sService(tt.args.obj)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
-	}
-}
-
-func (s *K8sSuite) Test_ConvertToK8sV1ServicePorts(c *C) {
+func Test_ConvertToK8sV1ServicePorts(t *testing.T) {
 	type args struct {
 		ports []slim_corev1.ServicePort
 	}
@@ -994,11 +906,11 @@ func (s *K8sSuite) Test_ConvertToK8sV1ServicePorts(c *C) {
 	}
 	for _, tt := range tests {
 		got := ConvertToK8sV1ServicePorts(tt.args.ports)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_ConvertToK8sV1SessionAffinityConfig(c *C) {
+func Test_ConvertToK8sV1SessionAffinityConfig(t *testing.T) {
 	ts := int32(1)
 	type args struct {
 		cfg *slim_corev1.SessionAffinityConfig
@@ -1033,11 +945,11 @@ func (s *K8sSuite) Test_ConvertToK8sV1SessionAffinityConfig(c *C) {
 	}
 	for _, tt := range tests {
 		got := ConvertToK8sV1ServiceAffinityConfig(tt.args.cfg)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_ConvertToK8sV1LoadBalancerIngress(c *C) {
+func Test_ConvertToK8sV1LoadBalancerIngress(t *testing.T) {
 	type args struct {
 		ings []slim_corev1.LoadBalancerIngress
 	}
@@ -1072,11 +984,11 @@ func (s *K8sSuite) Test_ConvertToK8sV1LoadBalancerIngress(c *C) {
 	}
 	for _, tt := range tests {
 		got := ConvertToK8sV1LoadBalancerIngress(tt.args.ings)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_ConvertToNetworkV1IngressLoadBalancerIngress(c *C) {
+func Test_ConvertToNetworkV1IngressLoadBalancerIngress(t *testing.T) {
 	type args struct {
 		ings []slim_corev1.LoadBalancerIngress
 	}
@@ -1111,76 +1023,40 @@ func (s *K8sSuite) Test_ConvertToNetworkV1IngressLoadBalancerIngress(c *C) {
 	}
 	for _, tt := range tests {
 		got := ConvertToNetworkV1IngressLoadBalancerIngress(tt.args.ings)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
 	}
 }
 
-func (s *K8sSuite) Test_ConvertToSlimIngressLoadBalancerStatus(c *C) {
+func Test_TransformToCNP(t *testing.T) {
 	type args struct {
-		lbs *slim_corev1.LoadBalancerStatus
+		obj any
 	}
 	tests := []struct {
-		name string
-		args args
-		want *slim_networkingv1.IngressLoadBalancerStatus
+		name     string
+		args     args
+		want     any
+		expected bool
 	}{
 		{
-			name: "empty",
-			args: args{
-				lbs: &slim_corev1.LoadBalancerStatus{},
-			},
-			want: &slim_networkingv1.IngressLoadBalancerStatus{
-				Ingress: []slim_networkingv1.IngressLoadBalancerIngress{},
-			},
-		},
-		{
-			name: "non-empty",
-			args: args{
-				lbs: &slim_corev1.LoadBalancerStatus{
-					Ingress: []slim_corev1.LoadBalancerIngress{
-						{
-							IP:    "1.1.1.1",
-							Ports: []slim_corev1.PortStatus{},
-						},
-					},
-				},
-			},
-			want: &slim_networkingv1.IngressLoadBalancerStatus{
-				Ingress: []slim_networkingv1.IngressLoadBalancerIngress{
-					{
-						IP:    "1.1.1.1",
-						Ports: []slim_networkingv1.IngressPortStatus{},
-					},
-				},
-			},
-		},
-	}
-	for _, tt := range tests {
-		got := ConvertToSlimIngressLoadBalancerStatus(tt.args.lbs)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
-	}
-}
-
-func (s *K8sSuite) Test_ConvertToCNP(c *C) {
-	type args struct {
-		obj interface{}
-	}
-	tests := []struct {
-		name string
-		args args
-		want interface{}
-	}{
-		{
-			name: "normal conversion",
+			name: "normal transformation",
 			args: args{
 				obj: &v2.CiliumNetworkPolicy{},
 			},
 			want: &types.SlimCNP{
 				CiliumNetworkPolicy: &v2.CiliumNetworkPolicy{},
 			},
+			expected: true,
 		},
 		{
-			name: "delete final state unknown conversion",
+			name: "transformation unneeded",
+			args: args{
+				obj: &types.SlimCNP{},
+			},
+			want:     &types.SlimCNP{},
+			expected: true,
+		},
+		{
+			name: "delete final state unknown transformation",
 			args: args{
 				obj: cache.DeletedFinalStateUnknown{
 					Key: "foo",
@@ -1193,51 +1069,80 @@ func (s *K8sSuite) Test_ConvertToCNP(c *C) {
 					CiliumNetworkPolicy: &v2.CiliumNetworkPolicy{},
 				},
 			},
+			expected: true,
 		},
 		{
-			name: "unknown object type in delete final state unknown conversion",
+			name: "delete final state unknown transformation with SlimCNP",
 			args: args{
 				obj: cache.DeletedFinalStateUnknown{
 					Key: "foo",
-					Obj: 100,
+					Obj: &types.SlimCNP{},
 				},
 			},
 			want: cache.DeletedFinalStateUnknown{
 				Key: "foo",
-				Obj: 100,
+				Obj: &types.SlimCNP{},
 			},
+			expected: true,
 		},
 		{
-			name: "unknown object type in conversion",
+			name: "unknown object type in delete final state unknown transformation",
 			args: args{
-				obj: 100,
+				obj: cache.DeletedFinalStateUnknown{
+					Key: "foo",
+					Obj: unknownObj,
+				},
 			},
-			want: 100,
+			want:     unknownObjErr,
+			expected: false,
+		},
+		{
+			name: "unknown object type in transformation",
+			args: args{
+				obj: unknownObj,
+			},
+			want:     unknownObjErr,
+			expected: false,
 		},
 	}
 	for _, tt := range tests {
-		got := ConvertToCNP(tt.args.obj)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		got, err := TransformToCNP(tt.args.obj)
+		if tt.expected {
+			require.NoError(t, err)
+			require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
+		} else {
+			require.Equal(t, tt.want, err, "Test Name: %s", tt.name)
+		}
 	}
 }
 
-func (s *K8sSuite) Test_ConvertToCCNP(c *C) {
+func Test_TransformToCCNP(t *testing.T) {
 	type args struct {
-		obj interface{}
+		obj any
 	}
 	tests := []struct {
-		name string
-		args args
-		want interface{}
+		name     string
+		args     args
+		want     any
+		expected bool
 	}{
 		{
-			name: "normal conversion",
+			name: "normal transformation",
 			args: args{
 				obj: &v2.CiliumClusterwideNetworkPolicy{},
 			},
 			want: &types.SlimCNP{
 				CiliumNetworkPolicy: &v2.CiliumNetworkPolicy{},
 			},
+			expected: true,
+		},
+		{
+			name: "transformation unneeded",
+			args: args{
+				obj: &types.SlimCNP{},
+			},
+			want:     &types.SlimCNP{},
+			expected: true,
 		},
 		{
 			name: "A CCNP where it doesn't contain neither a spec nor specs",
@@ -1247,9 +1152,10 @@ func (s *K8sSuite) Test_ConvertToCCNP(c *C) {
 			want: &types.SlimCNP{
 				CiliumNetworkPolicy: &v2.CiliumNetworkPolicy{},
 			},
+			expected: true,
 		},
 		{
-			name: "delete final state unknown conversion",
+			name: "delete final state unknown transformation",
 			args: args{
 				obj: cache.DeletedFinalStateUnknown{
 					Key: "foo",
@@ -1262,166 +1168,83 @@ func (s *K8sSuite) Test_ConvertToCCNP(c *C) {
 					CiliumNetworkPolicy: &v2.CiliumNetworkPolicy{},
 				},
 			},
+			expected: true,
 		},
 		{
-			name: "unknown object type in delete final state unknown conversion",
+			name: "delete final state unknown transformation with SlimCNP",
 			args: args{
 				obj: cache.DeletedFinalStateUnknown{
 					Key: "foo",
-					Obj: 100,
+					Obj: &types.SlimCNP{},
 				},
 			},
 			want: cache.DeletedFinalStateUnknown{
 				Key: "foo",
-				Obj: 100,
+				Obj: &types.SlimCNP{},
 			},
+			expected: true,
 		},
 		{
-			name: "unknown object type in conversion",
+			name: "unknown object type in delete final state unknown transformation",
 			args: args{
-				obj: 100,
+				obj: cache.DeletedFinalStateUnknown{
+					Key: "foo",
+					Obj: unknownObj,
+				},
 			},
-			want: 100,
+			want:     unknownObjErr,
+			expected: false,
+		},
+		{
+			name: "unknown object type in transformation",
+			args: args{
+				obj: unknownObj,
+			},
+			want:     unknownObjErr,
+			expected: false,
 		},
 	}
 	for _, tt := range tests {
-		got := ConvertToCCNP(tt.args.obj)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		got, err := TransformToCCNP(tt.args.obj)
+		if tt.expected {
+			require.NoError(t, err)
+			require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
+		} else {
+			require.Equal(t, tt.want, err, "Test Name: %s", tt.name)
+		}
 	}
 }
 
-func (s *K8sSuite) Test_ConvertToNode(c *C) {
+func Test_TransformToCiliumEndpoint(t *testing.T) {
 	type args struct {
-		obj interface{}
+		obj any
 	}
 	tests := []struct {
-		name string
-		args args
-		want interface{}
+		name     string
+		args     args
+		want     any
+		expected bool
 	}{
 		{
-			name: "normal conversion",
-			args: args{
-				obj: &core_v1.Node{},
-			},
-			want: &slim_corev1.Node{},
-		},
-		{
-			name: "delete final state unknown conversion",
-			args: args{
-				obj: cache.DeletedFinalStateUnknown{
-					Key: "foo",
-					Obj: &core_v1.Node{},
-				},
-			},
-			want: cache.DeletedFinalStateUnknown{
-				Key: "foo",
-				Obj: &slim_corev1.Node{},
-			},
-		},
-		{
-			name: "unknown object type in delete final state unknown conversion",
-			args: args{
-				obj: cache.DeletedFinalStateUnknown{
-					Key: "foo",
-					Obj: 100,
-				},
-			},
-			want: cache.DeletedFinalStateUnknown{
-				Key: "foo",
-				Obj: 100,
-			},
-		},
-		{
-			name: "unknown object type in conversion",
-			args: args{
-				obj: 100,
-			},
-			want: 100,
-		},
-	}
-	for _, tt := range tests {
-		got := ConvertToNode(tt.args.obj)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
-	}
-}
-
-func (s *K8sSuite) Test_ConvertToCiliumNode(c *C) {
-	type args struct {
-		obj interface{}
-	}
-	tests := []struct {
-		name string
-		args args
-		want interface{}
-	}{
-		{
-			name: "normal conversion",
-			args: args{
-				obj: &v2.CiliumNode{},
-			},
-			want: &v2.CiliumNode{},
-		},
-		{
-			name: "delete final state unknown conversion",
-			args: args{
-				obj: cache.DeletedFinalStateUnknown{
-					Key: "foo",
-					Obj: &v2.CiliumNode{},
-				},
-			},
-			want: cache.DeletedFinalStateUnknown{
-				Key: "foo",
-				Obj: &v2.CiliumNode{},
-			},
-		},
-		{
-			name: "unknown object type in delete final state unknown conversion",
-			args: args{
-				obj: cache.DeletedFinalStateUnknown{
-					Key: "foo",
-					Obj: 100,
-				},
-			},
-			want: cache.DeletedFinalStateUnknown{
-				Key: "foo",
-				Obj: 100,
-			},
-		},
-		{
-			name: "unknown object type in conversion",
-			args: args{
-				obj: 100,
-			},
-			want: 100,
-		},
-	}
-	for _, tt := range tests {
-		got := ConvertToCiliumNode(tt.args.obj)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
-	}
-}
-
-func (s *K8sSuite) Test_ConvertToCiliumEndpoint(c *C) {
-	type args struct {
-		obj interface{}
-	}
-	tests := []struct {
-		name string
-		args args
-		want interface{}
-	}{
-		{
-			name: "normal conversion",
+			name: "normal transformation",
 			args: args{
 				obj: &v2.CiliumEndpoint{},
 			},
 			want: &types.CiliumEndpoint{
 				Encryption: &v2.EncryptionSpec{},
 			},
+			expected: true,
 		},
 		{
-			name: "delete final state unknown conversion",
+			name: "transformation unneeded",
+			args: args{
+				obj: &types.CiliumEndpoint{},
+			},
+			want:     &types.CiliumEndpoint{},
+			expected: true,
+		},
+		{
+			name: "delete final state unknown transformation",
 			args: args{
 				obj: cache.DeletedFinalStateUnknown{
 					Key: "foo",
@@ -1554,67 +1377,85 @@ func (s *K8sSuite) Test_ConvertToCiliumEndpoint(c *C) {
 					},
 				},
 			},
+			expected: true,
 		},
 		{
-			name: "unknown object type in delete final state unknown conversion",
+			name: "unknown object type in delete final state unknown transformation",
 			args: args{
 				obj: cache.DeletedFinalStateUnknown{
 					Key: "foo",
-					Obj: 100,
+					Obj: unknownObj,
+				},
+			},
+			want:     unknownObjErr,
+			expected: false,
+		},
+		{
+			name: "delete final state unknown transformation with a types.CiliumEndpoint",
+			args: args{
+				obj: cache.DeletedFinalStateUnknown{
+					Key: "foo",
+					Obj: &types.CiliumEndpoint{},
 				},
 			},
 			want: cache.DeletedFinalStateUnknown{
 				Key: "foo",
-				Obj: 100,
+				Obj: &types.CiliumEndpoint{},
 			},
+			expected: true,
 		},
 		{
-			name: "unknown object type in conversion",
+			name: "unknown object type in transformation",
 			args: args{
-				obj: 100,
+				obj: unknownObj,
 			},
-			want: 100,
+			want:     unknownObjErr,
+			expected: false,
 		},
 	}
 	for _, tt := range tests {
-		got := ConvertToCiliumEndpoint(tt.args.obj)
-		c.Assert(got, checker.DeepEquals, tt.want, Commentf("Test Name: %s", tt.name))
+		got, err := TransformToCiliumEndpoint(tt.args.obj)
+		if tt.expected {
+			require.NoError(t, err)
+			require.Equalf(t, tt.want, got, "Test Name: %s", tt.name)
+		} else {
+			require.Equal(t, tt.want, err, "Test Name: %s", tt.name)
+		}
 	}
 }
 
-func (s *K8sSuite) Test_AnnotationsEqual(c *C) {
+func Test_AnnotationsEqual(t *testing.T) {
 	irrelevantAnnoKey := "foo"
 	irrelevantAnnoVal := "bar"
 
-	relevantAnnoKey := annotation.ProxyVisibility
-	relevantAnnoVal1 := "<Ingress/80/TCP/HTTP>"
-	relevantAnnoVal2 := "<Ingress/80/TCP/HTTP>,<Egress/80/TCP/HTTP>"
+	relevantAnnoKey := annotation.NoTrack
+	relevantAnnoVal1 := ""
+	relevantAnnoVal2 := "53"
 
 	// Empty returns true.
-	c.Assert(AnnotationsEqual(nil, map[string]string{}, map[string]string{}), Equals, true)
+	require.True(t, AnnotationsEqual(nil, map[string]string{}, map[string]string{}))
 
-	c.Assert(AnnotationsEqual(nil,
+	require.True(t, AnnotationsEqual(nil,
 		map[string]string{
 			irrelevantAnnoKey: irrelevantAnnoVal,
 			relevantAnnoKey:   relevantAnnoVal1,
 		}, map[string]string{
 			irrelevantAnnoKey: irrelevantAnnoVal,
 			relevantAnnoKey:   relevantAnnoVal2,
-		}), Equals, true)
+		}))
 
 	// If the relevant annotation isn't in either map, return true.
-	c.Assert(AnnotationsEqual([]string{relevantAnnoKey},
+	require.True(t, AnnotationsEqual([]string{relevantAnnoKey},
 		map[string]string{
 			irrelevantAnnoKey: irrelevantAnnoVal,
 		}, map[string]string{
 			irrelevantAnnoKey: irrelevantAnnoVal,
-		}), Equals, true)
+		}))
 
-	c.Assert(AnnotationsEqual([]string{relevantAnnoKey},
+	require.False(t, AnnotationsEqual([]string{relevantAnnoKey},
 		map[string]string{
 			relevantAnnoKey: relevantAnnoVal1,
 		}, map[string]string{
 			relevantAnnoKey: relevantAnnoVal2,
-		}), Equals, false)
-
+		}))
 }

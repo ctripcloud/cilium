@@ -4,14 +4,10 @@
 package lock
 
 import (
-	. "gopkg.in/check.v1"
+	"testing"
 )
 
-type SemaphoredMutexSuite struct{}
-
-var _ = Suite(&SemaphoredMutexSuite{})
-
-func (s *SemaphoredMutexSuite) TestLock(c *C) {
+func TestSemaphoredMutex(t *testing.T) {
 	lock1 := NewSemaphoredMutex()
 	lock1.Lock()
 	lock1.Unlock()

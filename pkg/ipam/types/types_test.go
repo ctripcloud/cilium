@@ -7,28 +7,35 @@ import (
 	"net"
 	"testing"
 
-	"gopkg.in/check.v1"
-
-	"github.com/cilium/cilium/pkg/checker"
+	"github.com/stretchr/testify/require"
 )
 
-func Test(t *testing.T) {
-	check.TestingT(t)
-}
-
-type TypesSuite struct{}
-
-var _ = check.Suite(&TypesSuite{})
-
-func (b *TypesSuite) TestTagsMatch(c *check.C) {
-	c.Assert(Tags{"1": "1", "2": "2"}.Match(Tags{"1": "1"}), check.Equals, true)
-	c.Assert(Tags{"1": "1", "2": "2"}.Match(Tags{"2": "2"}), check.Equals, true)
-	c.Assert(Tags{"1": "1", "2": "2"}.Match(Tags{"3": "3"}), check.Equals, false)
+func TestTagsMatch(t *testing.T) {
+	require.True(t, Tags{"1": "1", "2": "2"}.Match(Tags{"1": "1"}))
+	require.True(t, Tags{"1": "1", "2": "2"}.Match(Tags{"2": "2"}))
+	require.False(t, Tags{"1": "1", "2": "2"}.Match(Tags{"3": "3"}))
 }
 
 type mockInterface struct {
 	id    string
 	pools map[string][]net.IP
+}
+
+func (m *mockInterface) DeepCopyInterface() Interface {
+	mc := &mockInterface{
+		id:    m.id,
+		pools: map[string][]net.IP{},
+	}
+	for id, pool := range m.pools {
+		pc := make([]net.IP, 0, len(pool))
+		for _, ip := range pool {
+			ipc := net.IP{}
+			copy(ipc, ip)
+			pc = append(pc, ipc)
+		}
+		mc.pools[id] = pc
+	}
+	return mc
 }
 
 func (m *mockInterface) InterfaceID() string {
@@ -47,7 +54,7 @@ func (m *mockInterface) ForeachAddress(instanceID string, fn AddressIterator) er
 	return nil
 }
 
-func (e *TypesSuite) TestForeachAddresses(c *check.C) {
+func TestForeachAddresses(t *testing.T) {
 	m := NewInstanceMap()
 	m.Update("i-1", InterfaceRevision{
 		Resource: &mockInterface{
@@ -70,11 +77,11 @@ func (e *TypesSuite) TestForeachAddresses(c *check.C) {
 	addresses := 0
 	m.ForeachAddress("", func(instanceID, interfaceID, ip, poolID string, address Address) error {
 		_, ok := address.(net.IP)
-		c.Assert(ok, check.Equals, true)
+		require.True(t, ok)
 		addresses++
 		return nil
 	})
-	c.Assert(addresses, check.Equals, 4)
+	require.Equal(t, 4, addresses)
 
 	// Iterate over "i-1"
 	addresses = 0
@@ -82,7 +89,7 @@ func (e *TypesSuite) TestForeachAddresses(c *check.C) {
 		addresses++
 		return nil
 	})
-	c.Assert(addresses, check.Equals, 2)
+	require.Equal(t, 2, addresses)
 
 	// Iterate over all interfaces
 	interfaces := 0
@@ -90,10 +97,10 @@ func (e *TypesSuite) TestForeachAddresses(c *check.C) {
 		interfaces++
 		return nil
 	})
-	c.Assert(interfaces, check.Equals, 2)
+	require.Equal(t, 2, interfaces)
 }
 
-func (e *TypesSuite) TestGetInterface(c *check.C) {
+func TestGetInterface(t *testing.T) {
 	m := NewInstanceMap()
 	rev := InterfaceRevision{
 		Resource: &mockInterface{
@@ -106,18 +113,18 @@ func (e *TypesSuite) TestGetInterface(c *check.C) {
 	m.Update("i-1", rev)
 
 	_, ok := m.GetInterface("inexistent", "inexistent")
-	c.Assert(ok, check.Equals, false)
+	require.False(t, ok)
 	_, ok = m.GetInterface("i-1", "inexistent")
-	c.Assert(ok, check.Equals, false)
+	require.False(t, ok)
 	_, ok = m.GetInterface("inexistent", "intf0")
-	c.Assert(ok, check.Equals, false)
+	require.False(t, ok)
 	intf, ok := m.GetInterface("i-1", "intf0")
-	c.Assert(ok, check.Equals, true)
+	require.True(t, ok)
 
-	c.Assert(intf, checker.DeepEquals, rev)
+	require.Equal(t, rev, intf)
 }
 
-func (e *TypesSuite) TestInstanceMapNumInstances(c *check.C) {
+func TestInstanceMapNumInstances(t *testing.T) {
 	m := NewInstanceMap()
 	m.Update("i-1", InterfaceRevision{
 		Resource: &mockInterface{
@@ -144,10 +151,10 @@ func (e *TypesSuite) TestInstanceMapNumInstances(c *check.C) {
 		},
 	})
 
-	c.Assert(m.NumInstances(), check.Equals, 2)
+	require.Equal(t, 2, m.NumInstances())
 }
 
-func (e *TypesSuite) TestFirstSubnetWithAvailableAddresses(c *check.C) {
+func TestFirstSubnetWithAvailableAddresses(t *testing.T) {
 	sm := SubnetMap{
 		"s0": &Subnet{AvailableAddresses: 0},
 		"s1": &Subnet{AvailableAddresses: 1},
@@ -155,8 +162,8 @@ func (e *TypesSuite) TestFirstSubnetWithAvailableAddresses(c *check.C) {
 	}
 
 	subnetID, addresses := sm.FirstSubnetWithAvailableAddresses([]PoolID{})
-	c.Assert(subnetID, check.Equals, PoolID("s1"))
-	c.Assert(addresses, check.Equals, 1)
+	require.Equal(t, PoolID("s1"), subnetID)
+	require.Equal(t, 1, addresses)
 
 	sm = SubnetMap{
 		"s0": &Subnet{AvailableAddresses: 0},
@@ -164,8 +171,8 @@ func (e *TypesSuite) TestFirstSubnetWithAvailableAddresses(c *check.C) {
 		"s2": &Subnet{AvailableAddresses: 0},
 	}
 	subnetID, addresses = sm.FirstSubnetWithAvailableAddresses([]PoolID{})
-	c.Assert(subnetID, check.Equals, PoolNotExists)
-	c.Assert(addresses, check.Equals, 0)
+	require.Equal(t, PoolNotExists, subnetID)
+	require.Equal(t, 0, addresses)
 
 	sm = SubnetMap{
 		"s0": &Subnet{AvailableAddresses: 0},
@@ -173,6 +180,6 @@ func (e *TypesSuite) TestFirstSubnetWithAvailableAddresses(c *check.C) {
 		"s2": &Subnet{AvailableAddresses: 20},
 	}
 	subnetID, addresses = sm.FirstSubnetWithAvailableAddresses([]PoolID{"s0", "s1"})
-	c.Assert(subnetID, check.Equals, PoolID("s1"))
-	c.Assert(addresses, check.Equals, 10)
+	require.Equal(t, PoolID("s1"), subnetID)
+	require.Equal(t, 10, addresses)
 }

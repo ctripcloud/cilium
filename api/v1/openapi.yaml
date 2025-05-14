@@ -47,6 +47,13 @@ paths:
         in: header
         required: false
         type: boolean
+      - name: require-k8s-connectivity
+        description: |
+          If set to true, failure of the agent to connect to the Kubernetes control plane will cause the agent's health status to also fail.
+        in: header
+        required: false
+        type: boolean
+        default: true
       responses:
         '200':
           description: Success
@@ -85,6 +92,8 @@ paths:
           description: Bad configuration parameters
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '500':
           description: Recompilation failed
           x-go-name: Failure
@@ -125,11 +134,15 @@ paths:
       responses:
         '201':
           description: Created
+          schema:
+            "$ref": "#/definitions/Endpoint"
         '400':
           description: Invalid endpoint in request
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '409':
           description: Endpoint already exists
           x-go-name: Exists
@@ -158,6 +171,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint does not exist
         '500':
@@ -198,6 +213,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint not found
         '429':
@@ -220,6 +237,29 @@ paths:
               "$ref": "#/definitions/Endpoint"
         '404':
           description: Endpoints with provided parameters not found
+        '429':
+          description: Rate-limiting too many requests in the given time frame
+    delete:
+      summary: Deletes a list of endpoints
+      description: |
+        Deletes a list of endpoints that have endpoints matching the provided properties
+      tags:
+        - endpoint
+      parameters:
+        - "$ref": "#/parameters/endpoint-batch-delete-request"
+      responses:
+        '200':
+          description: Success
+        '206':
+          description: Deleted with a number of errors encountered
+          x-go-name: Errors
+          schema:
+            type: integer
+        '400':
+          description: Invalid endpoint delete request
+          x-go-name: Invalid
+        '404':
+          description: No endpoints with provided parameters found
         '429':
           description: Rate-limiting too many requests in the given time frame
   "/endpoint/{id}/config":
@@ -260,6 +300,8 @@ paths:
         '400':
           description: Invalid configuration request
           x-go-name: Invalid
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint not found
         '500':
@@ -302,6 +344,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '404':
           description: Endpoint not found
         '500':
@@ -433,6 +477,8 @@ paths:
           description: Success
           schema:
             "$ref": "#/definitions/IPAMResponse"
+        '403':
+          description: Forbidden
         '502':
           description: Allocation failure
           x-go-name: Failure
@@ -453,6 +499,8 @@ paths:
         '400':
           description: Invalid IP address
           x-go-name: Invalid
+        '403':
+          description: Forbidden
         '409':
           description: IP already allocated
           x-go-name: Exists
@@ -469,7 +517,7 @@ paths:
       tags:
       - ipam
       parameters:
-      - "$ref": "#/parameters/ipam-release-arg"
+      - "$ref": "#/parameters/ipam-ip"
       - "$ref": "#/parameters/ipam-pool"
       responses:
         '200':
@@ -477,6 +525,8 @@ paths:
         '400':
           description: Invalid IP address
           x-go-name: Invalid
+        '403':
+          description: Forbidden
         '404':
           description: IP address not found
         '500':
@@ -512,6 +562,8 @@ paths:
       - policy
       parameters:
       - "$ref": "#/parameters/policy-rules"
+      - "$ref": "#/parameters/policy-replace"
+      - "$ref": "#/parameters/policy-replace-with-labels"
       responses:
         '200':
           description: Success
@@ -522,6 +574,8 @@ paths:
           x-go-name: InvalidPolicy
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '460':
           description: Invalid path
           x-go-name: InvalidPath
@@ -552,6 +606,8 @@ paths:
           x-go-name: Invalid
           schema:
             "$ref": "#/definitions/Error"
+        '403':
+          description: Forbidden
         '404':
           description: Policy not found
         '500':
@@ -607,54 +663,7 @@ paths:
             "$ref": "#/definitions/Service"
         '404':
           description: Service not found
-    put:
-      summary: Create or update service
-      tags:
-      - service
-      parameters:
-      - "$ref": "#/parameters/service-id"
-      - "$ref": "#/parameters/service-config"
-      responses:
-        '200':
-          description: Updated
-        '201':
-          description: Created
-        '460':
-          description: Invalid frontend in service configuration
-          x-go-name: InvalidFrontend
-          schema:
-            "$ref": "#/definitions/Error"
-        '461':
-          description: Invalid backend in service configuration
-          x-go-name: InvalidBackend
-          schema:
-            "$ref": "#/definitions/Error"
-        '500':
-          description: Error while creating service
-          x-go-name: Failure
-          schema:
-            "$ref": "#/definitions/Error"
-        '501':
-          description: Error while updating backend states
-          x-go-name: UpdateBackendFailure
-          schema:
-            "$ref": "#/definitions/Error"
-    delete:
-      summary: Delete a service
-      tags:
-      - service
-      parameters:
-      - "$ref": "#/parameters/service-id"
-      responses:
-        '200':
-          description: Success
-        '404':
-          description: Service not found
-        '500':
-          description: Service deletion failed
-          x-go-name: Failure
-          schema:
-            "$ref": "#/definitions/Error"
+
   "/recorder":
     get:
       summary: Retrieve list of all recorders
@@ -705,6 +714,8 @@ paths:
           description: Updated
         '201':
           description: Created
+        '403':
+          description: Forbidden
         '500':
           description: Error while creating recorder
           x-go-name: Failure
@@ -719,6 +730,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '404':
           description: Recorder not found
         '500':
@@ -752,6 +765,8 @@ paths:
           description: Updated
           schema:
             "$ref": "#/definitions/Prefilter"
+        '403':
+          description: Forbidden
         '461':
           description: Invalid CIDR prefix
           x-go-name: InvalidCIDR
@@ -773,6 +788,8 @@ paths:
           description: Deleted
           schema:
             "$ref": "#/definitions/Prefilter"
+        '403':
+          description: Forbidden
         '461':
           description: Invalid CIDR prefix
           x-go-name: InvalidCIDR
@@ -785,7 +802,7 @@ paths:
             "$ref": "#/definitions/Error"
   "/debuginfo":
     get:
-      summary: Retrieve information about the agent and evironment for debugging
+      summary: Retrieve information about the agent and environment for debugging
       tags:
       - daemon
       responses:
@@ -853,21 +870,6 @@ paths:
             format: binary
         '404':
           description: Map not found
-  "/metrics/":
-    get:
-      summary: Retrieve cilium metrics
-      tags:
-      - metrics
-      parameters: []
-      responses:
-        '200':
-          description: Success
-          schema:
-            type: array
-            items:
-              "$ref": "#/definitions/Metric"
-        '500':
-          description: Metrics cannot be retrieved
 
   "/fqdn/cache":
     get:
@@ -907,6 +909,8 @@ paths:
       responses:
         '200':
           description: Success
+        '403':
+          description: Forbidden
         '400':
           description: Invalid request (error parsing parameters)
           schema:
@@ -966,6 +970,7 @@ paths:
       - policy
       parameters:
       - "$ref": "#/parameters/cidr"
+      - "$ref": "#/parameters/labels"
       responses:
         '200':
           description: Success
@@ -998,7 +1003,7 @@ paths:
     get:
       summary: Lists operational state of BGP peers
       description: |
-        Retrieves current operational state of BGP peers created by 
+        Retrieves current operational state of BGP peers created by
         Cilium BGP virtual router. This includes session state, uptime,
         information per address family, etc.
       tags:
@@ -1010,6 +1015,67 @@ paths:
             type: array
             items:
               "$ref": "#/definitions/BgpPeer"
+        '500':
+          description: Internal Server Error
+          schema:
+            "$ref": "#/definitions/Error"
+        '501':
+          description: BGP Control Plane disabled
+          x-go-name: Disabled
+          schema:
+            "$ref": "#/definitions/Error"
+  "/bgp/routes":
+    get:
+      summary: Lists BGP routes from BGP Control Plane RIB.
+      description: Retrieves routes from BGP Control Plane RIB filtered by parameters you specify
+      tags:
+        - bgp
+      parameters:
+        - "$ref": "#/parameters/bgp-table-type"
+        - "$ref": "#/parameters/bgp-afi"
+        - "$ref": "#/parameters/bgp-safi"
+        - "$ref": "#/parameters/bgp-router-asn"
+        - "$ref": "#/parameters/bgp-neighbor-address"
+      responses:
+        '200':
+          description: Success
+          schema:
+            type: array
+            items:
+              "$ref": "#/definitions/BgpRoute"
+        '500':
+          description: Internal Server Error
+          schema:
+            "$ref": "#/definitions/Error"
+        '501':
+          description: BGP Control Plane disabled
+          x-go-name: Disabled
+          schema:
+            "$ref": "#/definitions/Error"
+  "/bgp/route-policies":
+    get:
+      summary: Lists BGP route policies configured in BGP Control Plane.
+      description: Retrieves route policies from BGP Control Plane.
+      tags:
+        - bgp
+      parameters:
+        - "$ref": "#/parameters/bgp-router-asn"
+      responses:
+        '200':
+          description: Success
+          schema:
+            type: array
+            items:
+              "$ref": "#/definitions/BgpRoutePolicy"
+        '500':
+          description: Internal Server Error
+          schema:
+            "$ref": "#/definitions/Error"
+        '501':
+          description: BGP Control Plane disabled
+          x-go-name: Disabled
+          schema:
+            "$ref": "#/definitions/Error"
 parameters:
   endpoint-id:
     name: id
@@ -1022,9 +1088,11 @@ parameters:
       Supported endpoint id prefixes:
         - cilium-local: Local Cilium endpoint UUID, e.g. cilium-local:3389595
         - cilium-global: Global Cilium endpoint UUID, e.g. cilium-global:cluster1:nodeX:452343
-        - container-id: Container runtime ID, e.g. container-id:22222
-        - container-name: Container name, e.g. container-name:foobar
-        - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar
+        - cni-attachment-id: CNI attachment ID, e.g. cni-attachment-id:22222:eth0
+        - container-id: Container runtime ID, e.g. container-id:22222 (deprecated, may not be unique)
+        - container-name: Container name, e.g. container-name:foobar (deprecated, may not be unique)
+        - pod-name: pod name for this container if K8s is enabled, e.g. pod-name:default:foobar (deprecated, may not be unique)
+        - cep-name: cep name for this container if K8s is enabled, e.g. pod-name:default:foobar-net1
         - docker-endpoint: Docker libnetwork endpoint ID, e.g. docker-endpoint:4444
     in: path
     required: true
@@ -1035,6 +1103,12 @@ parameters:
     required: true
     schema:
       "$ref": "#/definitions/EndpointChangeRequest"
+  endpoint-batch-delete-request:
+    name: endpoint
+    in: body
+    required: true
+    schema:
+      "$ref": "#/definitions/EndpointBatchDeleteRequest"
   identity-id:
     name: id
     description: |
@@ -1056,6 +1130,20 @@ parameters:
     required: true
     in: body
     schema:
+      type: string
+  policy-replace:
+    name: replace
+    description: If true, indicates that existing rules with identical labels should be replaced.
+    required: false
+    in: query
+    type: boolean
+  policy-replace-with-labels:
+    name: replace-with-labels
+    description: If present, indicates that existing rules with the given labels should be deleted.
+    required: false
+    in: query
+    type: array
+    items:
       type: string
   pod-name:
     name: pod
@@ -1115,12 +1203,6 @@ parameters:
     in: path
     required: true
     type: string
-  ipam-release-arg:
-    name: ip
-    description: IP address or owner name
-    in: path
-    required: true
-    type: string
   ipam-family:
     name: family
     in: query
@@ -1170,6 +1252,44 @@ parameters:
     required: false
     in: query
     type: string
+  bgp-table-type:
+    name: table_type
+    description: BGP Routing Information Base (RIB) table type
+    required: true
+    in: query
+    type: string
+    enum:
+    - loc-rib
+    - adj-rib-in
+    - adj-rib-out
+  bgp-afi:
+    name: afi
+    description: Address Family Indicator (AFI) of a BGP route
+    required: true
+    in: query
+    type: string
+  bgp-safi:
+    name: safi
+    description: Subsequent Address Family Indicator (SAFI) of a BGP route
+    required: true
+    in: query
+    type: string
+  bgp-router-asn:
+    name: router_asn
+    description: |
+      Autonomous System Number (ASN) identifying a BGP virtual router instance.
+      If not specified, all virtual router instances are selected.
+    required: false
+    in: query
+    type: integer
+  bgp-neighbor-address:
+    name: neighbor
+    description: |
+      IP address specifying a BGP neighbor.
+      Has to be specified only when table type is adj-rib-in or adj-rib-out.
+    required: false
+    in: query
+    type: string
 
 definitions:
   Endpoint:
@@ -1211,11 +1331,19 @@ definitions:
         description: Docker network ID
         type: string
       interface-name:
-        description: Name of network device
+        description: Name of network device in host netns
         type: string
       interface-index:
-        description: Index of network device
+        description: Index of network device in host netns
         type: integer
+      parent-interface-index:
+        description: >-
+          Index of network device from which an IP was used as endpoint IP.
+          Only relevant for ENI environments.
+        type: integer
+      container-interface-name:
+        description: Name of network device in container netns
+        type: string
       state:
         description: Current state of endpoint
         "$ref": "#/definitions/EndpointState"
@@ -1233,6 +1361,9 @@ definitions:
       k8s-namespace:
         description: Kubernetes namespace name
         type: string
+      k8s-uid:
+        description: Kubernetes pod UID
+        type: string
       datapath-map-id:
         description: ID of datapath tail call map
         type: integer
@@ -1246,8 +1377,31 @@ definitions:
         description: |
           Whether to build an endpoint synchronously
         type: boolean
+      disable-legacy-identifiers:
+        description: >-
+          Disables lookup using legacy endpoint identifiers (container name,
+          container id, pod name) for this endpoint
+        type: boolean
+      netns-cookie:
+        description: Network namespace cookie
+        type: string
       datapath-configuration:
         "$ref": "#/definitions/EndpointDatapathConfiguration"
+      properties:
+        description: >-
+          Properties is used to store information about the endpoint at
+          creation.
+          Useful for tests.
+        additionalProperties:
+          type: object
+  EndpointBatchDeleteRequest:
+    description: |
+      Properties selecting a batch of endpoints to delete.
+    type: object
+    properties:
+      container-id:
+        description: ID assigned by container runtime
+        type: string
   EndpointDatapathConfiguration:
     description: Datapath configuration to be used for the endpoint
     type: object
@@ -1424,8 +1578,6 @@ definitions:
   EndpointPolicy:
     description: |-
       Policy information of an endpoint
-
-      +k8s:deepcopy-gen=true
     type: object
     properties:
       policy-revision:
@@ -1471,8 +1623,6 @@ definitions:
   PolicyRule:
     description: |-
       A policy rule including the rule labels it derives from
-
-      +k8s:deepcopy-gen=true
     properties:
       rule:
         description: The policy rule as json
@@ -1496,8 +1646,6 @@ definitions:
   L4Policy:
     description: |-
       L4 endpoint policy
-
-      +k8s:deepcopy-gen=true
     type: object
     properties:
       ingress:
@@ -1513,8 +1661,6 @@ definitions:
   CIDRPolicy:
     description: |-
       CIDR endpoint policy
-
-      +k8s:deepcopy-gen=true
     type: object
     properties:
       ingress:
@@ -1599,7 +1745,7 @@ definitions:
         type: object
         properties:
           wireguard:
-            description: Status of the Wireguard agent
+            description: Status of the WireGuard agent
             "$ref": "#/definitions/WireguardStatus"
   CgroupDumpMetadata:
     description: cgroup full metadata
@@ -1686,11 +1832,17 @@ definitions:
       ipv4-expiration-uuid:
         description: UUID of IPv4 expiration timer
         type: string
+      ipv4-pool-name:
+        description: IPAM pool from which this IPv4 address was allocated
+        type: string
       ipv6:
         description: IPv6 address
         type: string
       ipv6-expiration-uuid:
         description: UUID of IPv6 expiration timer
+        type: string
+      ipv6-pool-name:
+        description: IPAM pool from which this IPv6 address was allocated
         type: string
   Address:
     description: IP address
@@ -1746,11 +1898,14 @@ definitions:
         description: MAC address
         type: string
       interface-name:
-        description: Name of network device
+        description: Name of network device in host netns
         type: string
       interface-index:
-        description: Index of network device
+        description: Index of network device in host netns
         type: integer
+      container-interface-name:
+        description: Name of network device in container netns
+        type: string
   EndpointIdentifiers:
     description: |-
       Unique identifiers for this endpoint from outside cilium
@@ -1758,11 +1913,14 @@ definitions:
       +deepequal-gen=true
     type: object
     properties:
+      cni-attachment-id:
+        description: ID assigned to this attachment by container runtime
+        type: string
       container-id:
-        description: ID assigned by container runtime
+        description: ID assigned by container runtime (deprecated, may not be unique)
         type: string
       container-name:
-        description: Name assigned to container
+        description: Name assigned to container (deprecated, may not be unique)
         type: string
       docker-endpoint-id:
         description: Docker endpoint ID
@@ -1771,13 +1929,13 @@ definitions:
         description: Docker network ID
         type: string
       pod-name:
-        description: K8s pod for this endpoint(Deprecated, use K8sPodName and K8sNamespace instead)
+        description: K8s pod for this endpoint (deprecated, may not be unique)
         type: string
       k8s-pod-name:
-        description: K8s pod name for this endpoint
+        description: K8s pod name for this endpoint (deprecated, may not be unique)
         type: string
       k8s-namespace:
-        description: K8s namespace for this endpoint
+        description: K8s namespace for this endpoint (deprecated, may not be unique)
         type: string
   Labels:
     description: Set of labels
@@ -1845,6 +2003,12 @@ definitions:
       kubernetes:
         description: Status of Kubernetes integration
         "$ref": "#/definitions/K8sStatus"
+      datapath-mode:
+        description: Status of datapath mode
+        "$ref": "#/definitions/DatapathMode"
+      attach-mode:
+        description: Status of core datapath attachment mode
+        "$ref": "#/definitions/AttachMode"
       kube-proxy-replacement:
         description: Status of kube-proxy replacement
         "$ref": "#/definitions/KubeProxyReplacement"
@@ -1869,18 +2033,24 @@ definitions:
       ipv6-big-tcp:
         description: Status of IPv6 BIG TCP
         "$ref": "#/definitions/IPV6BigTCP"
+      ipv4-big-tcp:
+        description: Status of IPv4 BIG TCP
+        "$ref": "#/definitions/IPV4BigTCP"
       bandwidth-manager:
         description: Status of bandwidth manager
         "$ref": "#/definitions/BandwidthManager"
       masquerading:
         description: Status of masquerading
         "$ref": "#/definitions/Masquerading"
-      host-routing:
-        description: Status of host routing
-        "$ref": "#/definitions/HostRouting"
+      routing:
+        description: Status of routing
+        "$ref": "#/definitions/Routing"
       clock-source:
         description: Status of clock source
         "$ref": "#/definitions/ClockSource"
+      srv6:
+        description: Status of SRv6
+        "$ref": "#/definitions/Srv6"
       stale:
         description: List of stale information in the status
         type: object
@@ -1906,6 +2076,9 @@ definitions:
       cni-chaining:
         description: Status of CNI chaining
         "$ref": "#/definitions/CNIChainingStatus"
+      auth-certificate-provider:
+        description: Status of Mutual Authentication certificate provider
+        "$ref": "#/definitions/Status"
   Status:
     description: Status of an individual component
     type: object
@@ -2019,10 +2192,8 @@ definitions:
       mode:
         type: string
         enum:
-        - Disabled
-        - Strict
-        - Probe
-        - Partial
+        - 'True'
+        - 'False'
       devices:
         type: array
         items:
@@ -2060,10 +2231,6 @@ definitions:
         type: object
         properties:
           nodePort:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
@@ -2074,6 +2241,12 @@ definitions:
                 - SNAT
                 - DSR
                 - Hybrid
+              dsrMode:
+                type: string
+                enum:
+                  - IP Option/Extension
+                  - IPIP
+                  - Geneve
               algorithm:
                 type: string
                 enum:
@@ -2085,6 +2258,7 @@ definitions:
                 - None
                 - Native
                 - Generic
+                - Best-Effort
               portMin:
                 type: integer
               portMax:
@@ -2092,19 +2266,11 @@ definitions:
               lutSize:
                 type: integer
           hostPort:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
                 type: boolean
           externalIPs:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
@@ -2123,28 +2289,17 @@ definitions:
                 items:
                   type: string
           socketLB:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
                 type: boolean
           sessionAffinity:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
                 type: boolean
           gracefulTermination:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
+            description: Deprecated
             type: object
             properties:
               enabled:
@@ -2159,10 +2314,6 @@ definitions:
               enabled:
                 type: boolean
               service:
-                description: |-
-
-
-                  +k8s:deepcopy-gen=true
                 type: object
                 properties:
                   enabled:
@@ -2181,10 +2332,6 @@ definitions:
                     items:
                       type: string
           socketLBTracing:
-            description: |-
-
-
-              +k8s:deepcopy-gen=true
             type: object
             properties:
               enabled:
@@ -2192,6 +2339,10 @@ definitions:
           bpfSocketLBHostnsOnly:
             description: flag bpf-lb-sock-hostns-only
             type: boolean
+          annotations:
+            type: array
+            items:
+              type: string
   AllocationMap:
     description: |
       Map of allocated IPs
@@ -2276,16 +2427,31 @@ definitions:
         description: Name of the cluster
         type: string
       ready:
-        description: Indicates readiness of the remote cluser
+        description: Indicates readiness of the remote cluster
         type: boolean
+      connected:
+        description: Indicates whether the connection to the remote kvstore is established
+        type: boolean
+      synced:
+        description: Synchronization status about each resource type
+        "$ref": "#/definitions/RemoteClusterSynced"
+      config:
+        description: Cluster configuration exposed by the remote cluster
+        "$ref": "#/definitions/RemoteClusterConfig"
       num-nodes:
         description: Number of nodes in the cluster
         type: integer
       num-shared-services:
         description: Number of services in the cluster
         type: integer
+      num-service-exports:
+        description: Number of MCS-API service exports in the cluster
+        type: integer
       num-identities:
         description: Number of identities in the cluster
+        type: integer
+      num-endpoints:
+        description: Number of endpoints in the cluster
         type: integer
       status:
         description: Status of the control plane
@@ -2297,6 +2463,56 @@ definitions:
         description: Time of last failure that occurred while attempting to reach the cluster
         type: string
         format: date-time
+  RemoteClusterSynced:
+    description: |-
+      Status of the synchronization with the remote cluster, about each resource
+      type. A given resource is considered to be synchronized if the initial
+      list of entries has been completely received from the remote cluster, and
+      new events are currently being watched.
+
+      +k8s:deepcopy-gen=true
+    properties:
+      nodes:
+        description: Nodes synchronization status
+        type: boolean
+      services:
+        description: Services synchronization status
+        type: boolean
+      service-exports:
+        description: MCS-API service exports synchronization status (null means that the component is not watching service exports)
+        type: boolean
+        x-nullable: true
+      endpoints:
+        description: Endpoints synchronization status
+        type: boolean
+      identities:
+        description: Identities synchronization status
+        type: boolean
+  RemoteClusterConfig:
+    description: |-
+      Cluster configuration exposed by the remote cluster
+
+      +k8s:deepcopy-gen=true
+    properties:
+      required:
+        description: Whether the configuration is required to be present
+        type: boolean
+      retrieved:
+        description: Whether the configuration has been correctly retrieved
+        type: boolean
+      cluster-id:
+        description: The Cluster ID advertised by the remote cluster
+        type: integer
+      kvstoremesh:
+        description: Whether the remote cluster information is locally cached by kvstoremesh
+        type: boolean
+      sync-canaries:
+        description: Whether the remote cluster supports per-prefix "synced" canaries
+        type: boolean
+      service-exports-enabled:
+        description: Whether or not MCS-API ServiceExports is enabled by the cluster (null means unsupported).
+        type: boolean
+        x-nullable: true
   MonitorStatus:
     description: Status of the node monitor
     properties:
@@ -2384,6 +2600,9 @@ definitions:
       routeMTU:
         description: MTU for network facing routes
         type: integer
+      enableRouteMTUForCNIChaining:
+        description: Enable route MTU for pod netns when CNI chaining is used
+        type: boolean
       datapathMode:
         "$ref": "#/definitions/DatapathMode"
       ipam-mode:
@@ -2404,21 +2623,46 @@ definitions:
       egress-multi-home-ip-rule-compat:
         description: Configured compatibility mode for --egress-multi-home-ip-rule-compat
         type: boolean
+      installUplinkRoutesForDelegatedIPAM:
+        description: |
+          Install ingress/egress routes through uplink on host for Pods when working with
+          delegated IPAM plugin.
+        type: boolean
       daemonConfigurationMap:
         description: Config map which contains all the active daemon configurations
         additionalProperties:
           type: object
       GSOMaxSize:
-        description: Maximum GSO size on workload facing devices
+        description: Maximum IPv6 GSO size on workload facing devices
         type: integer
       GROMaxSize:
-        description: Maximum GRO size on workload facing devices
+        description: Maximum IPv6 GRO size on workload facing devices
         type: integer
+      GSOIPv4MaxSize:
+        description: Maximum IPv4 GSO size on workload facing devices
+        type: integer
+      GROIPv4MaxSize:
+        description: Maximum IPv4 GRO size on workload facing devices
+        type: integer
+      ipLocalReservedPorts:
+        description: Comma-separated list of IP ports should be reserved in the workload network namespace
+        type: string
+      enableBBRHostNamespaceOnly:
+        description: True if BBR is enabled only in the host network namespace
+        type: boolean
   DatapathMode:
     description: Datapath mode
     type: string
     enum:
       - veth
+      - netkit
+      - netkit-l2
+  AttachMode:
+    description: Core datapath attachment mode
+    type: string
+    enum:
+      - tc
+      - tcx
   EndpointConfigurationSpec:
     description: An endpoint's configuration
     type: object
@@ -2473,6 +2717,9 @@ definitions:
       ingress-address:
         description: Source address for Ingress listener
         "$ref": "#/definitions/NodeAddressing"
+      source:
+        description: Source of the node configuration
+        type: string
   NodeAddressing:
     description: |-
       Addressing information of a node for all address families
@@ -2556,6 +2803,9 @@ definitions:
       selector:
         description: string form of selector
         type: string
+      labels:
+        description: Labels are the metadata labels associated with the selector
+        "$ref": "#/definitions/LabelArray"
       identities:
         description: identities mapping to this selector
         type: array
@@ -2564,6 +2814,18 @@ definitions:
       users:
         description: number of users of this selector in the cache
         type: integer
+  Srv6:
+    description: |-
+      Status of the SRv6
+    type: object
+    properties:
+      enabled:
+        type: boolean
+      srv6EncapMode:
+        type: string
+        enum:
+          - SRH
+          - Reduced
   TraceSelector:
     description: Context describing a pair of source and destination identity
     type: object
@@ -2630,6 +2892,9 @@ definitions:
       ip:
         description: Layer 3 address
         type: string
+      protocol:
+        description: Layer 4 protocol (TCP, UDP, etc)
+        type: string
       port:
         description: Layer 4 port number
         type: integer
@@ -2655,6 +2920,9 @@ definitions:
         type: integer
         format: uint16
         x-nullable: true
+      zone:
+        description: Optional name of the zone in which this backend runs
+        type: string
   LRPBackend:
     description: Pod backend of an LRP
     type: object
@@ -2791,6 +3059,24 @@ definitions:
     properties:
       realized:
         "$ref": "#/definitions/ServiceSpec"
+
+  StateDBQuery:
+    description: StateDB query
+    type: object
+    properties:
+      table:
+        description: Name of the table to query
+        type: string
+      index:
+        description: Index to query against
+        type: string
+      lowerbound:
+        description: LowerBound prefix search or full-matching Get
+        type: boolean
+      key:
+        description: Key to query with. Base64 encoded.
+        type: string
+
   Recorder:
     description: Collection of wildcard filters for pcap recorder
     type: object
@@ -2908,11 +3194,15 @@ definitions:
         type: array
         items:
           "$ref": "#/definitions/ProxyRedirect"
+      envoy-deployment-mode:
+        description: Deployment mode of Envoy L7 proxy
+        type: string
+        enum:
+          - embedded
+          - external
   IdentityRange:
     description: |-
       Status of identity range of the cluster
-
-      +k8s:deepcopy-gen=true
     properties:
       min-identity:
         description: Minimum identity of the cluster
@@ -2988,13 +3278,31 @@ definitions:
   IPV6BigTCP:
     description: |-
       Status of IPv6 BIG TCP
-
-      +k8s:deepcopy-gen=true
     type: object
     properties:
       enabled:
         description: Is IPv6 BIG TCP enabled
         type: boolean
+      maxGRO:
+        description: Maximum IPv6 GRO size
+        type: integer
+      maxGSO:
+        description: Maximum IPv6 GSO size
+        type: integer
+  IPV4BigTCP:
+    description: |-
+      Status of IPv4 BIG TCP
+    type: object
+    properties:
+      enabled:
+        description: Is IPv4 BIG TCP enabled
+        type: boolean
+      maxGRO:
+        description: Maximum IPv4 GRO size
+        type: integer
+      maxGSO:
+        description: Maximum IPv4 GSO size
+        type: integer
   BandwidthManager:
     description: |-
       Status of bandwidth manager
@@ -3059,8 +3367,6 @@ definitions:
   ClockSource:
     description: |-
       Status of BPF clock source
-
-      +k8s:deepcopy-gen=true
     type: object
     properties:
       mode:
@@ -3072,19 +3378,26 @@ definitions:
       hertz:
         description: Kernel Hz
         type: integer
-  HostRouting:
+  Routing:
     description: |-
-      Status of host routing
-
-      +k8s:deepcopy-gen=true
+      Status of routing
     type: object
     properties:
-      mode:
-        description: Datapath routing mode
+      inter-host-routing-mode:
+        description: Datapath routing mode for cross-cluster connectivity
+        type: string
+        enum:
+        - Native
+        - Tunnel
+      intra-host-routing-mode:
+        description: Datapath routing mode for connectivity within the host
         type: string
         enum:
         - BPF
         - Legacy
+      tunnel-protocol:
+        description: Tunnel protocol in use for cross-cluster connectivity
+        type: string
   ControllerStatuses:
     description: Collection of controller statuses
     type: array
@@ -3390,15 +3703,16 @@ definitions:
           - Wireguard
       msg:
         type: string
-        description: Human readable status/error/warning message
+        description: Human readable error/warning message
+      ipsec:
+        description: Status of the IPsec agent
+        "$ref": "#/definitions/IPsecStatus"
       wireguard:
-        description: Status of the Wireguard agent
+        description: Status of the WireGuard agent
         "$ref": "#/definitions/WireguardStatus"
   CNIChainingStatus:
     description: |-
       Status of CNI chaining
-
-      +k8s:deepcopy-gen=true
     properties:
       mode:
         type: string
@@ -3408,9 +3722,34 @@ definitions:
           - flannel
           - generic-veth
           - portmap
+  IPsecStatus:
+    description: |-
+      Status of the IPsec agent
+
+      +k8s:deepcopy-gen=true
+    properties:
+      decrypt-interfaces:
+        description: IPsec decryption interfaces
+        type: array
+        items:
+          type: string
+      max-seq-number:
+        description: IPsec max sequence number
+        type: string
+      keys-in-use:
+        description: IPsec keys in use
+        type: integer
+      error-count:
+        description: IPsec error count
+        type: integer
+      xfrm-errors:
+        description: IPsec XFRM errors
+        type: object
+        additionalProperties:
+          type: integer
   WireguardStatus:
     description: |-
-      Status of the Wireguard agent
+      Status of the WireGuard agent
 
       +k8s:deepcopy-gen=true
     properties:
@@ -3418,13 +3757,13 @@ definitions:
         description: Node Encryption status
         type: string
       interfaces:
-        description: Wireguard interfaces managed by this Cilium instance
+        description: WireGuard interfaces managed by this Cilium instance
         type: array
         items:
           "$ref": "#/definitions/WireguardInterface"
   WireguardInterface:
     description: |-
-      Status of a Wireguard interface
+      Status of a WireGuard interface
 
       +k8s:deepcopy-gen=true
     properties:
@@ -3435,19 +3774,19 @@ definitions:
         description: Public key of this interface
         type: string
       listen-port:
-        description: Port on which the Wireguard endpoint is exposed
+        description: Port on which the WireGuard endpoint is exposed
         type: integer
       peer-count:
         description: Number of peers configured on this interface
         type: integer
       peers:
-        description: Optional list of wireguard peers
+        description: Optional list of WireGuard peers
         type: array
         items:
           "$ref": "#/definitions/WireguardPeer"
   WireguardPeer:
     description: |-
-      Status of a Wireguard peer
+      Status of a WireGuard peer
 
       +k8s:deepcopy-gen=true
     properties:
@@ -3475,7 +3814,7 @@ definitions:
   BgpPeer:
     description: |-
       State of a BGP Peer
-      
+
       +k8s:deepcopy-gen=true
     properties:
       local-asn:
@@ -3487,6 +3826,19 @@ definitions:
       peer-address:
         description: IP Address of peer
         type: string
+      tcp-password-enabled:
+        description: Set when a TCP password is configured for communications with this peer
+        type: boolean
+      ebgp-multihop-ttl:
+        description: |
+          Time To Live (TTL) value used in BGP packets sent to the eBGP neighbor.
+          1 implies that eBGP multi-hop feature is disabled (only a single hop is allowed).
+        type: integer
+      peer-port:
+        description: TCP port number of peer
+        type: integer
+        minimum: 1
+        maximum: 65535
       session-state:
         description: |
           BGP peer operational state as described here
@@ -3495,16 +3847,40 @@ definitions:
       uptime-nanoseconds:
         description: BGP peer connection uptime in nano seconds.
         type: integer
+      graceful-restart:
+        description: Graceful restart capability
+        "$ref": "#/definitions/BgpGracefulRestart"
       families:
         description: BGP peer address family state
         type: array
         items:
           "$ref": "#/definitions/BgpPeerFamilies"
+      connect-retry-time-seconds:
+        description: Initial value for the BGP ConnectRetryTimer (RFC 4271, Section 8) in seconds
+        type: integer
+      configured-hold-time-seconds:
+        description: |
+          Configured initial value for the BGP HoldTimer (RFC 4271, Section 4.2) in seconds.
+          The configured value will be used for negotiation with the peer during the BGP session establishment.
+        type: integer
+      applied-hold-time-seconds:
+        description: |
+          Applied initial value for the BGP HoldTimer (RFC 4271, Section 4.2) in seconds.
+          The applied value holds the value that is in effect on the current BGP session.
+        type: integer
+      configured-keep-alive-time-seconds:
+        description: |
+          Configured initial value for the BGP KeepaliveTimer (RFC 4271, Section 8) in seconds.
+          The applied value may be different than the configured value, as it depends on the negotiated hold time interval.
+        type: integer
+      applied-keep-alive-time-seconds:
+        description: |
+          Applied initial value for the BGP KeepaliveTimer (RFC 4271, Section 8) in seconds.
+          The applied value holds the value that is in effect on the current BGP session.
+        type: integer
   BgpPeerFamilies:
     description: |-
       BGP AFI SAFI state of the peer
-      
-      +k8s:deepcopy-gen=true
     properties:
       afi:
         description: BGP address family indicator
@@ -3521,3 +3897,177 @@ definitions:
       advertised:
         description: Number of routes advertised of this address family to the peer
         type: integer
+  BgpGracefulRestart:
+    description: |-
+      BGP graceful restart parameters negotiated with the peer.
+    properties:
+      enabled:
+        description: |-
+          When set, graceful restart capability is negotiated for all AFI/SAFIs of
+          this peer.
+        type: boolean
+      restart-time-seconds:
+        description: |-
+          This is the time advertised to peer for the BGP session to be re-established
+          after a restart. After this period, peer will remove stale routes.
+          (RFC 4724 section 4.2)
+        type: integer
+  BgpRoute:
+    description: Single BGP route retrieved from the RIB of underlying router
+    properties:
+      router-asn:
+        description: Autonomous System Number (ASN) identifying a BGP virtual router instance
+        type: integer
+      neighbor:
+        description: IP address specifying a BGP neighbor if the source table type is adj-rib-in or adj-rib-out
+        type: string
+      prefix:
+        description: IP prefix of the route
+        type: string
+      paths:
+        description: List of routing paths leading towards the prefix
+        type: array
+        items:
+          "$ref": "#/definitions/BgpPath"
+  BgpPath:
+    description: Single BGP routing Path containing BGP Network Layer Reachability Information (NLRI) and path attributes
+    properties:
+      family:
+        description: Address Family Indicator (AFI) and Subsequent Address Family Indicator (SAFI) of the path
+        "$ref": "#/definitions/BgpFamily"
+      nlri:
+        description: Network Layer Reachability Information of the path
+        "$ref": "#/definitions/BgpNlri"
+      path-attributes:
+        description: List of BGP path attributes specific for the path
+        type: array
+        items:
+          "$ref": "#/definitions/BgpPathAttribute"
+      age-nanoseconds:
+        description: Age of the path (time since its creation) in nanoseconds
+        type: integer
+      best:
+        description: True value flags the best path towards the destination prefix
+        type: boolean
+      stale:
+        description: True value marks the path as stale
+        type: boolean
+  BgpFamily:
+    description: Address Family Indicator (AFI) and Subsequent Address Family Indicator (SAFI) of the path
+    properties:
+      afi:
+        description: Address Family Indicator (AFI) of the path
+        type: string
+      safi:
+        description: Subsequent Address Family Indicator (SAFI) of the path
+        type: string
+  BgpNlri:
+    description: Network Layer Reachability Information (NLRI) of the path
+    properties:
+      base64:
+        description: Base64-encoded NLRI in the BGP UPDATE message format
+        type: string
+  BgpPathAttribute:
+    description: Single BGP path attribute specific for the path
+    properties:
+      base64:
+        description: Base64-encoded BGP path attribute in the BGP UPDATE message format
+        type: string
+  BgpRoutePolicy:
+    description: Single BGP route policy retrieved from the underlying router
+    properties:
+      router-asn:
+        description: Autonomous System Number (ASN) identifying a BGP virtual router instance
+        type: integer
+      name:
+        description: Name of the route policy
+        type: string
+      type:
+        description: Type of the route policy
+        type: string
+        enum:
+          - export
+          - import
+      statements:
+        description: List of the route policy statements
+        type: array
+        items:
+          "$ref": "#/definitions/BgpRoutePolicyStatement"
+  BgpRoutePolicyStatement:
+    description: Single BGP route policy statement
+    properties:
+      match-neighbors:
+        description: Matches any of the provided BGP neighbor IP addresses. If empty matches all neighbors.
+        type: array
+        items:
+          type: string
+      match-families:
+        description:  Matches any of the provided address families. If empty matches all address families.
+        type: array
+        items:
+          "$ref": "#/definitions/BgpFamily"
+      match-prefixes:
+        description:  Matches any of the provided prefixes. If empty matches all prefixes.
+        type: array
+        items:
+          "$ref": "#/definitions/BgpRoutePolicyPrefixMatch"
+      route-action:
+        description: RIB processing action taken on the matched route
+        type: string
+        enum:
+          - none
+          - accept
+          - reject
+      add-communities:
+        description:  List of BGP standard community values to be added to the matched route
+        type: array
+        items:
+          type: string
+      add-large-communities:
+        description:  List of BGP large community values to be added to the matched route
+        type: array
+        items:
+          type: string
+      set-local-preference:
+        description: BGP local preference value to be set on the matched route
+        type: integer
+      nexthop:
+        description: BGP nexthop action
+        "$ref": "#/definitions/BgpRoutePolicyNexthopAction"
+  BgpRoutePolicyNexthopAction:
+    description: BGP nexthop action
+    properties:
+      self:
+        description: Set nexthop to the IP address of itself
+        type: boolean
+      unchanged:
+        description: Don't change nexthop
+        type: boolean
+  BgpRoutePolicyPrefixMatch:
+    description: Matches a CIDR prefix in a BGP route policy
+    properties:
+      cidr:
+        description: CIDR prefix to match with
+        type: string
+      prefix-len-min:
+        description: Minimal prefix length that will match if it falls under CIDR
+        type: integer
+      prefix-len-max:
+        description: Maximal prefix length that will match if it falls under CIDR
+        type: integer
+  Label:
+    description: Label is the Cilium's representation of a container label
+    type: object
+    properties:
+      key:
+        type: string
+      value:
+        type: string
+      source:
+        description: Source can be one of the above values (e.g. LabelSourceContainer)
+        type: string
+  LabelArray:
+    description: LabelArray is an array of labels forming a set
+    type: array
+    items:
+      "$ref": "#/definitions/Label"

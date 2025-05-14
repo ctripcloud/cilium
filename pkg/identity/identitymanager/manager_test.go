@@ -6,23 +6,14 @@ package identitymanager
 import (
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type IdentityManagerTestSuite struct{}
-
 var (
-	_ = Suite(&IdentityManagerTestSuite{})
-
 	idFooSelectLabels = labels.NewLabelsFromModel([]string{"id=foo"})
 	idBarSelectLabels = labels.NewLabelsFromModel([]string{"id=bar"})
 	fooIdentity       = identity.NewIdentity(identity.NumericIdentity(12345), idFooSelectLabels)
@@ -30,67 +21,69 @@ var (
 	barIdentity       = identity.NewIdentity(identity.NumericIdentity(54321), idBarSelectLabels)
 )
 
-func (s *IdentityManagerTestSuite) TestIdentityManagerLifecycle(c *C) {
-	idm := NewIdentityManager()
-	c.Assert(idm.identities, Not(IsNil))
+func TestIdentityManagerLifecycle(t *testing.T) {
+	logger := hivetest.Logger(t)
+	idm := newIdentityManager(logger)
+	require.NotNil(t, idm.identities)
 
 	_, exists := idm.identities[fooIdentity.ID]
-	c.Assert(exists, Equals, false)
+	require.False(t, exists)
 
 	idm.Add(fooIdentity)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(1))
+	require.Equal(t, uint(1), idm.identities[fooIdentity.ID].refCount)
 
 	idm.Add(fooIdentity)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(2))
+	require.Equal(t, uint(2), idm.identities[fooIdentity.ID].refCount)
 
 	idm.Add(barIdentity)
-	c.Assert(idm.identities[barIdentity.ID].refCount, Equals, uint(1))
+	require.Equal(t, uint(1), idm.identities[barIdentity.ID].refCount)
 
 	idm.Remove(fooIdentity)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(1))
+	require.Equal(t, uint(1), idm.identities[fooIdentity.ID].refCount)
 
 	idm.Remove(fooIdentity)
 	_, exists = idm.identities[fooIdentity.ID]
-	c.Assert(exists, Equals, false)
+	require.False(t, exists)
 
 	_, exists = idm.identities[barIdentity.ID]
-	c.Assert(exists, Equals, true)
+	require.True(t, exists)
 
 	idm.Remove(barIdentity)
 	_, exists = idm.identities[barIdentity.ID]
-	c.Assert(exists, Equals, false)
+	require.False(t, exists)
 
 	idm.Add(fooIdentity)
 	_, exists = idm.identities[fooIdentity.ID]
-	c.Assert(exists, Equals, true)
+	require.True(t, exists)
 	idm.RemoveOldAddNew(fooIdentity, barIdentity)
 	_, exists = idm.identities[fooIdentity.ID]
-	c.Assert(exists, Equals, false)
+	require.False(t, exists)
 	_, exists = idm.identities[barIdentity.ID]
-	c.Assert(exists, Equals, true)
-	c.Assert(idm.identities[barIdentity.ID].refCount, Equals, uint(1))
+	require.True(t, exists)
+	require.Equal(t, uint(1), idm.identities[barIdentity.ID].refCount)
 
 	idm.RemoveOldAddNew(nil, barIdentity)
-	c.Assert(idm.identities[barIdentity.ID].refCount, Equals, uint(2))
+	require.Equal(t, uint(2), idm.identities[barIdentity.ID].refCount)
 }
 
-func (s *IdentityManagerTestSuite) TestHostIdentityLifecycle(c *C) {
-	idm := NewIdentityManager()
-	c.Assert(idm.identities, Not(IsNil))
+func TestHostIdentityLifecycle(t *testing.T) {
+	logger := hivetest.Logger(t)
+	idm := newIdentityManager(logger)
+	require.NotNil(t, idm.identities)
 
 	hostIdentity := identity.NewIdentity(identity.ReservedIdentityHost, labels.LabelHost)
 	_, exists := idm.identities[hostIdentity.ID]
-	c.Assert(exists, Equals, false)
+	require.False(t, exists)
 
 	idm.Add(hostIdentity)
-	c.Assert(idm.identities[hostIdentity.ID].refCount, Equals, uint(1))
+	require.Equal(t, uint(1), idm.identities[hostIdentity.ID].refCount)
 
 	newHostLabels := labels.NewLabelsFromModel([]string{"id=foo"})
 	newHostLabels.MergeLabels(labels.LabelHost)
 	newHostIdentity := identity.NewIdentity(identity.ReservedIdentityHost, newHostLabels)
 	idm.RemoveOldAddNew(hostIdentity, newHostIdentity)
-	c.Assert(idm.identities[hostIdentity.ID].refCount, Equals, uint(1))
-	c.Assert(idm.identities[hostIdentity.ID].identity, checker.DeepEquals, newHostIdentity)
+	require.Equal(t, uint(1), idm.identities[hostIdentity.ID].refCount)
+	require.Equal(t, newHostIdentity, idm.identities[hostIdentity.ID].identity)
 }
 
 type identityManagerObserver struct {
@@ -117,64 +110,66 @@ func (i *identityManagerObserver) LocalEndpointIdentityRemoved(identity *identit
 	}
 }
 
-func (s *IdentityManagerTestSuite) TestLocalEndpointIdentityAdded(c *C) {
-	idm := NewIdentityManager()
+func TestLocalEndpointIdentityAdded(t *testing.T) {
+	logger := hivetest.Logger(t)
+	idm := newIdentityManager(logger)
 	observer := newIdentityManagerObserver([]identity.NumericIdentity{}, []identity.NumericIdentity{})
-	idm.subscribe(observer)
+	idm.Subscribe(observer)
 
 	// No-op: nil Identity.
 	idm.Add(nil)
 	expectedObserver := newIdentityManagerObserver([]identity.NumericIdentity{}, []identity.NumericIdentity{})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 
 	// First add triggers an "IdentityAdded" event.
 	idm.Add(fooIdentity)
 	expectedObserver = newIdentityManagerObserver([]identity.NumericIdentity{fooIdentity.ID}, []identity.NumericIdentity{})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 
 	// Second does not.
 	idm.Add(fooIdentity)
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(2))
+	require.Equal(t, expectedObserver, observer)
+	require.Equal(t, uint(2), idm.identities[fooIdentity.ID].refCount)
 
 	// Duplicate identity with the same ID does not trigger events.
 	idm.Add(fooIdentity2)
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(3))
+	require.Equal(t, expectedObserver, observer)
+	require.Equal(t, uint(3), idm.identities[fooIdentity.ID].refCount)
 
 	// Unrelated add should also trigger.
 	idm.Add(barIdentity)
 	expectedObserver = newIdentityManagerObserver([]identity.NumericIdentity{fooIdentity.ID, barIdentity.ID}, []identity.NumericIdentity{})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
-	c.Assert(idm.identities[barIdentity.ID].refCount, Equals, uint(1))
+	require.Equal(t, expectedObserver, observer)
+	require.Equal(t, uint(1), idm.identities[barIdentity.ID].refCount)
 
 	// Removing both then re-adding should trigger the event again.
 	idm.Remove(fooIdentity)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(2))
+	require.Equal(t, uint(2), idm.identities[fooIdentity.ID].refCount)
 	idm.Remove(fooIdentity)
-	c.Assert(idm.identities[fooIdentity.ID].refCount, Equals, uint(1))
+	require.Equal(t, uint(1), idm.identities[fooIdentity.ID].refCount)
 	idm.Remove(fooIdentity)
-	c.Assert(observer.added, HasLen, 2)
-	c.Assert(observer.removed, HasLen, 1)
+	require.Len(t, observer.added, 2)
+	require.Len(t, observer.removed, 1)
 	idm.Add(fooIdentity)
 	expectedObserver = newIdentityManagerObserver([]identity.NumericIdentity{fooIdentity.ID, barIdentity.ID, fooIdentity.ID}, []identity.NumericIdentity{fooIdentity.ID})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 
 	// RemoveOldAddNew with the same ID is a no-op
 	idm.RemoveOldAddNew(fooIdentity, fooIdentity2)
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 
 	// RemoveOldAddNew from an existing ID to another triggers removal of the old
 	idm.RemoveOldAddNew(barIdentity, fooIdentity)
 	expectedObserver = newIdentityManagerObserver([]identity.NumericIdentity{fooIdentity.ID, barIdentity.ID, fooIdentity.ID}, []identity.NumericIdentity{fooIdentity.ID, barIdentity.ID})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 }
 
-func (s *IdentityManagerTestSuite) TestLocalEndpointIdentityRemoved(c *C) {
-	idm := NewIdentityManager()
-	c.Assert(idm.identities, NotNil)
+func TestLocalEndpointIdentityRemoved(t *testing.T) {
+	logger := hivetest.Logger(t)
+	idm := newIdentityManager(logger)
+	require.NotNil(t, idm.identities)
 	observer := newIdentityManagerObserver([]identity.NumericIdentity{}, []identity.NumericIdentity{})
-	idm.subscribe(observer)
+	idm.Subscribe(observer)
 
 	// No-ops:
 	// - nil Identity.
@@ -187,12 +182,12 @@ func (s *IdentityManagerTestSuite) TestLocalEndpointIdentityRemoved(c *C) {
 	idm.Add(fooIdentity)
 	idm.Remove(fooIdentity)
 	expectedObserver := newIdentityManagerObserver([]identity.NumericIdentity{fooIdentity.ID}, []identity.NumericIdentity{fooIdentity.ID})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 
-	idm = NewIdentityManager()
-	c.Assert(idm.identities, NotNil)
+	idm = newIdentityManager(logger)
+	require.NotNil(t, idm.identities)
 	observer = newIdentityManagerObserver(nil, []identity.NumericIdentity{})
-	idm.subscribe(observer)
+	idm.Subscribe(observer)
 
 	// Refcount remove
 	idm.Add(fooIdentity)    // foo = 1
@@ -200,11 +195,11 @@ func (s *IdentityManagerTestSuite) TestLocalEndpointIdentityRemoved(c *C) {
 	idm.Add(barIdentity)    // bar = 1
 	idm.Remove(fooIdentity) // foo = 1
 	expectedObserver = newIdentityManagerObserver(nil, []identity.NumericIdentity{})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 	idm.Remove(fooIdentity) // foo = 0
 	expectedObserver = newIdentityManagerObserver(nil, []identity.NumericIdentity{fooIdentity.ID})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 	idm.Remove(barIdentity) // bar = 0
 	expectedObserver = newIdentityManagerObserver(nil, []identity.NumericIdentity{fooIdentity.ID, barIdentity.ID})
-	c.Assert(observer, checker.DeepEquals, expectedObserver)
+	require.Equal(t, expectedObserver, observer)
 }

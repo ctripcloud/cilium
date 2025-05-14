@@ -8,6 +8,7 @@ package server
 import (
 	"context"
 	"crypto/tls"
+	"log/slog"
 	"net"
 	"net/http"
 
@@ -19,7 +20,6 @@ import (
 	"github.com/cilium/cilium/api/v1/server/restapi/daemon"
 	"github.com/cilium/cilium/api/v1/server/restapi/endpoint"
 	"github.com/cilium/cilium/api/v1/server/restapi/ipam"
-	"github.com/cilium/cilium/api/v1/server/restapi/metrics"
 	"github.com/cilium/cilium/api/v1/server/restapi/policy"
 	"github.com/cilium/cilium/api/v1/server/restapi/prefilter"
 	"github.com/cilium/cilium/api/v1/server/restapi/service"
@@ -34,7 +34,7 @@ func configureFlags(api *restapi.CiliumAPIAPI) {
 	// api.CommandLineOptionsGroups = []swag.CommandLineOptionsGroup{ ... }
 }
 
-func configureAPI(api *restapi.CiliumAPIAPI) http.Handler {
+func configureAPI(logger *slog.Logger, api *restapi.CiliumAPIAPI) http.Handler {
 	// configure the api here
 	api.ServeError = errors.ServeError
 
@@ -75,11 +75,6 @@ func configureAPI(api *restapi.CiliumAPIAPI) http.Handler {
 	if api.PrefilterDeletePrefilterHandler == nil {
 		api.PrefilterDeletePrefilterHandler = prefilter.DeletePrefilterHandlerFunc(func(params prefilter.DeletePrefilterParams) middleware.Responder {
 			return middleware.NotImplemented("operation prefilter.DeletePrefilter has not yet been implemented")
-		})
-	}
-	if api.ServiceDeleteServiceIDHandler == nil {
-		api.ServiceDeleteServiceIDHandler = service.DeleteServiceIDHandlerFunc(func(params service.DeleteServiceIDParams) middleware.Responder {
-			return middleware.NotImplemented("operation service.DeleteServiceID has not yet been implemented")
 		})
 	}
 	if api.DaemonGetClusterNodesHandler == nil {
@@ -177,11 +172,6 @@ func configureAPI(api *restapi.CiliumAPIAPI) http.Handler {
 			return middleware.NotImplemented("operation daemon.GetMapName has not yet been implemented")
 		})
 	}
-	if api.MetricsGetMetricsHandler == nil {
-		api.MetricsGetMetricsHandler = metrics.GetMetricsHandlerFunc(func(params metrics.GetMetricsParams) middleware.Responder {
-			return middleware.NotImplemented("operation metrics.GetMetrics has not yet been implemented")
-		})
-	}
 	if api.PolicyGetPolicyHandler == nil {
 		api.PolicyGetPolicyHandler = policy.GetPolicyHandlerFunc(func(params policy.GetPolicyParams) middleware.Responder {
 			return middleware.NotImplemented("operation policy.GetPolicy has not yet been implemented")
@@ -252,11 +242,6 @@ func configureAPI(api *restapi.CiliumAPIAPI) http.Handler {
 			return middleware.NotImplemented("operation policy.PutPolicy has not yet been implemented")
 		})
 	}
-	if api.ServicePutServiceIDHandler == nil {
-		api.ServicePutServiceIDHandler = service.PutServiceIDHandlerFunc(func(params service.PutServiceIDParams) middleware.Responder {
-			return middleware.NotImplemented("operation service.PutServiceID has not yet been implemented")
-		})
-	}
 
 	api.PreServerShutdown = func() {}
 
@@ -265,7 +250,7 @@ func configureAPI(api *restapi.CiliumAPIAPI) http.Handler {
 		serverCancel()
 	}
 
-	return setupGlobalMiddleware(api.Serve(setupMiddlewares))
+	return setupGlobalMiddleware(logger, api.Serve(setupMiddlewares))
 }
 
 // The TLS configuration before HTTPS server starts.
@@ -296,7 +281,7 @@ func setupMiddlewares(handler http.Handler) http.Handler {
 
 // The middleware configuration happens before anything, this middleware also applies to serving the swagger.json document.
 // So this is a good place to plug in a panic handling middleware, logging and metrics
-func setupGlobalMiddleware(handler http.Handler) http.Handler {
+func setupGlobalMiddleware(logger *slog.Logger, handler http.Handler) http.Handler {
 	eventsHelper := &ciliumMetrics.APIEventTSHelper{
 		Next:      handler,
 		TSGauge:   ciliumMetrics.EventTS,
@@ -304,6 +289,7 @@ func setupGlobalMiddleware(handler http.Handler) http.Handler {
 	}
 
 	return &api.APIPanicHandler{
-		Next: eventsHelper,
+		Logger: logger,
+		Next:   eventsHelper,
 	}
 }

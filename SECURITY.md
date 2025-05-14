@@ -5,10 +5,10 @@
 | Version  | Supported          |
 |----------| ------------------ |
 | main     | :white_check_mark: |
-| 1.13.x   | :white_check_mark: |
-| 1.12.x   | :white_check_mark: |
-| 1.11.x   | :white_check_mark: |
-| < 1.11.0 | :x:                |
+| 1.17.x   | :white_check_mark: |
+| 1.16.x   | :white_check_mark: |
+| 1.15.x   | :white_check_mark: |
+| < 1.15.0 | :x:                |
 
 ## Reporting a Vulnerability
 

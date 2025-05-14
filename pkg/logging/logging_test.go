@@ -4,86 +4,126 @@
 package logging
 
 import (
+	"bytes"
+	"flag"
 	"reflect"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sirupsen/logrus"
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/klog/v2"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type LoggingSuite struct{}
-
-var _ = Suite(&LoggingSuite{})
-
-func (s *LoggingSuite) TestGetLogLevel(c *C) {
+func TestGetLogLevel(t *testing.T) {
 	opts := LogOptions{}
 
 	// case doesn't matter with log options
 	opts[LevelOpt] = "DeBuG"
-	c.Assert(opts.GetLogLevel(), Equals, logrus.DebugLevel)
+	require.Equal(t, logrus.DebugLevel, opts.GetLogLevel())
 
 	opts[LevelOpt] = "Invalid"
-	c.Assert(opts.GetLogLevel(), Equals, DefaultLogLevel)
+	require.Equal(t, DefaultLogLevel, opts.GetLogLevel())
 }
 
-func (s *LoggingSuite) TestGetLogFormat(c *C) {
+func TestGetLogFormat(t *testing.T) {
 	opts := LogOptions{}
 
 	// case doesn't matter with log options
 	opts[FormatOpt] = "JsOn"
-	c.Assert(opts.GetLogFormat(), Equals, LogFormatJSON)
+	require.Equal(t, LogFormatJSON, opts.GetLogFormat()) //nolint: testifylint
 
 	opts[FormatOpt] = "Invalid"
-	c.Assert(opts.GetLogFormat(), Equals, DefaultLogFormat)
+	require.Equal(t, DefaultLogFormatTimestamp, opts.GetLogFormat())
 
 	opts[FormatOpt] = "JSON-TS"
-	c.Assert(opts.GetLogFormat(), Equals, LogFormatJSONTimestamp)
+	require.Equal(t, LogFormatJSONTimestamp, opts.GetLogFormat()) //nolint: testifylint
 }
 
-func (s *LoggingSuite) TestSetLogLevel(c *C) {
+func TestSetLogLevel(t *testing.T) {
 	oldLevel := DefaultLogger.GetLevel()
 	defer DefaultLogger.SetLevel(oldLevel)
 
 	SetLogLevel(logrus.TraceLevel)
-	c.Assert(DefaultLogger.GetLevel(), Equals, logrus.TraceLevel)
+	require.Equal(t, logrus.TraceLevel, DefaultLogger.GetLevel())
 }
 
-func (s *LoggingSuite) TestSetDefaultLogLevel(c *C) {
+func TestSetDefaultLogLevel(t *testing.T) {
 	oldLevel := DefaultLogger.GetLevel()
 	defer DefaultLogger.SetLevel(oldLevel)
 
 	SetDefaultLogLevel()
-	c.Assert(DefaultLogger.GetLevel(), Equals, DefaultLogLevel)
+	require.Equal(t, DefaultLogLevel, DefaultLogger.GetLevel())
 }
 
-func (s *LoggingSuite) TestSetLogFormat(c *C) {
+func TestSetLogFormat(t *testing.T) {
 	oldFormatter := DefaultLogger.Formatter
 	defer DefaultLogger.SetFormatter(oldFormatter)
 
 	SetLogFormat(LogFormatJSON)
-	c.Assert(reflect.TypeOf(DefaultLogger.Formatter).String(), Equals, "*logrus.JSONFormatter")
+	require.Equal(t, "*logrus.JSONFormatter", reflect.TypeOf(DefaultLogger.Formatter).String())
 
 	SetLogFormat(LogFormatJSONTimestamp)
-	c.Assert(reflect.TypeOf(DefaultLogger.Formatter).String(), Equals, "*logrus.JSONFormatter")
-	c.Assert(DefaultLogger.Formatter.(*logrus.JSONFormatter).DisableTimestamp, Equals, false)
-	c.Assert(DefaultLogger.Formatter.(*logrus.JSONFormatter).TimestampFormat, Equals, time.RFC3339Nano)
+	require.Equal(t, "*logrus.JSONFormatter", reflect.TypeOf(DefaultLogger.Formatter).String())
+	require.False(t, DefaultLogger.Formatter.(*logrus.JSONFormatter).DisableTimestamp)
+	require.Equal(t, time.RFC3339Nano, DefaultLogger.Formatter.(*logrus.JSONFormatter).TimestampFormat)
 }
 
-func (s *LoggingSuite) TestSetDefaultLogFormat(c *C) {
+func TestSetDefaultLogFormat(t *testing.T) {
 	oldFormatter := DefaultLogger.Formatter
 	defer DefaultLogger.SetFormatter(oldFormatter)
 
 	SetDefaultLogFormat()
-	c.Assert(reflect.TypeOf(DefaultLogger.Formatter).String(), Equals, "*logrus.TextFormatter")
+	require.Equal(t, "*logrus.TextFormatter", reflect.TypeOf(DefaultLogger.Formatter).String())
 }
 
-func (s *LoggingSuite) TestSetupLogging(c *C) {
+func TestSetupLogging2(t *testing.T) {
+	out := &bytes.Buffer{}
+	logger := initializeDefaultLogger()
+	logger.SetOutput(out)
+	log := logger.WithField("subsys", "logging-test")
+	overrides := []logLevelOverride{
+		{
+			matcher:     regexp.MustCompile("^please override (this|foo)!$"),
+			targetLevel: logrus.InfoLevel,
+		},
+	}
+	errWriter, err := severityOverrideWriter(logrus.ErrorLevel, log, overrides)
+	assert.NoError(t, err)
+
+	klogFlags := flag.NewFlagSet("cilium", flag.ExitOnError)
+	klog.InitFlags(klogFlags)
+	klogFlags.Set("logtostderr", "false")
+	klogFlags.Set("skip_headers", "true")
+	klogFlags.Set("one_output", "true")
+
+	klog.SetOutputBySeverity("ERROR", errWriter)
+	klog.SetOutputBySeverity("INFO", log.WriterLevel(logrus.InfoLevel))
+	klog.Error("please do not override this!")
+	klog.Error("please override this!")
+	klog.Error("please override foo!")
+	klog.Error("final log")
+	klog.Flush()
+	var lines []string
+	assert.EventuallyWithT(t, func(collect *assert.CollectT) {
+		logout := strings.Trim(out.String(), "\n")
+		lines = strings.Split(logout, "\n")
+		assert.Len(collect, lines, 4)
+	}, time.Second, time.Millisecond*50)
+	for _, line := range lines {
+		if strings.Contains(line, "please override this!") || strings.Contains(line, "please override foo!") {
+			assert.Contains(t, line, "level=info")
+		} else {
+			assert.Contains(t, line, "level=error")
+		}
+	}
+
+}
+
+func TestSetupLogging(t *testing.T) {
 	oldLevel := DefaultLogger.GetLevel()
 	defer DefaultLogger.SetLevel(oldLevel)
 
@@ -94,10 +134,10 @@ func (s *LoggingSuite) TestSetupLogging(c *C) {
 	}
 
 	SetupLogging([]string{}, logOpts, "", false)
-	c.Assert(DefaultLogger.GetLevel(), Equals, logrus.ErrorLevel)
-	c.Assert(reflect.TypeOf(DefaultLogger.Formatter).String(), Equals, "*logrus.JSONFormatter")
+	require.Equal(t, logrus.ErrorLevel, DefaultLogger.GetLevel())
+	require.Equal(t, "*logrus.JSONFormatter", reflect.TypeOf(DefaultLogger.Formatter).String())
 
 	// Validate that the 'debug' flag/arg overrides the logOptions
 	SetupLogging([]string{}, logOpts, "", true)
-	c.Assert(DefaultLogger.GetLevel(), Equals, logrus.DebugLevel)
+	require.Equal(t, logrus.DebugLevel, DefaultLogger.GetLevel())
 }

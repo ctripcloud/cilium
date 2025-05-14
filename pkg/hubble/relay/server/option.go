@@ -5,31 +5,29 @@ package server
 
 import (
 	"crypto/tls"
-	"time"
+	"log/slog"
 
 	grpc_prometheus "github.com/grpc-ecosystem/go-grpc-prometheus"
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
 	"github.com/cilium/cilium/pkg/crypto/certloader"
 	"github.com/cilium/cilium/pkg/hubble/relay/defaults"
 	"github.com/cilium/cilium/pkg/hubble/relay/observer"
-	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // MinTLSVersion defines the minimum TLS version clients are expected to
 // support in order to establish a connection to the hubble-relay server.
-const MinTLSVersion = tls.VersionTLS13
+var MinTLSVersion uint16 = tls.VersionTLS13
 
 // options stores all the configuration values for the hubble-relay server.
 type options struct {
 	peerTarget             string
-	dialTimeout            time.Duration
 	retryTimeout           time.Duration
 	listenAddress          string
+	healthListenAddress    string
 	metricsListenAddress   string
-	log                    logrus.FieldLogger
+	log                    *slog.Logger
 	serverTLSConfig        certloader.ServerConfigBuilder
 	insecureServer         bool
 	clientTLSConfig        certloader.ClientConfigBuilder
@@ -43,11 +41,10 @@ type options struct {
 
 // defaultOptions is the reference point for default values.
 var defaultOptions = options{
-	peerTarget:    defaults.PeerTarget,
-	dialTimeout:   defaults.DialTimeout,
-	retryTimeout:  defaults.RetryTimeout,
-	listenAddress: defaults.ListenAddress,
-	log:           logging.DefaultLogger.WithField(logfields.LogSubsys, "hubble-relay"),
+	peerTarget:          defaults.PeerTarget,
+	retryTimeout:        defaults.RetryTimeout,
+	listenAddress:       defaults.ListenAddress,
+	healthListenAddress: defaults.HealthListenAddress,
 }
 
 // DefaultOptions to include in the server. Other packages may extend this
@@ -65,20 +62,19 @@ func WithPeerTarget(t string) Option {
 	}
 }
 
-// WithDialTimeout sets the dial timeout that is used when establishing a
-// connection to a hubble peer.
-func WithDialTimeout(t time.Duration) Option {
-	return func(o *options) error {
-		o.dialTimeout = t
-		return nil
-	}
-}
-
 // WithRetryTimeout sets the duration to wait before attempting to re-connect
 // to a hubble peer when the connection is lost.
 func WithRetryTimeout(t time.Duration) Option {
 	return func(o *options) error {
 		o.retryTimeout = t
+		return nil
+	}
+}
+
+// WithHealthListenAddress sets the listen address for the hubble-relay gRPC health server.
+func WithHealthListenAddress(a string) Option {
+	return func(o *options) error {
+		o.healthListenAddress = a
 		return nil
 	}
 }
@@ -137,7 +133,7 @@ func WithErrorAggregationWindow(d time.Duration) Option {
 }
 
 // WithLogger set the logger used by hubble-relay.
-func WithLogger(log logrus.FieldLogger) Option {
+func WithLogger(log *slog.Logger) Option {
 	return func(o *options) error {
 		o.log = log
 		return nil

@@ -1,34 +1,65 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_STATIC_DATA_H_
-#define __LIB_STATIC_DATA_H_
+#pragma once
 
-#include <bpf/ctx/ctx.h>
-#include <bpf/api.h>
-
+#include <bpf/compiler.h>
 #include "endian.h"
 
-/* fetch_* macros assist in fetching variously sized static data */
-#define fetch_u16(x) (__u16)__fetch(x)
-#define fetch_u32(x) __fetch(x)
-#define fetch_u32_i(x, i) __fetch(x ## _ ## i)
-#define fetch_ipv6(x) fetch_u32_i(x, 1), fetch_u32_i(x, 2), fetch_u32_i(x, 3), fetch_u32_i(x, 4)
-#define fetch_mac(x) { { fetch_u32_i(x, 1), (__u16)fetch_u32_i(x, 2) } }
+#define __CONFIG_SECTION ".rodata.config"
 
-/* DEFINE_* macros help to declare static data. */
-#define DEFINE_U16(NAME, value) volatile __u16 NAME = value
-#define DEFINE_U32(NAME, value) volatile __u32 NAME = value
-#define DEFINE_U32_I(NAME, i) volatile __u32 NAME ## _ ## i
-#define DEFINE_IPV6(NAME,									\
-		    a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16)	\
-DEFINE_U32_I(NAME, 1) = bpf_htonl( (a1) << 24 |  (a2) << 16 |  (a3) << 8 |  (a4));		\
-DEFINE_U32_I(NAME, 2) = bpf_htonl( (a5) << 24 |  (a6) << 16 |  (a7) << 8 |  (a8));		\
-DEFINE_U32_I(NAME, 3) = bpf_htonl( (a9) << 24 | (a10) << 16 | (a11) << 8 | (a12));		\
-DEFINE_U32_I(NAME, 4) = bpf_htonl((a13) << 24 | (a14) << 16 | (a15) << 8 | (a16))
+/* Declare a global configuration variable that can be modified at runtime,
+ * without needing to recompile the datapath. Access the variable using the
+ * CONFIG() macro.
+ */
+#define DECLARE_CONFIG(type, name, description) \
+	/* Emit the variable to the .rodata.config section. The compiler will emit a
+	 * BTF Datasec referring to all variables in this section, making them
+	 * convenient to iterate through for generating config scaffolding in Go.
+	 * ebpf-go will expose these in CollectionSpec.Variables.
+	 */ \
+	__section(__CONFIG_SECTION) \
+	/* Config struct generation for bpf objects like bpf_lxc or bpf_host,
+	 * selects only these variables. Node configs use a different kind and
+	 * are emitted to another struct.
+	 */ \
+	__attribute__((btf_decl_tag("kind:object"))) \
+	/* Assign the config variable a BTF decl tag containing its description. This
+	 * allows including doc comments in code generated from BTF.
+	 */ \
+	__attribute__((btf_decl_tag(description))) \
+	/* Declare a global variable of the given name and type. volatile to
+	 * prevent the compiler from eliding all accesses, which would also
+	 * omit it from the ELF.
+	 */ \
+	volatile const type __config_##name;
 
-#define DEFINE_MAC(NAME, a1, a2, a3, a4, a5, a6)			\
-DEFINE_U32_I(NAME, 1) = (a1) << 24 | (a2) << 16 |  (a3) << 8 | (a4);	\
-DEFINE_U32_I(NAME, 2) =                            (a5) << 8 | (a6)
+/* Declare a global node-level configuration variable that is emitted to a
+ * separate Go config struct embedded into all individual object configs. Access
+ * the variable using the CONFIG() macro.
+ */
+#define NODE_CONFIG(type, name, description) \
+	__section(__CONFIG_SECTION) \
+	/* Tag this variable as being a node-level variable. dpgen will emit
+	 * these to a node-specific Go struct that can be embedded into
+	 * object-level configuration structs. */ \
+	__attribute__((btf_decl_tag("kind:node"))) \
+	__attribute__((btf_decl_tag(description))) \
+	volatile const type __config_##name;
 
-#endif /* __LIB_STATIC_DATA_H_ */
+/* Hardcode config values at compile time, e.g. from per-endpoint headers.
+ * Can be used only once per config variable within a single compilation unit.
+ */
+#define ASSIGN_CONFIG(type, name, value) \
+	/* Emit a reference to the variable before assigning a value. Without
+	 * this, we risk silently declaring and defining a variable that didn't
+	 * exist before. */ \
+	void __check_##name(void) \
+	{ CONFIG(name); /* Error: variable was assigned before declaring. */ }; \
+	volatile const type __config_##name = value;
+
+/* Access a global configuration variable declared using DECLARE_CONFIG(). All
+ * accesses must be done through this macro to ensure the loader's dead code
+ * elimination can recognize them.
+ */
+#define CONFIG(name) __config_##name

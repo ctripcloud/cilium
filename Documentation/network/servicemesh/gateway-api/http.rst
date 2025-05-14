@@ -24,6 +24,7 @@ Deploy the Cilium Gateway
 You'll find the example Gateway and HTTPRoute definition in ``basic-http.yaml``.
 
 .. literalinclude:: ../../../../examples/kubernetes/gateway/basic-http.yaml
+   :language: yaml
 
 .. parsed-literal::
 
@@ -39,8 +40,8 @@ gateway, but it may take up to 20 minutes.
 .. code-block:: shell-session
 
     $ kubectl get gateway my-gateway
-    NAME         CLASS    ADDRESS        READY   AGE
-    my-gateway   cilium   10.100.26.37   True    2d7h
+    NAME         CLASS    ADDRESS        PROGRAMMED   AGE
+    my-gateway   cilium   10.100.26.37   True         2d7h
 
 .. Note::
 

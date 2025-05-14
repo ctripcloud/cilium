@@ -4,10 +4,9 @@
 package endpoint
 
 import (
-	"fmt"
+	"log/slog"
 	"net/netip"
-
-	"github.com/sirupsen/logrus"
+	"strconv"
 
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/mac"
@@ -29,21 +28,21 @@ type epInfoCache struct {
 	ifName string
 
 	// For datapath.EndpointConfiguration
-	identity                               identity.NumericIdentity
-	mac                                    mac.MAC
-	ipv4                                   netip.Addr
-	ipv6                                   netip.Addr
-	conntrackLocal                         bool
-	requireARPPassthrough                  bool
-	requireEgressProg                      bool
-	requireRouting                         bool
-	requireEndpointRoute                   bool
-	disableSIPVerification                 bool
-	policyVerdictLogFilter                 uint32
-	cidr4PrefixLengths, cidr6PrefixLengths []int
-	options                                *option.IntOptions
-	lxcMAC                                 mac.MAC
-	ifIndex                                int
+	identity               identity.NumericIdentity
+	mac                    mac.MAC
+	ipv4                   netip.Addr
+	ipv6                   netip.Addr
+	requireARPPassthrough  bool
+	requireEgressProg      bool
+	requireRouting         bool
+	requireEndpointRoute   bool
+	atHostNS               bool
+	policyVerdictLogFilter uint32
+	options                *option.IntOptions
+	lxcMAC                 mac.MAC
+	ifIndex                int
+	parentIfIndex          int
+	netNsCookie            uint64
 
 	// endpoint is used to get the endpoint's logger.
 	//
@@ -56,9 +55,22 @@ type epInfoCache struct {
 
 // Must be called when endpoint is still locked.
 func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
-	cidr6, cidr4 := e.GetCIDRPrefixLengths()
+	if e.isProperty(PropertyAtHostNS) {
+		return &epInfoCache{
+			revision: e.nextPolicyRevision,
 
-	ep := &epInfoCache{
+			id:       e.GetID(),
+			identity: e.getIdentity(),
+			ifIndex:  e.GetIfIndex(),
+			mac:      e.GetNodeMAC(),
+			ipv4:     e.IPv4Address(),
+			ipv6:     e.IPv6Address(),
+			atHostNS: true,
+
+			endpoint: e,
+		}
+	}
+	return &epInfoCache{
 		revision: e.nextPolicyRevision,
 
 		epdir:                  epdir,
@@ -68,26 +80,27 @@ func (e *Endpoint) createEpInfoCache(epdir string) *epInfoCache {
 		mac:                    e.GetNodeMAC(),
 		ipv4:                   e.IPv4Address(),
 		ipv6:                   e.IPv6Address(),
-		conntrackLocal:         e.ConntrackLocalLocked(),
 		requireARPPassthrough:  e.RequireARPPassthrough(),
 		requireEgressProg:      e.RequireEgressProg(),
 		requireRouting:         e.RequireRouting(),
 		requireEndpointRoute:   e.RequireEndpointRoute(),
-		disableSIPVerification: e.DisableSIPVerification(),
 		policyVerdictLogFilter: e.GetPolicyVerdictLogFilter(),
-		cidr4PrefixLengths:     cidr4,
-		cidr6PrefixLengths:     cidr6,
 		options:                e.Options.DeepCopy(),
 		lxcMAC:                 e.mac,
 		ifIndex:                e.ifIndex,
+		parentIfIndex:          e.parentIfIndex,
+		netNsCookie:            e.NetNsCookie,
 
 		endpoint: e,
 	}
-	return ep
 }
 
 func (ep *epInfoCache) GetIfIndex() int {
 	return ep.ifIndex
+}
+
+func (ep *epInfoCache) GetParentIfIndex() int {
+	return ep.parentIfIndex
 }
 
 func (ep *epInfoCache) LXCMac() mac.MAC {
@@ -107,7 +120,7 @@ func (ep *epInfoCache) GetID() uint64 {
 
 // StringID returns the endpoint's ID in a string.
 func (ep *epInfoCache) StringID() string {
-	return fmt.Sprintf("%d", ep.id)
+	return strconv.FormatUint(ep.id, 10)
 }
 
 // GetIdentity returns the security identity of the endpoint.
@@ -115,13 +128,13 @@ func (ep *epInfoCache) GetIdentity() identity.NumericIdentity {
 	return ep.identity
 }
 
-// GetIdentityLocked returns the security identity of the endpoint.
-func (ep *epInfoCache) GetIdentityLocked() identity.NumericIdentity {
-	return ep.identity
+// GetEndpointNetNsCookie returns the network namespace cookie for the endpoint
+func (ep *epInfoCache) GetEndpointNetNsCookie() uint64 {
+	return ep.netNsCookie
 }
 
 // Logger returns the logger for the endpoint that is being cached.
-func (ep *epInfoCache) Logger(subsystem string) *logrus.Entry {
+func (ep *epInfoCache) Logger(subsystem string) *slog.Logger {
 	return ep.endpoint.Logger(subsystem)
 }
 
@@ -138,14 +151,6 @@ func (ep *epInfoCache) IPv6Address() netip.Addr {
 // StateDir returns the directory for the endpoint's (next) state.
 func (ep *epInfoCache) StateDir() string    { return ep.epdir }
 func (ep *epInfoCache) GetNodeMAC() mac.MAC { return ep.mac }
-
-func (ep *epInfoCache) ConntrackLocalLocked() bool {
-	return ep.conntrackLocal
-}
-
-func (ep *epInfoCache) GetCIDRPrefixLengths() ([]int, []int) {
-	return ep.cidr6PrefixLengths, ep.cidr4PrefixLengths
-}
 
 func (ep *epInfoCache) GetOptions() *option.IntOptions {
 	return ep.options
@@ -174,16 +179,14 @@ func (ep *epInfoCache) RequireEndpointRoute() bool {
 	return ep.requireEndpointRoute
 }
 
-// DisableSIPVerification returns true if the endpoint wants to skip
-// srcIP verification
-func (ep *epInfoCache) DisableSIPVerification() bool {
-	return ep.disableSIPVerification
-}
-
 func (ep *epInfoCache) GetPolicyVerdictLogFilter() uint32 {
 	return ep.policyVerdictLogFilter
 }
 
 func (ep *epInfoCache) IsHost() bool {
 	return ep.endpoint.IsHost()
+}
+
+func (ep *epInfoCache) IsAtHostNS() bool {
+	return ep.atHostNS
 }

@@ -8,7 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -16,21 +17,12 @@ import (
 	k8sTesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/util/workqueue"
 
-	"github.com/cilium/cilium/pkg/checker"
 	"github.com/cilium/cilium/pkg/k8s"
 	slim_corev1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/api/core/v1"
 	slim_metav1 "github.com/cilium/cilium/pkg/k8s/slim/k8s/apis/meta/v1"
 	pkgOption "github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
 )
-
-func Test(t *testing.T) {
-	check.TestingT(t)
-}
-
-type NodeTaintSuite struct{}
-
-var _ = check.Suite(&NodeTaintSuite{})
 
 type fakeNodeGetter struct {
 	OnGetK8sSlimNode func(nodeName string) (*slim_corev1.Node, error)
@@ -47,7 +39,9 @@ func (f *fakeNodeGetter) ListK8sSlimNode() []*slim_corev1.Node {
 	panic("not implemented!")
 }
 
-func (n *NodeTaintSuite) TestNodeTaintWithoutCondition(c *check.C) {
+func TestNodeTaintWithoutCondition(t *testing.T) {
+	logger := hivetest.Logger(t)
+
 	mno = markNodeOptions{
 		RemoveNodeTaint:        true,
 		SetNodeTaint:           true,
@@ -90,16 +84,16 @@ func (n *NodeTaintSuite) TestNodeTaintWithoutCondition(c *check.C) {
 
 	// Add the cilium pod that is running on k8s1
 	err := ciliumPodsStore.Add(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
-	patchReceived := make(chan struct{})
+	patchReceived := make(chan struct{}, 1)
 
 	// Create a fake client to receive the patch from cilium-operator
 	fakeClient := &fake.Clientset{}
 	fakeClient.AddReactor("patch", "nodes", func(action k8sTesting.Action) (handled bool, ret runtime.Object, err error) {
 		// If we are updating the spec, the subresource should be empty.
 		// If we update the status the subresource is 'status'
-		c.Assert(action.GetSubresource(), check.Equals, "")
+		require.Empty(t, action.GetSubresource())
 
 		pa := action.(k8sTesting.PatchAction)
 		expectedJSONPatch := []k8s.JSONPatch{
@@ -126,8 +120,8 @@ func (n *NodeTaintSuite) TestNodeTaintWithoutCondition(c *check.C) {
 			},
 		}
 		expectedPatch, err := json.Marshal(expectedJSONPatch)
-		c.Assert(err, check.IsNil)
-		c.Assert(pa.GetPatch(), checker.DeepEquals, expectedPatch)
+		require.NoError(t, err)
+		require.Equal(t, expectedPatch, pa.GetPatch())
 
 		patchReceived <- struct{}{}
 		return true, nil, nil
@@ -135,20 +129,20 @@ func (n *NodeTaintSuite) TestNodeTaintWithoutCondition(c *check.C) {
 
 	fng := &fakeNodeGetter{
 		OnGetK8sSlimNode: func(nodeName string) (*slim_corev1.Node, error) {
-			c.Assert(nodeName, check.Equals, "k8s1")
+			require.Equal(t, "k8s1", nodeName)
 			return node1WithTaintWithoutCondition, nil
 		},
 	}
 
-	nodeQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "node-queue")
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
 
 	key, err := queueKeyFunc(node1WithTaintWithoutCondition)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	nodeQueue.Add(key)
 
-	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	err = testutils.WaitUntil(func() bool {
 		select {
@@ -158,31 +152,11 @@ func (n *NodeTaintSuite) TestNodeTaintWithoutCondition(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.IsNil, check.Commentf("Patch was never received by k8s fake client"))
-
-	// Test if we create the same patch if we receive an event from Cilium pods
-	ciliumPodQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "cilium-pod-queue")
-
-	key, err = queueKeyFunc(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
-
-	ciliumPodQueue.Add(key)
-
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
-
-	err = testutils.WaitUntil(func() bool {
-		select {
-		case <-patchReceived:
-			return true
-		default:
-			return false
-		}
-	}, 1*time.Second)
-	c.Assert(err, check.IsNil, check.Commentf("Patch was never received by k8s fake client"))
+	require.NoError(t, err, "Patch was never received by k8s fake client")
 }
 
-func (n *NodeTaintSuite) TestNodeCondition(c *check.C) {
+func TestNodeCondition(t *testing.T) {
+	logger := hivetest.Logger(t)
 	mno = markNodeOptions{
 		RemoveNodeTaint:        false,
 		SetNodeTaint:           false,
@@ -227,16 +201,16 @@ func (n *NodeTaintSuite) TestNodeCondition(c *check.C) {
 
 	// Add the cilium pod that is running on k8s1
 	err := ciliumPodsStore.Add(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
-	patchReceived := make(chan struct{})
+	patchReceived := make(chan struct{}, 1)
 
 	// Create a fake client to receive the patch from cilium-operator
 	fakeClient := &fake.Clientset{}
 	fakeClient.AddReactor("patch", "nodes", func(action k8sTesting.Action) (handled bool, ret runtime.Object, err error) {
 		// If we are updating the spec, the subresource should be empty.
 		// If we update the status the subresource is 'status'
-		c.Assert(action.GetSubresource(), check.Equals, "status")
+		require.Equal(t, "status", action.GetSubresource())
 
 		pa := action.(k8sTesting.PatchAction)
 		expectedPatch := map[string]map[string][]corev1.NodeCondition{
@@ -256,12 +230,12 @@ func (n *NodeTaintSuite) TestNodeCondition(c *check.C) {
 		}
 		var receivedPatch map[string]map[string][]corev1.NodeCondition
 		err = json.Unmarshal(pa.GetPatch(), &receivedPatch)
-		c.Assert(err, check.IsNil)
+		require.NoError(t, err)
 
 		receivedPatch["status"]["conditions"][0].LastTransitionTime = metav1.NewTime(time.Time{})
 		receivedPatch["status"]["conditions"][0].LastHeartbeatTime = metav1.NewTime(time.Time{})
 
-		c.Assert(receivedPatch, checker.DeepEquals, expectedPatch)
+		require.Equal(t, expectedPatch, receivedPatch)
 
 		patchReceived <- struct{}{}
 		return true, nil, nil
@@ -269,20 +243,20 @@ func (n *NodeTaintSuite) TestNodeCondition(c *check.C) {
 
 	fng := &fakeNodeGetter{
 		OnGetK8sSlimNode: func(nodeName string) (*slim_corev1.Node, error) {
-			c.Assert(nodeName, check.Equals, "k8s1")
+			require.Equal(t, "k8s1", nodeName)
 			return node1WithTaintWithoutCondition, nil
 		},
 	}
 
-	nodeQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "node-queue")
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
 
 	key, err := queueKeyFunc(node1WithTaintWithoutCondition)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	nodeQueue.Add(key)
 
-	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	err = testutils.WaitUntil(func() bool {
 		select {
@@ -292,31 +266,51 @@ func (n *NodeTaintSuite) TestNodeCondition(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.IsNil, check.Commentf("Patch was never received by k8s fake client"))
-
-	// Test if we create the same patch if we receive an event from Cilium pods
-	ciliumPodQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "cilium-pod-queue")
-
-	key, err = queueKeyFunc(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
-
-	ciliumPodQueue.Add(key)
-
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
-
-	err = testutils.WaitUntil(func() bool {
-		select {
-		case <-patchReceived:
-			return true
-		default:
-			return false
-		}
-	}, 1*time.Second)
-	c.Assert(err, check.IsNil, check.Commentf("Patch was never received by k8s fake client"))
+	require.NoError(t, err, "Patch was never received by k8s fake client")
 }
 
-func (n *NodeTaintSuite) TestNodeConditionIfCiliumIsNotReady(c *check.C) {
+func TestCiliumPodHandler(t *testing.T) {
+	logger := hivetest.Logger(t)
+	mno = markNodeOptions{
+		RemoveNodeTaint:        false,
+		SetNodeTaint:           false,
+		SetCiliumIsUpCondition: true,
+	}
+
+	ciliumPodOnNode := &slim_corev1.Pod{
+		Spec: slim_corev1.PodSpec{
+			NodeName: "k8s1",
+		},
+	}
+
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
+	ciliumPodHandler(ciliumPodOnNode, nodeQueue, logger)
+	require.Equal(t, 1, nodeQueue.Len())
+
+	key, quit := nodeQueue.Get()
+	require.False(t, quit, "NodeQueue should not be closed")
+	require.Equal(t, "k8s1", key)
+	nodeQueue.Forget(key)
+	nodeQueue.Done(key)
+}
+
+func TestCiliumPodHandlerSkipsUnscheduledPods(t *testing.T) {
+	logger := hivetest.Logger(t)
+	mno = markNodeOptions{
+		RemoveNodeTaint:        false,
+		SetNodeTaint:           false,
+		SetCiliumIsUpCondition: true,
+	}
+
+	ciliumPodOnNode := &slim_corev1.Pod{}
+
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
+	ciliumPodHandler(ciliumPodOnNode, nodeQueue, logger)
+	require.Equal(t, 0, nodeQueue.Len())
+}
+
+func TestNodeConditionIfCiliumIsNotReady(t *testing.T) {
+	logger := hivetest.Logger(t)
 	mno = markNodeOptions{
 		RemoveNodeTaint:        true,
 		SetNodeTaint:           true,
@@ -363,9 +357,9 @@ func (n *NodeTaintSuite) TestNodeConditionIfCiliumIsNotReady(c *check.C) {
 
 	// Add the cilium pod that is running on k8s1
 	err := ciliumPodsStore.Add(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
-	patchReceived := make(chan struct{})
+	patchReceived := make(chan struct{}, 1)
 
 	// Create a fake client to receive the patch from cilium-operator
 	fakeClient := &fake.Clientset{}
@@ -376,20 +370,20 @@ func (n *NodeTaintSuite) TestNodeConditionIfCiliumIsNotReady(c *check.C) {
 
 	fng := &fakeNodeGetter{
 		OnGetK8sSlimNode: func(nodeName string) (*slim_corev1.Node, error) {
-			c.Assert(nodeName, check.Equals, "k8s1")
+			require.Equal(t, "k8s1", nodeName)
 			return node1WithTaintWithoutCondition, nil
 		},
 	}
 
-	nodeQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "node-queue")
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
 
 	key, err := queueKeyFunc(node1WithTaintWithoutCondition)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	nodeQueue.Add(key)
 
-	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	err = testutils.WaitUntil(func() bool {
 		select {
@@ -399,31 +393,12 @@ func (n *NodeTaintSuite) TestNodeConditionIfCiliumIsNotReady(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("Something was sent to kube-apiserver and it shouldn't have been"))
-
-	// Test if we create the same patch if we receive an event from Cilium pods
-	ciliumPodQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "cilium-pod-queue")
-
-	key, err = queueKeyFunc(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
-
-	ciliumPodQueue.Add(key)
-
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
-
-	err = testutils.WaitUntil(func() bool {
-		select {
-		case <-patchReceived:
-			return true
-		default:
-			return false
-		}
-	}, 1*time.Second)
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("Something was sent to kube-apiserver and it shouldn't have been"))
+	require.Error(t, err, "Something was sent to kube-apiserver and it shouldn't have been")
 }
 
-func (n *NodeTaintSuite) TestNodeConditionIfCiliumAndNodeAreReady(c *check.C) {
+func TestNodeConditionIfCiliumAndNodeAreReady(t *testing.T) {
+	logger := hivetest.Logger(t)
+
 	mno = markNodeOptions{
 		RemoveNodeTaint:        true,
 		SetCiliumIsUpCondition: true,
@@ -470,9 +445,9 @@ func (n *NodeTaintSuite) TestNodeConditionIfCiliumAndNodeAreReady(c *check.C) {
 
 	// Add the cilium pod that is running on k8s1
 	err := ciliumPodsStore.Add(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
-	patchReceived := make(chan struct{})
+	patchReceived := make(chan struct{}, 1)
 
 	// Create a fake client to receive the patch from cilium-operator
 	fakeClient := &fake.Clientset{}
@@ -483,20 +458,20 @@ func (n *NodeTaintSuite) TestNodeConditionIfCiliumAndNodeAreReady(c *check.C) {
 
 	fng := &fakeNodeGetter{
 		OnGetK8sSlimNode: func(nodeName string) (*slim_corev1.Node, error) {
-			c.Assert(nodeName, check.Equals, "k8s1")
+			require.Equal(t, "k8s1", nodeName)
 			return node1WithTaintWithoutCondition, nil
 		},
 	}
 
-	nodeQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "node-queue")
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
 
 	key, err := queueKeyFunc(node1WithTaintWithoutCondition)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	nodeQueue.Add(key)
 
-	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	err = testutils.WaitUntil(func() bool {
 		select {
@@ -506,33 +481,14 @@ func (n *NodeTaintSuite) TestNodeConditionIfCiliumAndNodeAreReady(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("Something was sent to kube-apiserver and it shouldn't have been since the node is ready and it does not have a taint set"))
-
-	// Test if we don't send any patch because the node and cilium pods are ready
-	ciliumPodQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "cilium-pod-queue")
-
-	key, err = queueKeyFunc(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
-
-	ciliumPodQueue.Add(key)
-
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
-
-	err = testutils.WaitUntil(func() bool {
-		select {
-		case <-patchReceived:
-			return true
-		default:
-			return false
-		}
-	}, 1*time.Second)
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("Something was sent to kube-apiserver and it shouldn't have been since the node is ready and it does not have a taint set"))
+	require.Error(t, err, "Something was sent to kube-apiserver and it shouldn't have been")
 }
 
 // TestTaintNodeCiliumDown checks that taints are correctly managed on nodes as Cilium
 // pods go up and down.
-func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
+func TestTaintNodeCiliumDown(t *testing.T) {
+	logger := hivetest.Logger(t)
+
 	mno = markNodeOptions{
 		RemoveNodeTaint:        true,
 		SetCiliumIsUpCondition: false,
@@ -570,18 +526,18 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 
 	// Add the cilium pod that is running on k8s1
 	err := ciliumPodsStore.Add(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	// Create a fake client to receive the patch from cilium-operator
 	fakeClient := &fake.Clientset{}
 
-	patchReceived := make(chan bool)
+	patchReceived := make(chan bool, 1)
 	// emit a true on the patchReceived chan if a patch comes where the taint is set
 	// false if the taint is not set
 	fakeClient.AddReactor("patch", "nodes", func(action k8sTesting.Action) (handled bool, ret runtime.Object, err error) {
 		// If we are updating the spec, the subresource should be empty.
 		// If we update the status the subresource is 'status'
-		c.Assert(action.GetSubresource(), check.Equals, "")
+		require.Empty(t, action.GetSubresource())
 
 		pa := action.(k8sTesting.PatchAction)
 
@@ -591,12 +547,12 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 			Value []slim_corev1.Taint `json:"value"`
 		}{}
 		err = json.Unmarshal(pa.GetPatch(), &patches)
-		c.Assert(err, check.IsNil)
-		c.Assert(patches, check.HasLen, 2)
+		require.NoError(t, err)
+		require.Len(t, patches, 2)
 
 		patch := patches[1]
-		c.Assert(patch.OP, check.Equals, "replace")
-		c.Assert(patch.Path, check.Equals, "/spec/taints")
+		require.Equal(t, "replace", patch.OP)
+		require.Equal(t, "/spec/taints", patch.Path)
 
 		// Check to see if our taint is included
 		for _, taint := range patch.Value {
@@ -612,21 +568,20 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 
 	fng := &fakeNodeGetter{
 		OnGetK8sSlimNode: func(nodeName string) (*slim_corev1.Node, error) {
-			c.Assert(nodeName, check.Equals, "k8s1")
+			require.Equal(t, "k8s1", nodeName)
 			return node1, nil
 		},
 	}
 
-	ciliumPodQueue := workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "cilium-pod-queue")
+	nodeQueue := workqueue.NewTypedRateLimitingQueue[string](workqueue.DefaultTypedControllerRateLimiter[string]())
 
-	// Trigger the watcher with
-	// - node taint: not set
-	// - pod: scheduled, not ready
-	key, err := queueKeyFunc(ciliumPodOnNode1)
-	c.Assert(err, check.IsNil)
-	ciliumPodQueue.Add(key)
-	continueProcess := processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	key, err := queueKeyFunc(node1)
+	require.NoError(t, err)
+
+	nodeQueue.Add(key)
+
+	continueProcess := checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	// Ensure taint was set
 	taintSet := false
@@ -639,8 +594,8 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.IsNil)
-	c.Assert(taintSet, check.Equals, true, check.Commentf("NotReady Pod should cause node taint to be set"))
+	require.NoError(t, err)
+	require.True(t, taintSet, "NotReady Pod should cause node taint to be set")
 
 	node1.Spec.Taints = []slim_corev1.Taint{
 		{
@@ -652,9 +607,9 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 	}
 
 	// Re-trigger pod; ensure no patch is received,
-	ciliumPodQueue.Add(key)
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	nodeQueue.Add(key)
+	continueProcess = checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	err = testutils.WaitUntil(func() bool {
 		select {
@@ -664,13 +619,13 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("no patch should have been received; code should short-circuit"))
+	require.Error(t, err, "no patch should have been received; code should short-circuit")
 
 	// Set pod to Ready, ensure taint is removed
 	ciliumPodOnNode1.Status.Conditions[0].Status = slim_corev1.ConditionTrue
-	ciliumPodQueue.Add(key)
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	nodeQueue.Add(key)
+	continueProcess = checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 	err = testutils.WaitUntil(func() bool {
 		select {
 		case p := <-patchReceived:
@@ -680,14 +635,14 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.IsNil)
-	c.Assert(taintSet, check.Equals, false, check.Commentf("Ready Pod should cause node taint to be removed"))
+	require.NoError(t, err)
+	require.False(t, taintSet, "Ready Pod should cause node taint to be removed")
 
 	// Re-trigger pod; ensure no patch is received,
 	node1.Spec.Taints = []slim_corev1.Taint{node1.Spec.Taints[1]}
-	ciliumPodQueue.Add(key)
-	continueProcess = processNextCiliumPodItem(fakeClient, fng, ciliumPodQueue)
-	c.Assert(continueProcess, check.Equals, true)
+	nodeQueue.Add(key)
+	continueProcess = checkTaintForNextNodeItem(fakeClient, fng, nodeQueue, logger)
+	require.True(t, continueProcess)
 
 	err = testutils.WaitUntil(func() bool {
 		select {
@@ -697,5 +652,5 @@ func (n *NodeTaintSuite) TestTaintNodeCiliumDown(c *check.C) {
 			return false
 		}
 	}, 1*time.Second)
-	c.Assert(err, check.Not(check.IsNil), check.Commentf("no patch should have been received; code should short-circuit"))
+	require.Error(t, err, "no patch should have been received; code should short-circuit")
 }

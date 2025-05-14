@@ -78,6 +78,7 @@ type CreateCommandRequest struct {
 	Type                 string                    `position:"Query" name:"Type"`
 	CommandContent       string                    `position:"Query" name:"CommandContent"`
 	Timeout              requests.Integer          `position:"Query" name:"Timeout"`
+	ResourceGroupId      string                    `position:"Query" name:"ResourceGroupId"`
 	ContentEncoding      string                    `position:"Query" name:"ContentEncoding"`
 	Tag                  *[]CreateCommandTag       `position:"Query" name:"Tag"  type:"Repeated"`
 	ResourceOwnerAccount string                    `position:"Query" name:"ResourceOwnerAccount"`
@@ -85,6 +86,7 @@ type CreateCommandRequest struct {
 	OwnerId              requests.Integer          `position:"Query" name:"OwnerId"`
 	Name                 string                    `position:"Query" name:"Name"`
 	EnableParameter      requests.Boolean          `position:"Query" name:"EnableParameter"`
+	Launcher             string                    `position:"Query" name:"Launcher"`
 }
 
 // CreateCommandSystemTag is a repeated param struct in CreateCommandRequest

@@ -1,11 +1,40 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_PCAP_H_
-#define __LIB_PCAP_H_
+#pragma once
 
 #include <bpf/ctx/ctx.h>
 #include <bpf/api.h>
+
+struct capture_rule {
+	__u16 rule_id;
+	__u16 reserved;
+	__u32 cap_len;
+};
+
+/* 5-tuple wildcard key / mask. */
+struct capture4_wcard {
+	__be32 saddr;   /* masking: prefix */
+	__be32 daddr;   /* masking: prefix */
+	__be16 sport;   /* masking: 0 or 0xffff */
+	__be16 dport;   /* masking: 0 or 0xffff */
+	__u8   nexthdr; /* masking: 0 or 0xff */
+	__u8   smask;   /* prefix len: saddr */
+	__u8   dmask;   /* prefix len: daddr */
+	__u8   flags;   /* reserved: 0 */
+};
+
+/* 5-tuple wildcard key / mask. */
+struct capture6_wcard {
+	union v6addr saddr; /* masking: prefix */
+	union v6addr daddr; /* masking: prefix */
+	__be16 sport;       /* masking: 0 or 0xffff */
+	__be16 dport;       /* masking: 0 or 0xffff */
+	__u8   nexthdr;     /* masking: 0 or 0xff */
+	__u8   smask;       /* prefix len: saddr */
+	__u8   dmask;       /* prefix len: daddr */
+	__u8   flags;       /* reserved: 0 */
+};
 
 #ifdef ENABLE_CAPTURE
 #include "common.h"
@@ -65,12 +94,12 @@ static __always_inline void cilium_capture(struct __ctx_buff *ctx,
 			.to	= {
 				.tv_boot = tstamp,
 			},
-			.caplen	= cap_len,
-			.len	= ctx_len,
+			.caplen	= (__u32)cap_len,
+			.len	= (__u32)ctx_len,
 		},
 	};
 
-	ctx_event_output(ctx, &EVENTS_MAP, (cap_len << 32) | BPF_F_CURRENT_CPU,
+	ctx_event_output(ctx, &cilium_events, (cap_len << 32) | BPF_F_CURRENT_CPU,
 			 &msg, sizeof(msg));
 }
 
@@ -98,7 +127,7 @@ static __always_inline void __cilium_capture_out(struct __ctx_buff *ctx,
  * below is a fallback definition for when the templating var is not defined.
  */
 #ifndef capture_enabled
-# define capture_enabled (__ctx_is == __ctx_xdp)
+# define capture_enabled (ctx_is_xdp())
 #endif /* capture_enabled */
 
 struct capture_cache {
@@ -115,36 +144,6 @@ struct {
 	__uint(max_entries, 1);
 } cilium_capture_cache __section_maps_btf;
 
-struct capture_rule {
-	__u16 rule_id;
-	__u16 reserved;
-	__u32 cap_len;
-};
-
-/* 5-tuple wildcard key / mask. */
-struct capture4_wcard {
-	__be32 saddr;   /* masking: prefix */
-	__be32 daddr;   /* masking: prefix */
-	__be16 sport;   /* masking: 0 or 0xffff */
-	__be16 dport;   /* masking: 0 or 0xffff */
-	__u8   nexthdr; /* masking: 0 or 0xff */
-	__u8   smask;   /* prefix len: saddr */
-	__u8   dmask;   /* prefix len: daddr */
-	__u8   flags;   /* reserved: 0 */
-};
-
-/* 5-tuple wildcard key / mask. */
-struct capture6_wcard {
-	union v6addr saddr; /* masking: prefix */
-	union v6addr daddr; /* masking: prefix */
-	__be16 sport;       /* masking: 0 or 0xffff */
-	__be16 dport;       /* masking: 0 or 0xffff */
-	__u8   nexthdr;     /* masking: 0 or 0xff */
-	__u8   smask;       /* prefix len: saddr */
-	__u8   dmask;       /* prefix len: daddr */
-	__u8   flags;       /* reserved: 0 */
-};
-
 #ifdef ENABLE_IPV4
 struct {
 	__uint(type, BPF_MAP_TYPE_HASH);
@@ -153,7 +152,7 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(max_entries, CAPTURE4_SIZE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} CAPTURE4_RULES __section_maps_btf;
+} cilium_capture4_rules __section_maps_btf;
 
 static __always_inline void
 cilium_capture4_masked_key(const struct capture4_wcard *orig,
@@ -238,8 +237,7 @@ cilium_capture4_classify_wcard(struct __ctx_buff *ctx)
 	if (ip4->protocol != IPPROTO_TCP &&
 	    ip4->protocol != IPPROTO_UDP)
 		return NULL;
-	if (ctx_load_bytes(ctx, ETH_HLEN + ipv4_hdrlen(ip4),
-			   &okey.sport, 4) < 0)
+	if (l4_load_ports(ctx, ETH_HLEN + ipv4_hdrlen(ip4), &okey.sport) < 0)
 		return NULL;
 
 	okey.flags = 0;
@@ -248,7 +246,7 @@ cilium_capture4_classify_wcard(struct __ctx_buff *ctx)
 _Pragma("unroll")
 	for (i = 0; i < size; i++) {
 		cilium_capture4_masked_key(&okey, &prefix_masks[i], &lkey);
-		match = map_lookup_elem(&CAPTURE4_RULES, &lkey);
+		match = map_lookup_elem(&cilium_capture4_rules, &lkey);
 		if (match)
 			return match;
 	}
@@ -265,7 +263,7 @@ struct {
 	__uint(pinning, LIBBPF_PIN_BY_NAME);
 	__uint(max_entries, CAPTURE6_SIZE);
 	__uint(map_flags, BPF_F_NO_PREALLOC);
-} CAPTURE6_RULES __section_maps_btf;
+} cilium_capture6_rules __section_maps_btf;
 
 static __always_inline void
 cilium_capture6_masked_key(const struct capture6_wcard *orig,
@@ -363,8 +361,7 @@ cilium_capture6_classify_wcard(struct __ctx_buff *ctx)
 	if (okey.nexthdr != IPPROTO_TCP &&
 	    okey.nexthdr != IPPROTO_UDP)
 		return NULL;
-	if (ctx_load_bytes(ctx, l3_off + ret,
-			   &okey.sport, 4) < 0)
+	if (l4_load_ports(ctx, l3_off + ret, &okey.sport) < 0)
 		return NULL;
 
 	okey.flags = 0;
@@ -373,7 +370,7 @@ cilium_capture6_classify_wcard(struct __ctx_buff *ctx)
 _Pragma("unroll")
 	for (i = 0; i < size; i++) {
 		cilium_capture6_masked_key(&okey, &prefix_masks[i], &lkey);
-		match = map_lookup_elem(&CAPTURE6_RULES, &lkey);
+		match = map_lookup_elem(&cilium_capture6_rules, &lkey);
 		if (match)
 			return match;
 	}
@@ -491,4 +488,3 @@ cilium_capture_out(struct __ctx_buff *ctx __maybe_unused)
 }
 
 #endif /* ENABLE_CAPTURE */
-#endif /* __LIB_PCAP_H_ */

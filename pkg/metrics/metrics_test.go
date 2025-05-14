@@ -4,10 +4,14 @@
 package metrics
 
 import (
-	. "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/cilium/cilium/pkg/option"
 )
 
-func (s *MetricsSuite) TestGaugeWithThreshold(c *C) {
+func TestGaugeWithThreshold(t *testing.T) {
 	threshold := 1.0
 	underThreshold := threshold - 0.5
 	overThreshold := threshold + 0.5
@@ -21,37 +25,41 @@ func (s *MetricsSuite) TestGaugeWithThreshold(c *C) {
 		threshold,
 	)
 
-	metrics, err := registry.Gather()
-	c.Assert(err, IsNil)
+	reg := NewRegistry(RegistryParams{
+		DaemonConfig: &option.DaemonConfig{},
+	})
+
+	metrics, err := reg.inner.Gather()
+	require.NoError(t, err)
 	initMetricLen := len(metrics)
 
 	gauge.Set(underThreshold)
-	metrics, err = registry.Gather()
-	c.Assert(err, IsNil)
-	c.Assert(metrics, HasLen, initMetricLen)
-	c.Assert(GetGaugeValue(gauge.gauge), Equals, underThreshold)
+	metrics, err = reg.inner.Gather()
+	require.NoError(t, err)
+	require.Len(t, metrics, initMetricLen)
+	require.Equal(t, underThreshold, GetGaugeValue(gauge.gauge))
 
 	gauge.Set(overThreshold)
-	metrics, err = registry.Gather()
-	c.Assert(err, IsNil)
-	c.Assert(metrics, HasLen, initMetricLen+1)
-	c.Assert(GetGaugeValue(gauge.gauge), Equals, overThreshold)
+	metrics, err = reg.inner.Gather()
+	require.NoError(t, err)
+	require.Len(t, metrics, initMetricLen+1)
+	require.Equal(t, overThreshold, GetGaugeValue(gauge.gauge))
 
 	gauge.Set(threshold)
-	metrics, err = registry.Gather()
-	c.Assert(err, IsNil)
-	c.Assert(metrics, HasLen, initMetricLen)
-	c.Assert(GetGaugeValue(gauge.gauge), Equals, threshold)
+	metrics, err = reg.inner.Gather()
+	require.NoError(t, err)
+	require.Len(t, metrics, initMetricLen)
+	require.Equal(t, threshold, GetGaugeValue(gauge.gauge))
 
 	gauge.Set(overThreshold)
-	metrics, err = registry.Gather()
-	c.Assert(err, IsNil)
-	c.Assert(metrics, HasLen, initMetricLen+1)
-	c.Assert(GetGaugeValue(gauge.gauge), Equals, overThreshold)
+	metrics, err = reg.inner.Gather()
+	require.NoError(t, err)
+	require.Len(t, metrics, initMetricLen+1)
+	require.Equal(t, overThreshold, GetGaugeValue(gauge.gauge))
 
 	gauge.Set(underThreshold)
-	metrics, err = registry.Gather()
-	c.Assert(err, IsNil)
-	c.Assert(metrics, HasLen, initMetricLen)
-	c.Assert(GetGaugeValue(gauge.gauge), Equals, underThreshold)
+	metrics, err = reg.inner.Gather()
+	require.NoError(t, err)
+	require.Len(t, metrics, initMetricLen)
+	require.Equal(t, underThreshold, GetGaugeValue(gauge.gauge))
 }

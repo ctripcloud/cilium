@@ -25,14 +25,14 @@ import (
 var _ = SkipDescribeIf(func() bool {
 	// right now, the 5.4 job is the fastest, so use only that
 	// but only if we're on jenkins
-	return helpers.DoesNotRunOn54Kernel() && helpers.RunsOnJenkins()
+	return helpers.DoesNotRunOn54Kernel()
 }, "K8sAgentPerNodeConfigTest", func() {
 	var (
 		kubectl *helpers.Kubectl
 
 		ciliumFilename string
 	)
-	BeforeAll(func() {
+	BeforeEach(func() {
 		kubectl = helpers.CreateKubectl(helpers.K8s1VMName(), logger)
 
 		res := kubectl.ExecShort("kubectl label --overwrite --all node io.cilium.testing-")
@@ -42,14 +42,18 @@ var _ = SkipDescribeIf(func() bool {
 		RedeployCilium(kubectl, ciliumFilename, map[string]string{})
 	})
 
-	AfterAll(func() {
+	AfterEach(func() {
 		res := kubectl.ExecShort("kubectl label --overwrite --all node io.cilium.testing-")
 		Expect(res.GetErr("unlabel node")).To(BeNil())
 		UninstallCiliumFromManifest(kubectl, ciliumFilename)
 		kubectl.CloseSSHClient()
 	})
 
-	It("Correctly computes config overrides", func() {
+	JustAfterEach(func() {
+		kubectl.CollectFeatures()
+	})
+
+	It("Correctly computes config overrides with CNC v2", func() {
 		pods, err := kubectl.GetPodsNodes(helpers.CiliumNamespace, helpers.CiliumSelector)
 		Expect(err).To(BeNil(), "error finding cilium pods")
 
@@ -86,20 +90,20 @@ var _ = SkipDescribeIf(func() bool {
 			return out
 		}
 
-		By("Creating a CiliumNodeConfig")
+		By("Creating a CiliumNodeConfig v2")
 		// Create a CiliumNodeConfig that does not apply to any nodes
 		cnc := `
-apiVersion: cilium.io/v2alpha1
+apiVersion: cilium.io/v2
 kind: CiliumNodeConfig
 metadata:
   namespace: kube-system
-  name: testing
+  name: testing-v2
 spec:
   nodeSelector:
     matchLabels:
-      io.cilium.testing: foo
+      io.cilium.testing: bar
   defaults:
-    test-key: foo
+    test-key: bar
 `
 		f, err := os.CreateTemp("", "pernodeconfig-")
 		Expect(err).Should(BeNil())
@@ -121,19 +125,18 @@ spec:
 		Expect(nodeConfigKeys).To(HaveEach("")) //ensure that all elements are ""
 
 		// Now, label 1 node and check the only it gets this config key
-		By("Labeling node %s with io.cilium.testing=foo", nodeName)
-		res = kubectl.ExecShort(fmt.Sprintf("kubectl label node %s io.cilium.testing=foo", nodeName))
+		By("Labeling node %s with io.cilium.testing=bar", nodeName)
+		res = kubectl.ExecShort(fmt.Sprintf("kubectl label node %s io.cilium.testing=bar", nodeName))
 		Expect(res.GetErr("label node")).To(BeNil())
 		recreatePods()
 		By("Ensuring only node %s has the config override", nodeName)
 		nodeConfigKeys = getNodeConfigKeys("test-key")
 		// ensure it is zero
-		Expect(nodeConfigKeys).To(HaveKeyWithValue(nodeName, "foo"))
+		Expect(nodeConfigKeys).To(HaveKeyWithValue(nodeName, "bar"))
 		// If there are other nodes, make sure it doesn't have the config key
 		if len(nodeConfigKeys) > 1 {
 			delete(nodeConfigKeys, nodeName)
 			Expect(nodeConfigKeys).To(HaveEach(""))
 		}
-
 	})
 })

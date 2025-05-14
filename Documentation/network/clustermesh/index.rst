@@ -17,6 +17,9 @@ Multi-cluster Networking
    intro
    clustermesh
    services
+   mcsapi
    policy
    affinity
    aks-clustermesh-prep
+   eks-clustermesh-prep
+   gke-clustermesh-prep

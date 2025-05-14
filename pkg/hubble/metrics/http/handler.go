@@ -5,14 +5,20 @@ package http
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
 	"strconv"
-	"time"
+	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"google.golang.org/protobuf/types/known/timestamppb"
 
 	flowpb "github.com/cilium/cilium/api/v1/flow"
+	v1 "github.com/cilium/cilium/pkg/hubble/api/v1"
+	"github.com/cilium/cilium/pkg/hubble/filters"
 	"github.com/cilium/cilium/pkg/hubble/metrics/api"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type httpHandler struct {
@@ -20,20 +26,32 @@ type httpHandler struct {
 	responses *prometheus.CounterVec
 	duration  *prometheus.HistogramVec
 	context   *api.ContextOptions
+	AllowList filters.FilterFuncs
+	DenyList  filters.FilterFuncs
 	useV2     bool
 	exemplars bool
 
 	registeredMetrics []*prometheus.MetricVec
 }
 
-func (h *httpHandler) Init(registry *prometheus.Registry, options api.Options) error {
-	c, err := api.ParseContextOptions(options)
+func (h *httpHandler) Init(registry *prometheus.Registry, options *api.MetricConfig) error {
+	c, err := api.ParseContextOptions(options.ContextOptionConfigs)
 	if err != nil {
 		return err
 	}
 	h.context = c
-	if exemplars, ok := options["exemplars"]; ok && exemplars == "true" {
-		h.exemplars = true
+	err = h.HandleConfigurationUpdate(options)
+	if err != nil {
+		return err
+	}
+
+	for _, opt := range options.ContextOptionConfigs {
+		if strings.ToLower(opt.Name) == "exemplars" {
+			if len(opt.Values) >= 1 && opt.Values[0] == "true" {
+				h.exemplars = true
+			}
+			break
+		}
 	}
 
 	if h.useV2 {
@@ -126,6 +144,10 @@ func (h *httpHandler) processMetricsV2(flow *flowpb.Flow) error {
 	reporter := h.reporter(flow)
 	traceID := h.traceID(flow)
 
+	if !filters.Apply(h.AllowList, h.DenyList, &v1.Event{Event: flow, Timestamp: &timestamppb.Timestamp{}}) {
+		return nil
+	}
+
 	labelValues, err := h.context.GetLabelValuesInvertSourceDestination(flow)
 	if err != nil {
 		return err
@@ -152,6 +174,10 @@ func (h *httpHandler) processMetricsV1(flow *flowpb.Flow) error {
 	}
 	reporter := h.reporter(flow)
 	traceID := h.traceID(flow)
+
+	if !filters.Apply(h.AllowList, h.DenyList, &v1.Event{Event: flow, Timestamp: &timestamppb.Timestamp{}}) {
+		return nil
+	}
 
 	labelValues, err := h.context.GetLabelValues(flow)
 	if err != nil {
@@ -188,4 +214,38 @@ func observerObserve(o prometheus.Observer, value float64, traceID string) {
 	} else {
 		o.Observe(value)
 	}
+}
+
+func (h *httpHandler) Deinit(registry *prometheus.Registry) error {
+	var errs error
+
+	if !registry.Unregister(h.requests) {
+		errs = errors.Join(errs, fmt.Errorf("failed to unregister metric: %v,", "http_requests_total"))
+	}
+	if !h.useV2 {
+		if !registry.Unregister(h.responses) {
+			errs = errors.Join(errs, fmt.Errorf("failed to unregister metric: %v,", "http_responses_total"))
+		}
+	}
+	if !registry.Unregister(h.duration) {
+		errs = errors.Join(errs, fmt.Errorf("failed to unregister metric: %v,", "http_request_duration_seconds"))
+	}
+	return errs
+}
+
+func (h *httpHandler) HandleConfigurationUpdate(cfg *api.MetricConfig) error {
+	return h.SetFilters(cfg)
+}
+
+func (h *httpHandler) SetFilters(cfg *api.MetricConfig) error {
+	var err error
+	h.AllowList, err = filters.BuildFilterList(context.Background(), cfg.IncludeFilters, filters.DefaultFilters(slog.Default()))
+	if err != nil {
+		return err
+	}
+	h.DenyList, err = filters.BuildFilterList(context.Background(), cfg.ExcludeFilters, filters.DefaultFilters(slog.Default()))
+	if err != nil {
+		return err
+	}
+	return nil
 }

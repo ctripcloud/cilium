@@ -310,13 +310,26 @@ calculation is performed:
 
 .. code-block:: go
 
-     spec.ipam.pre-allocate - (len(spec.ipam.available) - len(status.ipam.used))
+     availableIPs := len(spec.ipam.pool)
+     neededIPs = max(spec.ipam.pre-allocate - (availableIPs - len(status.ipam.used)), spec.ipam.min-allocate - availableIPs)
+     if spec.ipam.max-allocate > 0 {
+      neededIPs = min(max(spec.ipam.max-allocate - availableIPs, 0), neededIPs)
+     }
 
 For excess IP calculation:
 
 .. code-block:: go
 
-     (len(spec.ipam.available) - len(status.ipam.used)) - (spec.ipam.pre-allocate + spec.ipam.max-above-watermark)
+     availableIPs := len(spec.ipam.pool)
+     upperBound := spec.ipam.min-allocate + spec.ipam.max-above-watermark
+     switch {
+     case availableIPs <= upperBound:
+       excessIPs = 0
+     case len(status.ipam.used) <= upperBound && len(status.ipam.used) + spec.ipam.pre-allocate <= upperBound:
+       excessIPs = availableIPs - upperBound
+     default:
+       excessIPs = max(availableIPs - len(status.ipam.used) - upperBound, 0)
+     }
 
 Upon detection of a deficit, the node is added to the list of nodes which
 require IP address allocation. When a deficit is detected using the interval
@@ -415,8 +428,13 @@ is selected.
 If neither ``subnet-ids`` nor ``subnet-tags`` are set, the operator consults
 ``spec.eni.node-subnet-id``, attempting to create the ENI in the same subnet as
 the primary ENI of the instance. If this is not possible (e.g. if there are not
-enough IPs in said subnet), the operator falls back to allocating the IP in the
-largest subnet matching VPC and Availability Zone.
+enough IPs in said subnet), the operator will look for the subnet in the same 
+route table with the node's subnet. If it's not possible, falls back to allocating 
+the IP in the largest subnet matching VPC and Availability Zone.
+
+After selecting the subnet, operator will check selected subnets is in the same 
+route table with the node's subnet. It will generate the warning log if there is 
+mismatch to prevent the unexpected routing behavior.
 
 After selecting the subnet, the interface index is determined. For this purpose,
 all existing ENIs are scanned and the first unused index greater than
@@ -473,6 +491,7 @@ perform ENI creation and IP allocation:
  * ``DescribeNetworkInterfaces``
  * ``DescribeSubnets``
  * ``DescribeVpcs``
+ * ``DescribeRouteTables``
  * ``DescribeSecurityGroups``
  * ``CreateNetworkInterface``
  * ``AttachNetworkInterface``
@@ -496,17 +515,12 @@ If ``--instance-tags-filter`` is used:
 EC2 instance types ENI limits
 *****************************
 
-Currently the EC2 Instance ENI limits (adapters per instance + IPv4/IPv6 IPs per adapter) are
-hardcoded in the Cilium codebase for easy out-of-the box deployment and usage.
+The EC2 Instance ENI limits is only fetched from the EC2 API dynamically from 1.18 onwards.
 
-The limits can be modified via the ``--aws-instance-limit-mapping`` CLI flag on
-the cilium-operator. This allows the user to supply a custom limit.
+This requires the EC2 having ``DescribeInstanceTypes`` IAM permission, which is included in the EKS built-in policy ``AmazonEKSWorkerNodePolicy``.
+you can find more details at `AmazonEKSWorkerNodePolicy <https://docs.aws.amazon.com/aws-managed-policy/latest/reference/AmazonEKSWorkerNodePolicy.html>`__.
 
-Additionally the limits can be updated via the EC2 API by passing the
-``--update-ec2-adapter-limit-via-api`` CLI flag.
-This will require an additional EC2 IAM permission:
 
- * ``DescribeInstanceTypes``
 
 *******
 Metrics

@@ -26,6 +26,8 @@ var errors = map[uint8]string{
 	9:   "Fragmented packet",
 	10:  "Fragmented packet entry update failed",
 	11:  "Missed tail call to custom program",
+	12:  "Interface Decrypting",
+	13:  "Interface Encrypting",
 	130: "Invalid source mac",      // Unused
 	131: "Invalid destination mac", // Unused
 	132: "Invalid source ip",
@@ -90,9 +92,20 @@ var errors = map[uint8]string{
 	192: "Invalid ClusterID",
 	193: "Unsupported packet protocol for DSR encapsulation",
 	194: "No egress gateway found",
+	195: "Traffic is unencrypted",
+	196: "TTL exceeded",
+	197: "No node ID found",
+	198: "Rate limited",
+	199: "IGMP handled",
+	200: "IGMP subscribed",
+	201: "Multicast handled",
+	202: "Host datapath not ready",
+	203: "Endpoint policy program not available",
+	204: "No Egress IP configured",
+	205: "Punt to proxy",
 }
 
-func extendedReason(reason uint8, extError int8) string {
+func extendedReason(extError int8) string {
 	if extError == int8(0) {
 		return ""
 	}
@@ -101,7 +114,7 @@ func extendedReason(reason uint8, extError int8) string {
 
 func DropReasonExt(reason uint8, extError int8) string {
 	if err, ok := errors[reason]; ok {
-		if ext := extendedReason(reason, extError); ext == "" {
+		if ext := extendedReason(extError); ext == "" {
 			return err
 		} else {
 			return err + ", " + ext

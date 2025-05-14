@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -27,48 +26,7 @@ import (
 
 var log = logging.DefaultLogger
 
-const (
-	// MaxRetries is the number of times that a loop should iterate until a
-	// specified condition is not met
-	MaxRetries = 30
-)
-
-// BpfLBList returns the output of `cilium bpf lb list -o json` as a map
-// Key will be the frontend address and the value is an array with all backend
-// addresses
-func (s *SSHMeta) BpfLBList(noDuplicates bool) (map[string][]string, error) {
-	var (
-		result map[string][]string
-		res    *CmdRes
-	)
-
-	res = s.ExecCilium("bpf lb list -o json")
-
-	if !res.WasSuccessful() {
-		return nil, fmt.Errorf("cannot get bpf lb list: %s", res.CombineOutput())
-	}
-	err := res.Unmarshal(&result)
-	if err != nil {
-		return nil, err
-	}
-
-	if noDuplicates {
-		for svc, entries := range result {
-			unique := make(map[string]struct{})
-			for _, e := range entries {
-				unique[e] = struct{}{}
-			}
-			result[svc] = make([]string, 0, len(unique))
-			for e := range unique {
-				result[svc] = append(result[svc], e)
-			}
-		}
-	}
-
-	return result, nil
-}
-
-// BpfIPCacheList returns the output of `cilium bpf ipcache list -o json` as a map
+// BpfIPCacheList returns the output of `cilium-dbg bpf ipcache list -o json` as a map
 // Key will be the CIDR (address with mask) and the value is the associated numeric security identity
 func (s *SSHMeta) BpfIPCacheList(localScopeOnly bool) (map[string]uint32, error) {
 	var (
@@ -103,7 +61,7 @@ func (s *SSHMeta) BpfIPCacheList(localScopeOnly bool) (map[string]uint32, error)
 				}
 				nid64, err := strconv.ParseUint(s[idIdx:endIdx], 10, 32)
 				if err != nil {
-					return nil, fmt.Errorf("cannot parse identity from: %s (%s): %s", s, s[idIdx:endIdx], err)
+					return nil, fmt.Errorf("cannot parse identity from: %s (%s): %w", s, s[idIdx:endIdx], err)
 				}
 				nid = uint32(nid64)
 				if localScopeOnly && !identity.NumericIdentity(nid).HasLocalScope() {
@@ -120,21 +78,21 @@ func (s *SSHMeta) BpfIPCacheList(localScopeOnly bool) (map[string]uint32, error)
 	return result, nil
 }
 
-// SelectedIdentities returns filtered identities from the output of `cilium policy selectors list
+// SelectedIdentities returns filtered identities from the output of `cilium-dbg policy selectors list
 // -o json` as a string
 func (s *SSHMeta) SelectedIdentities(match string) string {
-	res := s.Exec(fmt.Sprintf(`cilium policy selectors list -o json | jq '.[] | select(.selector | test("%s")) | .identities[] | .'`, match))
+	res := s.Exec(fmt.Sprintf(`cilium-dbg policy selectors list -o json | jq '.[] | select(.selector | test("%s")) | .identities[] | .'`, match))
 	res.ExpectSuccess("Failed getting identities for %s selectors", match)
 	return res.Stdout()
 }
 
 // ExecCilium runs a Cilium CLI command and returns the resultant cmdRes.
 func (s *SSHMeta) ExecCilium(cmd string) *CmdRes {
-	command := fmt.Sprintf("cilium %s", cmd)
+	command := fmt.Sprintf("cilium-dbg %s", cmd)
 	return s.ExecWithSudo(command)
 }
 
-// EndpointGet returns the output of `cilium endpoint get` for the provided
+// EndpointGet returns the output of `cilium-dbg endpoint get` for the provided
 // endpoint ID.
 func (s *SSHMeta) EndpointGet(id string) *models.Endpoint {
 	if id == "" {
@@ -154,55 +112,6 @@ func (s *SSHMeta) EndpointGet(id string) *models.Endpoint {
 	return nil
 }
 
-// GetEndpointMutableConfigurationOption returns the value of the mutable
-// configuration option optionName for the endpoint with ID endpointID, or an
-// error if optionName's corresponding value cannot be retrieved for the
-// endpoint.
-func (s *SSHMeta) GetEndpointMutableConfigurationOption(endpointID, optionName string) (string, error) {
-	cmd := fmt.Sprintf("endpoint config %s -o json | jq -r '.realized.options.%s'", endpointID, optionName)
-	res := s.ExecCilium(cmd)
-	if !res.WasSuccessful() {
-		return "", fmt.Errorf("Unable to execute %q: %s", cmd, res.CombineOutput())
-	}
-
-	return res.SingleOut(), nil
-}
-
-// SetAndWaitForEndpointConfiguration waits for the endpoint configuration to become a certain value
-func (s *SSHMeta) SetAndWaitForEndpointConfiguration(endpointID, optionName, expectedValue string) error {
-	logger := s.logger.WithFields(logrus.Fields{
-		logfields.EndpointID: endpointID,
-		"option":             optionName,
-		"value":              expectedValue})
-	body := func() bool {
-		logger.Infof("Setting endpoint configuration")
-		status := s.EndpointSetConfig(endpointID, optionName, expectedValue)
-		if !status {
-			logger.Error("Cannot set endpoint configuration")
-			return status
-		}
-
-		value, err := s.GetEndpointMutableConfigurationOption(endpointID, optionName)
-		if err != nil {
-			log.WithError(err).Error("cannot get endpoint configuration")
-			return false
-		}
-
-		if value == expectedValue {
-			return true
-		}
-		logger.Debugf("Expected configuration option to have value %s, but got %s",
-			expectedValue, value)
-		return false
-	}
-
-	err := WithTimeout(
-		body,
-		fmt.Sprintf("cannot set endpoint config for endpoint %q", endpointID),
-		&TimeoutConfig{Timeout: HelperTimeout})
-	return err
-}
-
 // WaitEndpointsDeleted waits up until timeout reached for all endpoints to be
 // deleted. Returns true if all endpoints have been deleted before HelperTimeout
 // is exceeded, false otherwise.
@@ -211,7 +120,7 @@ func (s *SSHMeta) WaitEndpointsDeleted() bool {
 	// cilium-health endpoint is always running, as is the host endpoint.
 	desiredState := "2"
 	body := func() bool {
-		cmd := `cilium endpoint list -o json | jq '. | length'`
+		cmd := `cilium-dbg endpoint list -o json | jq '. | length'`
 		res := s.Exec(cmd)
 		numEndpointsRunning := strings.TrimSpace(res.Stdout())
 		if numEndpointsRunning == desiredState {
@@ -224,7 +133,7 @@ func (s *SSHMeta) WaitEndpointsDeleted() bool {
 	err := WithTimeout(body, "Endpoints are not deleted after timeout", &TimeoutConfig{Timeout: HelperTimeout})
 	if err != nil {
 		logger.WithError(err).Warn("Endpoints are not deleted after timeout")
-		s.Exec("cilium endpoint list") // This function is only for debugging.
+		s.Exec("cilium-dbg endpoint list") // This function is only for debugging.
 		return false
 	}
 	return true
@@ -245,10 +154,7 @@ func (s *SSHMeta) WaitDockerPluginReady() bool {
 		// check that connect works
 		cmd = `nc -U -z /run/docker/plugins/cilium.sock`
 		res = s.ExecWithSudo(cmd)
-		if !res.WasSuccessful() {
-			return false
-		}
-		return true
+		return res.WasSuccessful()
 	}
 	err := WithTimeout(body, "Docker plugin is not ready after timeout", &TimeoutConfig{Timeout: HelperTimeout})
 	if err != nil {
@@ -286,7 +192,7 @@ func (s *SSHMeta) WaitEndpointsReady() bool {
 	desiredState := string(models.EndpointStateReady)
 	body := func() bool {
 		filter := `{range [*]}{@.id}{"="}{@.status.state},{@.status.identity.id}{"\n"}{end}`
-		cmd := fmt.Sprintf(`cilium endpoint list -o jsonpath='%s'`, filter)
+		cmd := fmt.Sprintf(`cilium-dbg endpoint list -o jsonpath='%s'`, filter)
 
 		res := s.Exec(cmd)
 		if !res.WasSuccessful() {
@@ -312,54 +218,16 @@ func (s *SSHMeta) WaitEndpointsReady() bool {
 			"'%d' containers are in a '%s' state of a total of '%d' containers.",
 			result[desiredState], desiredState, total)
 
-		if result[desiredState] == total {
-			return true
-		}
-
-		return false
+		return result[desiredState] == total
 	}
 
 	err := WithTimeout(body, "Endpoints are not ready after timeout", &TimeoutConfig{Timeout: HelperTimeout})
 	if err != nil {
 		logger.WithError(err).Warn("Endpoints are not ready after timeout")
-		s.Exec("cilium endpoint list") // This function is only for debugging into log.
+		s.Exec("cilium-dbg endpoint list") // This function is only for debugging into log.
 		return false
 	}
 	return true
-}
-
-// EndpointSetConfig sets the provided configuration option to the provided
-// value for the endpoint with the endpoint ID id. It returns true if the
-// configuration update command returned successfully.
-func (s *SSHMeta) EndpointSetConfig(id, option, value string) bool {
-	logger := s.logger.WithFields(logrus.Fields{"endpointID": id})
-	res := s.ExecCilium(fmt.Sprintf(
-		"endpoint config %s -o json | jq -r '.realized.options.%s'", id, option))
-
-	if res.SingleOut() == value {
-		logger.Debugf("no need to update %s=%s; value already set", option, value)
-		return res.WasSuccessful()
-	}
-
-	before := s.EndpointGet(id)
-	if before == nil {
-		return false
-	}
-
-	configCmd := fmt.Sprintf("endpoint config %s %s=%s", id, option, value)
-	data := s.ExecCilium(configCmd)
-	if !data.WasSuccessful() {
-		logger.Errorf("cannot set endpoint configuration %s=%s", option, value)
-		return false
-	}
-
-	return true
-}
-
-// ListEndpoints returns the CmdRes resulting from executing
-// `cilium endpoint list -o json`.
-func (s *SSHMeta) ListEndpoints() *CmdRes {
-	return s.ExecCilium("endpoint list -o json")
 }
 
 // GetEndpointsIDMap returns a mapping of an endpoint ID to Docker container
@@ -392,7 +260,7 @@ func (s *SSHMeta) GetAllEndpointsIds() (map[string]string, error) {
 // corresponding endpoint ID, and an error if the list of endpoints cannot be
 // retrieved via the Cilium CLI.
 func (s *SSHMeta) GetEndpointsIds() (map[string]string, error) {
-	// cilium endpoint list -o jsonpath='{range [?(@.status.labels.security-relevant[0]!='reserved:health')]}{@.status.external-identifiers.container-name}{"="}{@.id}{"\n"}{end}'
+	// cilium-dbg endpoint list -o jsonpath='{range [?(@.status.labels.security-relevant[0]!='reserved:health')]}{@.status.external-identifiers.container-name}{"="}{@.id}{"\n"}{end}'
 	filter := `{range [?(@.status.labels.security-relevant[0]!="reserved:health")]}{@.status.external-identifiers.container-name}{"="}{@.id}{"\n"}{end}`
 	cmd := fmt.Sprintf("endpoint list -o jsonpath='%s'", filter)
 	endpoints := s.ExecCilium(cmd)
@@ -400,33 +268,6 @@ func (s *SSHMeta) GetEndpointsIds() (map[string]string, error) {
 		return nil, fmt.Errorf("%q failed: %s", cmd, endpoints.CombineOutput())
 	}
 	return endpoints.KVOutput(), nil
-}
-
-// GetEndpointsIdentityIds returns a mapping of a Docker container name to it's
-// corresponding endpoint's security identity, it will return an error if the list
-// of endpoints cannot be retrieved via the Cilium CLI.
-func (s *SSHMeta) GetEndpointsIdentityIds() (map[string]string, error) {
-	filter := `{range [*]}{@.status.external-identifiers.container-name}{"="}{@.status.identity.id}{"\n"}{end}`
-	endpoints := s.ExecCilium(fmt.Sprintf("endpoint list -o jsonpath='%s'", filter))
-	if !endpoints.WasSuccessful() {
-		return nil, fmt.Errorf("cannot get endpoint list: %s", endpoints.CombineOutput())
-	}
-	return endpoints.KVOutput(), nil
-}
-
-// GetEndpointsNames returns the container-name field of each Cilium endpoint.
-func (s *SSHMeta) GetEndpointsNames() ([]string, error) {
-	data := s.ListEndpoints()
-	if data.WasSuccessful() == false {
-		return nil, fmt.Errorf("`cilium endpoint list` was not successful")
-	}
-
-	result, err := data.Filter("{ [?(@.status.labels.security-relevant[0]!='reserved:health')].status.external-identifiers.container-name }")
-	if err != nil {
-		return nil, err
-	}
-
-	return strings.Split(result.String(), " "), nil
 }
 
 // ManifestsPath returns the path of the directory where manifests (YAMLs
@@ -445,7 +286,7 @@ func (s *SSHMeta) BasePath() string {
 // called the command will stop and monitor's output is saved on
 // `monitorLogFileName` file.
 func (s *SSHMeta) MonitorStart(opts ...string) (*CmdRes, func() error) {
-	cmd := "cilium monitor -vv " + strings.Join(opts, " ") + " | ts '[%Y-%m-%d %H:%M:%S]'"
+	cmd := "cilium-dbg monitor -vv " + strings.Join(opts, " ") + " | ts '[%Y-%m-%d %H:%M:%S]'"
 	ctx, cancel := context.WithCancel(context.Background())
 	res := s.ExecInBackground(ctx, cmd, ExecOptions{SkipLog: true})
 
@@ -474,40 +315,6 @@ func (s *SSHMeta) MonitorStart(opts ...string) (*CmdRes, func() error) {
 // where manifests (YAMLs containing policies, DaemonSets, etc.) are stored.
 func (s *SSHMeta) GetFullPath(name string) string {
 	return fmt.Sprintf("%s%s", s.ManifestsPath(), name)
-}
-
-// PolicyEndpointsSummary returns the count of whether policy enforcement is
-// enabled, disabled, and the total number of endpoints, and an error if the
-// Cilium endpoint metadata cannot be retrieved via the API.
-func (s *SSHMeta) PolicyEndpointsSummary() (map[string]int, error) {
-	result := map[string]int{
-		Enabled:  0,
-		Disabled: 0,
-		Total:    0,
-	}
-
-	res := s.ListEndpoints()
-	if !res.WasSuccessful() {
-		return nil, fmt.Errorf("was not able to list endpoints: %s", res.CombineOutput().String())
-	}
-
-	endpoints, err := res.Filter("{ [?(@.status.labels.security-relevant[0]!='reserved:health')].status.policy.realized.policy-enabled }")
-
-	if err != nil {
-		return result, fmt.Errorf(`cannot filter for "policy-enabled" from output of "cilium endpoint list"`)
-	}
-	status := strings.Split(endpoints.String(), " ")
-	for _, kind := range status {
-		switch models.EndpointPolicyEnabled(kind) {
-		case models.EndpointPolicyEnabledBoth, models.EndpointPolicyEnabledEgress,
-			models.EndpointPolicyEnabledIngress:
-			result[Enabled]++
-		case OptionNone:
-			result[Disabled]++
-		}
-		result[Total]++
-	}
-	return result, nil
 }
 
 // SetPolicyEnforcement sets the PolicyEnforcement configuration value for the
@@ -553,17 +360,11 @@ func (s *SSHMeta) PolicyDel(id string) *CmdRes {
 	return s.PolicyWait(policyID)
 }
 
-// PolicyGet runs `cilium policy get <id>`, where id is the name of a specific
+// PolicyGet runs `cilium-dbg policy get <id>`, where id is the name of a specific
 // policy imported into Cilium. It returns the resultant CmdRes from running
 // the aforementioned command.
 func (s *SSHMeta) PolicyGet(id string) *CmdRes {
 	return s.ExecCilium(fmt.Sprintf("policy get %s", id))
-}
-
-// PolicyGetAll gets all policies that are imported in the Cilium agent.
-func (s *SSHMeta) PolicyGetAll() *CmdRes {
-	return s.ExecCilium("policy get")
-
 }
 
 // PolicyGetRevision retrieves the current policy revision number in the Cilium
@@ -581,7 +382,7 @@ func (s *SSHMeta) PolicyImportAndWait(path string, timeout time.Duration) (int, 
 
 	revision, err := s.PolicyGetRevision()
 	if err != nil {
-		return -1, fmt.Errorf("cannot get policy revision: %s", err)
+		return -1, fmt.Errorf("cannot get policy revision: %w", err)
 	}
 	s.logger.WithFields(logrus.Fields{
 		logfields.Path:           path,
@@ -591,7 +392,7 @@ func (s *SSHMeta) PolicyImportAndWait(path string, timeout time.Duration) (int, 
 		logfields.Path: path}).Info("validating policy before importing")
 
 	res := s.ExecCilium(fmt.Sprintf("policy validate %s", path))
-	if res.WasSuccessful() == false {
+	if !res.WasSuccessful() {
 		s.logger.WithFields(logrus.Fields{
 			logfields.Path: path,
 		}).Errorf("could not validate policy %s: %s", path, res.CombineOutput())
@@ -599,7 +400,7 @@ func (s *SSHMeta) PolicyImportAndWait(path string, timeout time.Duration) (int, 
 	}
 
 	res = s.ExecCilium(fmt.Sprintf("policy import %s", path))
-	if res.WasSuccessful() == false {
+	if !res.WasSuccessful() {
 		s.logger.WithFields(logrus.Fields{
 			logfields.Path: path,
 		}).Errorf("could not import policy: %s", res.CombineOutput())
@@ -652,7 +453,7 @@ func (s *SSHMeta) PolicyRenderAndImport(policy string) (int, error) {
 	err := s.RenderTemplateToFile(filename, policy, os.ModePerm)
 	if err != nil {
 		s.logger.Errorf("PolicyRenderAndImport: cannot create policy file on '%s'", filename)
-		return 0, fmt.Errorf("cannot render the policy:  %s", err)
+		return 0, fmt.Errorf("cannot render the policy: %w", err)
 	}
 	path := s.GetFilePath(filename)
 	s.logger.Debugf("PolicyRenderAndImport: import policy from '%s'", path)
@@ -665,7 +466,7 @@ func (s *SSHMeta) GetFilePath(filename string) string {
 	return fmt.Sprintf("%s/%s", s.basePath, filename)
 }
 
-// PolicyWait executes `cilium policy wait`, which waits until all endpoints are
+// PolicyWait executes `cilium-dbg policy wait`, which waits until all endpoints are
 // updated to the given policy revision.
 func (s *SSHMeta) PolicyWait(revisionNum int) *CmdRes {
 	return s.ExecCilium(fmt.Sprintf("policy wait %d", revisionNum))
@@ -760,38 +561,34 @@ func (s *SSHMeta) PprofReport() {
 	ticker := time.NewTicker(PProfCadence)
 	log := s.logger.WithField("subsys", "pprofReport")
 
-	for {
-		select {
-		case <-ticker.C:
-
-			testPath, err := CreateReportDirectory()
-			if err != nil {
-				log.WithError(err).Errorf("cannot create test result path '%s'", testPath)
-				return
-			}
-			d := time.Now().Add(50 * time.Second)
-			ctx, cancel := context.WithDeadline(context.Background(), d)
-
-			res := s.ExecInBackground(ctx, `sudo gops pprof-cpu $(pgrep cilium-agent)`)
-
-			err = res.WaitUntilMatch("Profiling dump saved to")
-			if err != nil {
-				log.WithError(err).Error("Cannot get pprof report")
-			}
-
-			files := s.Exec("ls -1 /tmp/")
-			for _, file := range files.ByLines() {
-				if !strings.Contains(file, "profile") {
-					continue
-				}
-
-				dest := filepath.Join(
-					s.basePath, testPath,
-					fmt.Sprintf("%s.pprof", file))
-				_ = s.ExecWithSudo(fmt.Sprintf("mv /tmp/%s %s", file, dest))
-			}
-			cancel()
+	for range ticker.C {
+		testPath, err := CreateReportDirectory()
+		if err != nil {
+			log.WithError(err).Errorf("cannot create test result path '%s'", testPath)
+			return
 		}
+		d := time.Now().Add(50 * time.Second)
+		ctx, cancel := context.WithDeadline(context.Background(), d)
+
+		res := s.ExecInBackground(ctx, `sudo gops pprof-cpu $(pgrep cilium-agent)`)
+
+		err = res.WaitUntilMatch("Profiling dump saved to")
+		if err != nil {
+			log.WithError(err).Error("Cannot get pprof report")
+		}
+
+		files := s.Exec("ls -1 /tmp/")
+		for _, file := range files.ByLines() {
+			if !strings.Contains(file, "profile") {
+				continue
+			}
+
+			dest := filepath.Join(
+				s.basePath, testPath,
+				fmt.Sprintf("%s.pprof", file))
+			_ = s.ExecWithSudo(fmt.Sprintf("mv /tmp/%s %s", file, dest))
+		}
+		cancel()
 	}
 }
 
@@ -825,7 +622,6 @@ func (s *SSHMeta) GatherLogs() {
 	ciliumLogCommands := map[string]string{
 		fmt.Sprintf("sudo journalctl -au %s --no-pager", DaemonName):             "cilium.log",
 		fmt.Sprintf("sudo journalctl -au %s --no-pager", CiliumDockerDaemonName): "cilium-docker.log",
-		"sudo docker logs cilium-consul":                                         "consul.log",
 	}
 
 	testPath, err := CreateReportDirectory()
@@ -850,120 +646,6 @@ func (s *SSHMeta) GatherLogs() {
 	}
 }
 
-// ServiceAdd creates a new Cilium service with the provided ID, frontend,
-// backends. Returns the result of creating said service.
-func (s *SSHMeta) ServiceAdd(id int, frontend string, backends []string) *CmdRes {
-	cmd := fmt.Sprintf(
-		"service update --frontend '%s' --backends '%s' --id '%d'",
-		frontend, strings.Join(backends, ","), id)
-	return s.ExecCilium(cmd)
-}
-
-// ServiceIsSynced checks that the Cilium service with the specified id has its
-// metadata match that of the load balancer BPF maps
-func (s *SSHMeta) ServiceIsSynced(id int) (bool, error) {
-	var svc *models.Service
-	svcRes := s.ServiceGet(id)
-	if !svcRes.WasSuccessful() {
-		return false, fmt.Errorf("cannot get service id %d: %s", id, svcRes.CombineOutput())
-	}
-	err := svcRes.Unmarshal(&svc)
-	if err != nil {
-		return false, err
-	}
-
-	bpfLB, err := s.BpfLBList(false)
-	if err != nil {
-		return false, err
-	}
-
-	frontendAddr := net.JoinHostPort(
-		svc.Status.Realized.FrontendAddress.IP,
-		fmt.Sprintf("%d", svc.Status.Realized.FrontendAddress.Port))
-	lb, ok := bpfLB[frontendAddr]
-	if ok == false {
-		return false, fmt.Errorf(
-			"frontend address from the service %d does not have it's corresponding frontend address(%s) on bpf maps",
-			id, frontendAddr)
-	}
-
-	for _, backendAddr := range svc.Status.Realized.BackendAddresses {
-		result := false
-		backendSVC := net.JoinHostPort(
-			*backendAddr.IP,
-			fmt.Sprintf("%d", backendAddr.Port))
-		target := fmt.Sprintf("%s (%d)", backendSVC, id)
-
-		for _, addr := range lb {
-			if strings.Contains(addr, target) {
-				result = true
-			}
-		}
-		if result == false {
-			return false, fmt.Errorf(
-				"backend address %s does not exists on BPF load balancer metadata id=%d", target, id)
-		}
-	}
-	return true, nil
-}
-
-// ServiceList returns the output of  `cilium service list`
-func (s *SSHMeta) ServiceList() *CmdRes {
-	return s.ExecCilium("service list -o json")
-}
-
-// ServiceGet is a wrapper around `cilium service get <id>`. It returns the
-// result of retrieving said service.
-func (s *SSHMeta) ServiceGet(id int) *CmdRes {
-	return s.ExecCilium(fmt.Sprintf("service get '%d' -o json", id))
-}
-
-// ServiceGetFrontendAddress returns a string with the frontend address and
-// port. It returns an error if the ID cannot be retrieved.
-func (s *SSHMeta) ServiceGetFrontendAddress(id int) (string, error) {
-
-	var svc *models.Service
-	res := s.ServiceGet(id)
-	if !res.WasSuccessful() {
-		return "", fmt.Errorf("Cannot get service id %d: %s", id, res.CombineOutput())
-	}
-
-	err := res.Unmarshal(&svc)
-	if err != nil {
-		return "", err
-	}
-
-	frontendAddress := net.JoinHostPort(
-		svc.Status.Realized.FrontendAddress.IP,
-		fmt.Sprintf("%d", svc.Status.Realized.FrontendAddress.Port))
-	return frontendAddress, nil
-}
-
-// ServiceGetIds returns an array with the IDs of all Cilium services. Returns
-// an error if the IDs cannot be retrieved
-func (s *SSHMeta) ServiceGetIds() ([]string, error) {
-	filter := `{range [*]}{@.status.realized.id}{"\n"}{end}`
-	res, err := s.ServiceList().Filter(filter)
-	if err != nil {
-		return nil, err
-	}
-	// trim the trailing \n
-	trimmed := strings.Trim(res.String(), "\n")
-	return strings.Split(trimmed, "\n"), nil
-}
-
-// ServiceDel is a wrapper around `cilium service delete <id>`. It returns the
-// result of deleting said service.
-func (s *SSHMeta) ServiceDel(id int) *CmdRes {
-	return s.ExecCilium(fmt.Sprintf("service delete '%d'", id))
-}
-
-// ServiceDelAll is a wrapper around `cilium service delete --all`. It returns the
-// result of the command.
-func (s *SSHMeta) ServiceDelAll() *CmdRes {
-	return s.ExecCilium("service delete --all")
-}
-
 // SetUpCilium sets up Cilium as a systemd service with a hardcoded set of options. It
 // returns an error if any of the operations needed to start Cilium fails.
 func (s *SSHMeta) SetUpCilium() error {
@@ -975,12 +657,15 @@ func (s *SSHMeta) SetUpCilium() error {
 func (s *SSHMeta) SetUpCiliumWithOptions(ciliumOpts string) error {
 	// Default kvstore options
 	if !strings.Contains(ciliumOpts, "--kvstore") {
-		ciliumOpts += " --kvstore consul --kvstore-opt consul.address=127.0.0.1:8500"
+		ciliumOpts += " --kvstore etcd --kvstore-opt etcd.address=127.0.0.1:4001"
 	}
 
 	ciliumOpts += " --exclude-local-address=" + DockerBridgeIP + "/32"
 	ciliumOpts += " --exclude-local-address=" + FakeIPv4WorldAddress + "/32"
 	ciliumOpts += " --exclude-local-address=" + FakeIPv6WorldAddress + "/128"
+	if config.CiliumTestConfig.CiliumExtraOpts != "" {
+		ciliumOpts += " " + config.CiliumTestConfig.CiliumExtraOpts
+	}
 
 	// Get the current CILIUM_IMAGE from the service definition
 	res := s.Exec("grep CILIUM_IMAGE= /etc/sysconfig/cilium")
@@ -1001,7 +686,7 @@ INITSYSTEM=SYSTEMD`
 		return err
 	}
 
-	confPath := filepath.Join("/home/vagrant/go/src/github.com/cilium/cilium/test", ciliumConfig)
+	confPath := s.GetFilePath(ciliumConfig)
 	res = s.Exec(fmt.Sprintf("sudo cp %s /etc/sysconfig/cilium", confPath))
 	if !res.WasSuccessful() {
 		return fmt.Errorf("%s", res.CombineOutput())
@@ -1017,8 +702,8 @@ func (s *SSHMeta) SetUpCiliumWithHubble() error {
 	return s.SetUpCiliumWithOptions("--enable-hubble")
 }
 
-// WaitUntilReady waits until the output of `cilium status` returns with code
-// zero. Returns an error if the output of `cilium status` returns a nonzero
+// WaitUntilReady waits until the output of `cilium-dbg status` returns with code
+// zero. Returns an error if the output of `cilium-dbg status` returns a nonzero
 // return code after the specified timeout duration has elapsed.
 func (s *SSHMeta) WaitUntilReady(timeout time.Duration) error {
 

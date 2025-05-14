@@ -5,70 +5,71 @@ package option
 
 import (
 	"strconv"
+	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 )
 
-func (s *OptionSuite) TestVerifyMonitorAggregationLevel(c *C) {
-	c.Assert(VerifyMonitorAggregationLevel("", ""), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "none"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "disabled"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "lowest"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "low"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "medium"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "max"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "maximum"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "LoW"), IsNil)
-	c.Assert(VerifyMonitorAggregationLevel("", "disable"), NotNil)
+func TestVerifyMonitorAggregationLevel(t *testing.T) {
+	require.NoError(t, VerifyMonitorAggregationLevel("", ""))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "none"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "disabled"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "lowest"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "low"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "medium"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "max"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "maximum"))
+	require.NoError(t, VerifyMonitorAggregationLevel("", "LoW"))
+	require.Error(t, VerifyMonitorAggregationLevel("", "disable"))
 }
 
-func (s *OptionSuite) TestParseMonitorAggregationLevel(c *C) {
+func TestParseMonitorAggregationLevel(t *testing.T) {
 	level, err := ParseMonitorAggregationLevel("2")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelLow)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelLow, level)
 
 	_, err = ParseMonitorAggregationLevel(strconv.Itoa(int(MonitorAggregationLevelMax) + 1))
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 
 	_, err = ParseMonitorAggregationLevel("-1")
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 
 	_, err = ParseMonitorAggregationLevel("foo")
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 
 	level, err = ParseMonitorAggregationLevel("")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelNone)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelNone, level)
 
 	level, err = ParseMonitorAggregationLevel("none")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelNone)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelNone, level)
 
 	level, err = ParseMonitorAggregationLevel("disabled")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelNone)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelNone, level)
 
 	level, err = ParseMonitorAggregationLevel("lowest")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelLowest)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelLowest, level)
 
 	level, err = ParseMonitorAggregationLevel("low")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelLow)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelLow, level)
 
 	level, err = ParseMonitorAggregationLevel("medium")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelMedium)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelMedium, level)
 
 	level, err = ParseMonitorAggregationLevel("max")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelMax)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelMax, level)
 
 	level, err = ParseMonitorAggregationLevel("maximum")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelMax)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelMax, level)
 
 	level, err = ParseMonitorAggregationLevel("LOW")
-	c.Assert(err, IsNil)
-	c.Assert(level, Equals, MonitorAggregationLevelLow)
+	require.NoError(t, err)
+	require.Equal(t, MonitorAggregationLevelLow, level)
 }

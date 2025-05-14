@@ -1,50 +1,41 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_ETH__
-#define __LIB_ETH__
+#pragma once
 
+#include <bpf/compiler.h>
 #include <linux/if_ether.h>
 
 #ifndef ETH_HLEN
 #define ETH_HLEN __ETH_HLEN
 #endif
 
-#ifndef ETH_ALEN
-#define ETH_ALEN 6
-#endif
-
+/* MAC-48 address. Even though the address itself is only 6 bytes, it rounds up
+ * to 8 bytes due to padding that was present in a past iteration. Since it's
+ * used as a map value, this cannot be changed without connectivity disruption.
+ */
 union macaddr {
-	struct {
-		__u32 p1;
-		__u16 p2;
-	};
-	__u8 addr[6];
+	__u8 addr[ETH_ALEN];
+	__u64 pad;
 };
 
-static __always_inline int eth_addrcmp(const union macaddr *a,
-				       const union macaddr *b)
+static __always_inline bool eth_addrcmp(const union macaddr *a,
+					const union macaddr *b)
 {
-	int tmp;
-
-	tmp = a->p1 - b->p1;
-	if (!tmp)
-		tmp = a->p2 - b->p2;
-
-	return tmp;
+	return memcmp(a, b, ETH_ALEN);
 }
 
-static __always_inline int eth_is_bcast(const union macaddr *a)
+static __always_inline bool eth_is_bcast(const union macaddr *a)
 {
-	union macaddr bcast;
+	union macaddr bcast = { .addr = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff}};
 
-	bcast.p1 = 0xffffffff;
-	bcast.p2 = 0xffff;
+	return !eth_addrcmp(a, &bcast);
+}
 
-	if (!eth_addrcmp(a, &bcast))
-		return 1;
-	else
-		return 0;
+static __always_inline bool eth_is_supported_ethertype(__be16 proto)
+{
+	/* non-Ethernet II unsupported */
+	return proto >= bpf_htons(ETH_P_802_3_MIN);
 }
 
 static __always_inline int eth_load_saddr(struct __ctx_buff *ctx, __u8 *mac,
@@ -115,5 +106,3 @@ static __always_inline int eth_store_proto(struct __ctx_buff *ctx,
 	return ctx_store_bytes(ctx, off + ETH_ALEN + ETH_ALEN,
 			       &proto, sizeof(proto), 0);
 }
-
-#endif /* __LIB_ETH__ */

@@ -9,11 +9,11 @@ import (
 	"net"
 	"time"
 
-	"github.com/cilium/ipam/service/ipallocator"
 	"golang.org/x/time/rate"
 
 	"github.com/cilium/cilium/pkg/api/helpers"
 	"github.com/cilium/cilium/pkg/azure/types"
+	"github.com/cilium/cilium/pkg/ipam/service/ipallocator"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 	"github.com/cilium/cilium/pkg/lock"
 )
@@ -23,6 +23,7 @@ type Operation int
 
 const (
 	AllOperations Operation = iota
+	GetInstance
 	GetInstances
 	GetVpcsAndSubnets
 	AssignPrivateIpAddressesVMSS
@@ -67,14 +68,10 @@ func (a *API) UpdateSubnets(subnets []*ipamTypes.Subnet) {
 	a.subnets = map[string]*subnet{}
 	for _, s := range subnets {
 		_, cidr, _ := net.ParseCIDR(s.CIDR.String())
-		cidrRange, err := ipallocator.NewCIDRRange(cidr)
-		if err != nil {
-			panic(err)
-		}
 
 		a.subnets[s.ID] = &subnet{
 			subnet:    s.DeepCopy(),
-			allocator: cidrRange,
+			allocator: ipallocator.NewCIDRRange(cidr),
 		}
 	}
 	a.mutex.Unlock()
@@ -127,6 +124,28 @@ func (a *API) rateLimit() {
 	if delay := r.Delay(); delay != time.Duration(0) && delay != rate.InfDuration {
 		time.Sleep(delay)
 	}
+}
+
+func (a *API) GetInstance(ctx context.Context, subnets ipamTypes.SubnetMap, instanceID string) (*ipamTypes.Instance, error) {
+	a.rateLimit()
+	a.delaySim.Delay(GetInstance)
+
+	a.mutex.RLock()
+	defer a.mutex.RUnlock()
+
+	if err, ok := a.errors[GetInstance]; ok {
+		return nil, err
+	}
+
+	instance := ipamTypes.Instance{}
+	instance.Interfaces = map[string]ipamTypes.InterfaceRevision{}
+	if err := a.instances.ForeachInterface(instanceID, func(instanceID, interfaceID string, iface ipamTypes.InterfaceRevision) error {
+		instance.Interfaces[interfaceID] = iface
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	return instance.DeepCopy(), nil
 }
 
 func (a *API) GetInstances(ctx context.Context, subnets ipamTypes.SubnetMap) (*ipamTypes.InstanceMap, error) {
@@ -206,7 +225,7 @@ func (a *API) AssignPrivateIpAddressesVMSS(ctx context.Context, vmName, vmssName
 			return fmt.Errorf("subnet %s does not exist", subnetID)
 		}
 
-		for i := 0; i < addresses; i++ {
+		for range addresses {
 			ip, err := s.allocator.AllocateNext()
 			if err != nil {
 				panic("Unable to allocate IP from allocator")

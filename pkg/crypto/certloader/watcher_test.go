@@ -9,24 +9,24 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus/hooks/test"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 )
 
 func TestNewWatcherError(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	_, err := NewWatcher(logger, relay.caFiles, hubble.certFile, hubble.privkeyFile)
-	assert.NotNil(t, err)
+	assert.Error(t, err)
 }
 
 func TestNewWatcher(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	setup(t, hubble, relay)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	expectedCaCertPool := x509.NewCertPool()
 	if ok := expectedCaCertPool.AppendCertsFromPEM(initialRelayClientCA); !ok {
@@ -38,7 +38,7 @@ func TestNewWatcher(t *testing.T) {
 	}
 
 	w, err := NewWatcher(logger, relay.caFiles, hubble.certFile, hubble.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	defer w.Stop()
 
 	keypair, caCertPool := w.KeypairAndCACertPool()
@@ -50,7 +50,7 @@ func TestRotation(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	setup(t, hubble, relay)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	expectedCaCertPool := x509.NewCertPool()
 	if ok := expectedCaCertPool.AppendCertsFromPEM(rotatedRelayClientCA); !ok {
@@ -62,7 +62,7 @@ func TestRotation(t *testing.T) {
 	}
 
 	w, err := NewWatcher(logger, relay.caFiles, hubble.certFile, hubble.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	defer w.Stop()
 
 	prevKeypairGeneration, prevCaCertPoolGeneration := w.generations()
@@ -89,7 +89,7 @@ func TestFutureWatcherImmediately(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	setup(t, hubble, relay)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	expectedCaCertPool := x509.NewCertPool()
 	if ok := expectedCaCertPool.AppendCertsFromPEM(initialRelayClientCA); !ok {
@@ -101,7 +101,7 @@ func TestFutureWatcherImmediately(t *testing.T) {
 	}
 
 	ch, err := FutureWatcher(logger, relay.caFiles, hubble.certFile, hubble.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	// the files already exists, expect the watcher to be readily available.
 	w := <-ch
@@ -117,7 +117,7 @@ func TestFutureWatcher(t *testing.T) {
 	// don't call setup() yet, we only want the directories created without the
 	// TLS files.
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	expectedCaCertPool := x509.NewCertPool()
 	if ok := expectedCaCertPool.AppendCertsFromPEM(initialRelayClientCA); !ok {
@@ -129,7 +129,7 @@ func TestFutureWatcher(t *testing.T) {
 	}
 
 	ch, err := FutureWatcher(logger, relay.caFiles, hubble.certFile, hubble.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	// the files don't exists, expect the watcher to not be ready yet.
 	var w *Watcher
@@ -153,10 +153,10 @@ func TestFutureWatcher(t *testing.T) {
 func TestKubernetesMount(t *testing.T) {
 	dir, hubble := k8sDirectories(t)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	ch, err := FutureWatcher(logger, hubble.caFiles, hubble.certFile, hubble.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 
 	// the files don't exists, expect the watcher to not be ready yet.
 	select {

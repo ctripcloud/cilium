@@ -62,6 +62,57 @@ Below example will expose remote endpoint without sharing local endpoints.
      selector:
        name: rebel-base
 
+.. _endpointslicesync:
+
+Synchronizing Kubernetes EndpointSlice (Beta)
+#############################################
+
+.. include:: ../../beta.rst
+
+By default Kubernetes EndpointSlice synchronization is disabled on non Headless Global services.
+To have Cilium discover remote clusters endpoints of a Global Service
+from DNS or any third party controllers, enable synchronization by adding
+the annotation ``service.cilium.io/global-sync-endpoint-slices: "true"``.
+This will allow Cilium to create Kubernetes EndpointSlices belonging to a
+remote cluster for services that have that annotation.
+Regarding Global Headless services this option is enabled by default unless
+explicitly opted-out by adding the annotation ``service.cilium.io/global-sync-endpoint-slices: "false"``.
+
+Note that this feature does not complement/is not required by any other Cilium features
+and is only required if you need to discover EndpointSlice from remote cluster on
+third party controllers. For instance, the Cilium ingress controller works in a Cluster Mesh
+without enabling this feature, although if you use any other ingress controller
+you may need to enable this.
+
+This feature is currently disabled by default via a feature flag.
+To install Cilium with EndpointSlice Cluster Mesh synchronization, run:
+
+.. parsed-literal::
+
+   helm install cilium |CHART_RELEASE| \\
+     --namespace kube-system \\
+     --set clustermesh.enableEndpointSliceSynchronization=true
+
+To enable EndpointSlice Cluster Mesh synchronization on an existing Cilium installation, run:
+
+.. parsed-literal::
+
+   helm upgrade cilium |CHART_RELEASE| \\
+     --namespace kube-system \\
+     --reuse-values \\
+     --set clustermesh.enableEndpointSliceSynchronization=true
+   kubectl -n kube-system rollout restart deployment/cilium-operator
+
+Known Limitations
+-----------------
+
+- This is a beta feature, you may experience bugs or shortcomings.
+- Hostnames are synchronized as is without any form of conflict resolution
+  mechanisms. This means that multiple StatefulSets with a single governing
+  Service that synchronize EndpointSlices across multiple clusters should have
+  different names. For instance, you can add the cluster name to the StatefulSet
+  name (``cluster1-my-statefulset`` instead of ``my-statefulset``).
+
 
 Deploying a Simple Example Service
 ==================================
@@ -70,13 +121,15 @@ Deploying a Simple Example Service
 
    .. parsed-literal::
 
-       kubectl apply -f \ |SCM_WEB|\/examples/kubernetes/clustermesh/global-service-example/cluster1.yaml
+       kubectl apply -f \ |SCM_WEB|\/examples/kubernetes/clustermesh/cluster1.yaml
+       kubectl apply -f \ |SCM_WEB|\/examples/kubernetes/clustermesh/global-service-example.yaml
 
 2. In cluster 2, deploy:
 
    .. parsed-literal::
 
-       kubectl apply -f \ |SCM_WEB|\/examples/kubernetes/clustermesh/global-service-example/cluster2.yaml
+       kubectl apply -f \ |SCM_WEB|\/examples/kubernetes/clustermesh/cluster2.yaml
+       kubectl apply -f \ |SCM_WEB|\/examples/kubernetes/clustermesh/global-service-example.yaml
 
 3. From either cluster, access the global service:
 
@@ -150,3 +203,18 @@ clusters for the service under examination.
 
       Cluster1Global-->|no|Cluster1SelfCluster2Self
       Cluster2Global-->|no|Cluster1SelfCluster2Self
+
+Limitations
+###########
+
+* Global NodePort services load balance across both local and remote backends only
+  if Cilium is configured to replace kube-proxy (either ``kubeProxyReplacement=true``
+  or ``nodePort.enabled=true``). Otherwise, only local backends are eligible for
+  load balancing when accessed through the NodePort.
+
+* Global services accessed by a Node, or a Pod running in host network, load
+  balance across both local and remote backends only if Cilium is configured
+  to replace kube-proxy (``kubeProxyReplacement=true``). This limitation can be
+  overcome enabling SocketLB in the host namespace: ``socketLB.enabled=true``,
+  ``socketLB.hostNamespaceOnly=true``. Otherwise, only local backends are eligible
+  for load balancing.

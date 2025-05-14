@@ -5,16 +5,14 @@ package observer
 
 import (
 	"fmt"
-	"time"
+	"log/slog"
 
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc"
 
 	observerpb "github.com/cilium/cilium/api/v1/observer"
 	"github.com/cilium/cilium/pkg/hubble/relay/defaults"
 	poolTypes "github.com/cilium/cilium/pkg/hubble/relay/pool/types"
-	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 type observerClientBuilder interface {
@@ -38,7 +36,7 @@ var defaultOptions = options{
 	sortBufferMaxLen:       defaults.SortBufferMaxLen,
 	sortBufferDrainTimeout: defaults.SortBufferDrainTimeout,
 	errorAggregationWindow: defaults.ErrorAggregationWindow,
-	log:                    logging.DefaultLogger.WithField(logfields.LogSubsys, "hubble-relay"),
+	peerUpdateInterval:     defaults.PeerUpdateInterval,
 	ocb:                    defaultObserverClientBuilder{},
 }
 
@@ -50,7 +48,8 @@ type options struct {
 	sortBufferMaxLen       int
 	sortBufferDrainTimeout time.Duration
 	errorAggregationWindow time.Duration
-	log                    logrus.FieldLogger
+	peerUpdateInterval     time.Duration
+	log                    *slog.Logger
 
 	// this is not meant to be user configurable as it's only useful to
 	// override when testing
@@ -104,7 +103,7 @@ func WithErrorAggregationWindow(d time.Duration) Option {
 }
 
 // WithLogger sets the logger to use for logging.
-func WithLogger(l logrus.FieldLogger) Option {
+func WithLogger(l *slog.Logger) Option {
 	return func(o *options) error {
 		o.log = l
 		return nil

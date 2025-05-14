@@ -11,7 +11,7 @@ import (
 	"github.com/cilium/cilium/pkg/loadbalancer"
 )
 
-// ServiceKey is the interface describing protocol independent key for services map v2.
+// ServiceKey is the interface describing key for services map v2.
 type ServiceKey interface {
 	bpf.MapKey
 
@@ -42,6 +42,9 @@ type ServiceKey interface {
 	// Get frontend port
 	GetPort() uint16
 
+	// Get protocol
+	GetProtocol() uint8
+
 	// Returns a RevNatValue matching a ServiceKey
 	RevNatValue() RevNatValue
 
@@ -65,6 +68,12 @@ type ServiceValue interface {
 	// Get the number of backends
 	GetCount() int
 
+	// Set the number of quarantined backends
+	SetQCount(int)
+
+	// Get the number of quarantined backends
+	GetQCount() int
+
 	// Set reverse NAT identifier
 	SetRevNat(int)
 
@@ -78,10 +87,16 @@ type ServiceValue interface {
 	GetFlags() uint16
 
 	// Set timeout for sessionAffinity=clientIP
-	SetSessionAffinityTimeoutSec(t uint32)
+	SetSessionAffinityTimeoutSec(t uint32) error
+
+	// Get timeout for sessionAffinity=clientIP
+	GetSessionAffinityTimeoutSec() uint32
 
 	// Set proxy port for l7 loadbalancer services
 	SetL7LBProxyPort(port uint16)
+
+	// Get proxy port for l7 loadbalancer services
+	GetL7LBProxyPort() uint16
 
 	// Set backend identifier
 	SetBackendID(id loadbalancer.BackendID)
@@ -97,6 +112,12 @@ type ServiceValue interface {
 
 	// ToHost converts fields to host byte order.
 	ToHost() ServiceValue
+
+	// Set LoadBalancing Algorithm for Service
+	SetLbAlg(loadbalancer.SVCLoadBalancingAlgorithm)
+
+	// Get LoadBalancing Algorithm for Service
+	GetLbAlg() loadbalancer.SVCLoadBalancingAlgorithm
 }
 
 // BackendKey is the interface describing protocol independent backend key.
@@ -113,7 +134,7 @@ type BackendKey interface {
 	GetID() loadbalancer.BackendID
 }
 
-// BackendValue is the interface describing protocol independent backend value.
+// BackendValue is the interface describing backend value.
 type BackendValue interface {
 	bpf.MapValue
 
@@ -126,8 +147,14 @@ type BackendValue interface {
 	// Get backend port
 	GetPort() uint16
 
+	// Get backend protocol
+	GetProtocol() uint8
+
 	// Get backend flags
 	GetFlags() uint8
+
+	// Get zone
+	GetZone() uint8
 
 	// Convert fields to network byte order.
 	ToNetwork() BackendValue
@@ -177,7 +204,8 @@ type RevNatValue interface {
 func svcFrontend(svcKey ServiceKey, svcValue ServiceValue) *loadbalancer.L3n4AddrID {
 	feIP := svcKey.GetAddress()
 	feAddrCluster := cmtypes.MustAddrClusterFromIP(feIP)
-	feL3n4Addr := loadbalancer.NewL3n4Addr(loadbalancer.NONE, feAddrCluster, svcKey.GetPort(), svcKey.GetScope())
+	p := loadbalancer.NewL4TypeFromNumber(svcKey.GetProtocol())
+	feL3n4Addr := loadbalancer.NewL3n4Addr(p, feAddrCluster, svcKey.GetPort(), svcKey.GetScope())
 	feL3n4AddrID := &loadbalancer.L3n4AddrID{
 		L3n4Addr: *feL3n4Addr,
 		ID:       loadbalancer.ID(svcValue.GetRevNat()),
@@ -185,12 +213,16 @@ func svcFrontend(svcKey ServiceKey, svcValue ServiceValue) *loadbalancer.L3n4Add
 	return feL3n4AddrID
 }
 
-func svcBackend(backendID loadbalancer.BackendID, backend BackendValue) *loadbalancer.Backend {
+func svcBackend(backendID loadbalancer.BackendID, backend BackendValue, backendFlags loadbalancer.ServiceFlags) *loadbalancer.LegacyBackend {
 	beIP := backend.GetAddress()
 	beAddrCluster := cmtypes.MustAddrClusterFromIP(beIP)
 	bePort := backend.GetPort()
-	beProto := loadbalancer.NONE
+	beProto := loadbalancer.NewL4TypeFromNumber(backend.GetProtocol())
 	beState := loadbalancer.GetBackendStateFromFlags(backend.GetFlags())
-	beBackend := loadbalancer.NewBackendWithState(backendID, beProto, beAddrCluster, bePort, beState)
+	beZone := backend.GetZone()
+	if beState == loadbalancer.BackendStateActive && backendFlags.SVCSlotQuarantined() {
+		beState = loadbalancer.BackendStateQuarantined
+	}
+	beBackend := loadbalancer.NewBackendWithState(backendID, beProto, beAddrCluster, bePort, beZone, beState)
 	return beBackend
 }

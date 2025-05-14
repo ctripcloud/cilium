@@ -7,66 +7,52 @@ import (
 	"context"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
 	"github.com/cilium/cilium/pkg/identity"
 	"github.com/cilium/cilium/pkg/labels"
-	fakeConfig "github.com/cilium/cilium/pkg/option/fake"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-var (
-	kvstoreLabels = labels.NewLabelsFromModel([]string{
-		"k8s:app=etcd",
-		"k8s:etcd_cluster=cilium-etcd",
-		"k8s:io.cilium/app=etcd-operator",
-		"k8s:io.kubernetes.pod.namespace=kube-system",
-		"k8s:io.cilium.k8s.policy.serviceaccount=default",
-		"k8s:io.cilium.k8s.policy.cluster=default",
-	})
-)
+func TestLookupReservedIdentity(t *testing.T) {
+	testutils.IntegrationTest(t)
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
+	for _, testConfig := range testConfigs {
+		t.Run(testConfig.name, func(t *testing.T) {
+			testLookupReservedIdentity(t, testConfig)
+		})
+	}
 }
 
-type IdentityCacheTestSuite struct{}
-
-var _ = Suite(&IdentityCacheTestSuite{})
-
-func (s *IdentityCacheTestSuite) SetUpSuite(c *C) {
-	testutils.IntegrationCheck(c)
-}
-
-func (s *IdentityCacheTestSuite) TestLookupReservedIdentity(c *C) {
-	mgr := NewCachingIdentityAllocator(newDummyOwner())
-	<-mgr.InitIdentityAllocator(nil, nil)
+func testLookupReservedIdentity(t *testing.T, testConfig testConfig) {
+	logger := hivetest.Logger(t)
+	mgr := NewCachingIdentityAllocator(logger, newDummyOwner(logger), testConfig.allocatorConfig)
+	<-mgr.InitIdentityAllocator(nil)
 
 	hostID := identity.GetReservedID("host")
-	c.Assert(mgr.LookupIdentityByID(context.TODO(), hostID), Not(IsNil))
+	require.NotNil(t, mgr.LookupIdentityByID(context.TODO(), hostID))
 
 	id := mgr.LookupIdentity(context.TODO(), labels.NewLabelsFromModel([]string{"reserved:host"}))
-	c.Assert(id, Not(IsNil))
-	c.Assert(id.ID, Equals, hostID)
+	require.NotNil(t, id)
+	require.Equal(t, hostID, id.ID)
 
 	worldID := identity.GetReservedID("world")
-	c.Assert(mgr.LookupIdentityByID(context.TODO(), worldID), Not(IsNil))
+	require.NotNil(t, mgr.LookupIdentityByID(context.TODO(), worldID))
 
 	id = mgr.LookupIdentity(context.TODO(), labels.NewLabelsFromModel([]string{"reserved:world"}))
-	c.Assert(id, Not(IsNil))
-	c.Assert(id.ID, Equals, worldID)
+	require.NotNil(t, id)
+	require.Equal(t, worldID, id.ID)
 
-	identity.InitWellKnownIdentities(&fakeConfig.Config{})
-
-	id = mgr.LookupIdentity(context.TODO(), kvstoreLabels)
-	c.Assert(id, Not(IsNil))
-	c.Assert(id.ID, Equals, identity.ReservedCiliumKVStore)
+	identity.InitWellKnownIdentities(fakeConfig, cmtypes.ClusterInfo{Name: "default", ID: 5})
 }
 
-func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
+func TestLookupReservedIdentityByLabels(t *testing.T) {
+	testutils.IntegrationTest(t)
+
 	ni, err := identity.ParseNumericIdentity("129")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	identity.AddUserDefinedNumericIdentity(ni, "kvstore")
 	identity.AddReservedIdentity(ni, "kvstore")
 
@@ -86,6 +72,26 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
 			want: identity.NewIdentity(ni, labels.Labels{"kvstore": labels.NewLabel("kvstore", "", labels.LabelSourceReserved)}),
 		},
 		{
+			name: "fixed-identity+reserved-identity returns fixed",
+			args: args{
+				lbls: labels.Labels{
+					labels.LabelKeyFixedIdentity: labels.ParseLabel(labels.LabelKeyFixedIdentity + "=" + "kvstore"),
+					labels.IDNameHost:            labels.LabelHost[labels.IDNameHost],
+				},
+			},
+			want: identity.NewIdentity(ni, labels.Labels{"kvstore": labels.NewLabel("kvstore", "", labels.LabelSourceReserved)}),
+		},
+		{
+			name: "reserved-identity+fixed-identity returns fixed",
+			args: args{
+				lbls: labels.Labels{
+					labels.IDNameHost:            labels.LabelHost[labels.IDNameHost],
+					labels.LabelKeyFixedIdentity: labels.ParseLabel(labels.LabelKeyFixedIdentity + "=" + "kvstore"),
+				},
+			},
+			want: identity.NewIdentity(ni, labels.Labels{"kvstore": labels.NewLabel("kvstore", "", labels.LabelSourceReserved)}),
+		},
+		{
 			name: "non-existing-fixed-identity",
 			args: args{
 				lbls: labels.Labels{labels.LabelKeyFixedIdentity: labels.ParseLabel(labels.LabelKeyFixedIdentity + "=" + "kube-dns")},
@@ -95,30 +101,32 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
 		{
 			name: "reserved-identity",
 			args: args{
-				lbls: labels.Labels{labels.LabelSourceReserved: labels.NewLabel(labels.LabelSourceReservedKeyPrefix+"host", "", labels.LabelSourceReserved)},
+				lbls: labels.LabelHost,
 			},
-			want: identity.NewIdentity(identity.ReservedIdentityHost, labels.Labels{"host": labels.ParseLabel("reserved:host")}),
+			want: identity.NewIdentity(identity.ReservedIdentityHost, labels.LabelHost),
 		},
 		{
 			name: "reserved-identity+other-labels",
 			args: args{
 				lbls: labels.Labels{
-					labels.LabelSourceReserved: labels.ParseLabel("reserved:host"),
-					"id.foo":                   labels.ParseLabel("id.foo"),
+					labels.IDNameHost: labels.LabelHost[labels.IDNameHost],
+					"id.foo":          labels.ParseLabel("id.foo"),
 				},
 			},
 			want: identity.NewIdentity(identity.ReservedIdentityHost, labels.Labels{
-				labels.LabelSourceReserved: labels.ParseLabel("reserved:host"),
-				"id.foo":                   labels.ParseLabel("id.foo"),
+				labels.IDNameHost: labels.LabelHost[labels.IDNameHost],
+				"id.foo":          labels.ParseLabel("id.foo"),
 			},
 			),
 		},
 		{
-			name: "well-known-kvstore",
+			name: "no fixed and reserved identities returns nil",
 			args: args{
-				lbls: kvstoreLabels,
+				lbls: labels.Labels{
+					"id.foo": labels.ParseLabel("id.foo"),
+				},
 			},
-			want: identity.NewIdentity(identity.ReservedCiliumKVStore, kvstoreLabels),
+			want: nil,
 		},
 	}
 
@@ -130,7 +138,7 @@ func (s *IdentityCacheTestSuite) TestLookupReservedIdentityByLabels(c *C) {
 			got != nil && tt.want == nil ||
 			got.ID != tt.want.ID:
 
-			c.Errorf("test %s: LookupReservedIdentityByLabels() = %v, want %v", tt.name, got, tt.want)
+			t.Errorf("test %s: LookupReservedIdentityByLabels() = %v, want %v", tt.name, got, tt.want)
 		}
 	}
 }

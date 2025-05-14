@@ -77,7 +77,7 @@ This approach is meant to be temporary.  **Restarting Cilium pod will reset the 
 Mode to match the daemon's configuration.**
 
 Policy Audit Mode is enabled for a given endpoint by modifying the endpoint configuration via
-the ``cilium`` tool on the endpoint's Kubernetes node. The steps include:
+the ``cilium-dbg`` tool on the endpoint's Kubernetes node. The steps include:
 
 #. Determine the endpoint id on which Policy Audit Mode will be enabled.
 #. Identify the Cilium pod running on the same Kubernetes node corresponding to the endpoint.
@@ -92,7 +92,7 @@ The following shell commands perform these steps:
    $ ENDPOINT=$(kubectl get cep -o jsonpath="{.items[?(@.metadata.name=='$PODNAME')].status.id}")
    $ CILIUM_POD=$(kubectl -n "$CILIUM_NAMESPACE" get pod --all-namespaces --field-selector spec.nodeName="$NODENAME" -lk8s-app=cilium -o jsonpath='{.items[*].metadata.name}')
    $ kubectl -n "$CILIUM_NAMESPACE" exec "$CILIUM_POD" -c cilium-agent -- \
-       cilium endpoint config "$ENDPOINT" PolicyAuditMode=Enabled
+       cilium-dbg endpoint config "$ENDPOINT" PolicyAuditMode=Enabled
     Endpoint 232 configuration updated successfully
 
 We can check that Policy Audit Mode is enabled for this endpoint with
@@ -100,7 +100,7 @@ We can check that Policy Audit Mode is enabled for this endpoint with
 .. code-block:: shell-session
 
    $ kubectl -n "$CILIUM_NAMESPACE" exec "$CILIUM_POD" -c cilium-agent -- \
-       cilium endpoint get "$ENDPOINT" -o jsonpath='{[*].spec.options.PolicyAuditMode}'
+       cilium-dbg endpoint get "$ENDPOINT" -o jsonpath='{[*].spec.options.PolicyAuditMode}'
    Enabled
 
 .. _observe_policy_verdicts:
@@ -117,6 +117,7 @@ to allow that traffic.
 Apply a default-deny policy:
 
 .. literalinclude:: ../../examples/minikube/sw_deny_policy.yaml
+     :language: yaml
 
 CiliumNetworkPolicies match on pod labels using an ``endpointSelector`` to identify
 the sources and destinations to which the policy applies. The above policy denies
@@ -175,6 +176,7 @@ expect this traffic to arrive at the deathstar, we can form a policy to match
 the traffic:
 
 .. literalinclude:: ../../examples/minikube/sw_l3_l4_policy.yaml
+     :language: yaml
 
 To apply this L3/L4 policy, run:
 
@@ -220,7 +222,7 @@ after deploying the policy is to disable Policy Audit Mode again:
             configmap/cilium-config patched
             $ kubectl -n $CILIUM_NAMESPACE rollout restart ds/cilium
             daemonset.apps/cilium restarted
-            $ kubectl -n kube-system rollout status ds/cilium
+            $ kubectl -n $CILIUM_NAMESPACE rollout status ds/cilium
             Waiting for daemon set "cilium" rollout to finish: 0 of 1 updated pods are available...
             daemon set "cilium" successfully rolled out
 
@@ -246,7 +248,7 @@ These steps are nearly identical to enabling Policy Audit Mode.
    $ ENDPOINT=$(kubectl get cep -o jsonpath="{.items[?(@.metadata.name=='$PODNAME')].status.id}")
    $ CILIUM_POD=$(kubectl -n "$CILIUM_NAMESPACE" get pod --all-namespaces --field-selector spec.nodeName="$NODENAME" -lk8s-app=cilium -o jsonpath='{.items[*].metadata.name}')
    $ kubectl -n "$CILIUM_NAMESPACE" exec "$CILIUM_POD" -c cilium-agent -- \
-       cilium endpoint config "$ENDPOINT" PolicyAuditMode=Disabled
+       cilium-dbg endpoint config "$ENDPOINT" PolicyAuditMode=Disabled
     Endpoint 232 configuration updated successfully
 
 Alternatively, **restarting the Cilium pod** will set the endpoint Policy Audit Mode to the daemon set configuration.
@@ -258,7 +260,7 @@ Verify Policy Audit Mode is Disabled
 .. code-block:: shell-session
 
    $ kubectl -n "$CILIUM_NAMESPACE" exec "$CILIUM_POD" -c cilium-agent -- \
-       cilium endpoint get "$ENDPOINT" -o jsonpath='{[*].spec.options.PolicyAuditMode}'
+       cilium-dbg endpoint get "$ENDPOINT" -o jsonpath='{[*].spec.options.PolicyAuditMode}'
    Disabled
 
 Now if we run the landing requests again, only the *tiefighter* pods with the
@@ -296,8 +298,8 @@ verdict with:
 
 
 We hope you enjoyed the tutorial.  Feel free to play more with the setup,
-follow the `gs_http` guide, and reach out to us on the `Cilium
-Slack channel <https://cilium.herokuapp.com>`_ with any questions!
+follow the `gs_http` guide, and reach out to us on `Cilium Slack`_ with any
+questions!
 
 Clean-up
 ========

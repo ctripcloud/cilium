@@ -31,8 +31,8 @@ Every endpoint in Cilium is in one of the following states:
    :scale: 50 %
    :align: center
 
-The state of an endpoint can be queried using the ``cilium endpoint
-list`` and ``cilium endpoint get`` CLI commands.
+The state of an endpoint can be queried using the ``cilium-dbg endpoint
+list`` and ``cilium-dbg endpoint get`` CLI commands.
 
 While an endpoint is running, it transitions between the
 ``waiting-for-identity``, ``waiting-to-regenerate``, ``regenerating``,
@@ -78,6 +78,7 @@ done as follows:
      .. group-tab:: k8s YAML
 
         .. literalinclude:: ../../../examples/policies/l4/init.yaml
+           :language: yaml
      .. group-tab:: JSON
 
         .. literalinclude:: ../../../examples/policies/l4/init.json
@@ -95,6 +96,7 @@ queries from initializing endpoints may be done as follows:
      .. group-tab:: k8s YAML
 
         .. literalinclude:: ../../../examples/policies/l4/from_init.yaml
+           :language: yaml
      .. group-tab:: JSON
 
         .. literalinclude:: ../../../examples/policies/l4/from_init.json
@@ -110,3 +112,27 @@ those rules will be dropped.  Otherwise, if the policy enforcement
 mode is ``never`` or ``default``, all ingress (resp. egress) traffic
 is allowed to (resp. from) initializing endpoints.  Otherwise, all
 ingress (resp. egress) traffic is dropped.
+
+
+.. _lockdown_mode:
+
+Lockdown Mode
+-------------
+
+If the Cilium agent option ``enable-lockdown-endpoint-on-policy-overflow``
+is set to "true" Cilium will put an endpoint into "lockdown" if the policy
+map cannot accommodate all of the required policy map entries required
+(that is, the policy map for the endpoint is overflowing). Cilium will put
+the endpoint out of "lockdown" when it detects that the policy map is no
+longer overflowing. When an endpoint is locked down all network traffic,
+both egress and ingress, will be dropped. Cilium will log a warning that
+the endpoint has been locked down.
+
+If this option is enabled, cluster operators should closely monitor the
+metric the bpf map pressure metric of the ``cilium_policy_*`` maps. See
+`Policymap pressure and overflow`_ for more details. They can use this metric
+to create an alert for increased memory pressure on the policy map as well
+as alert for a lockdown if ``enable-lockdown-endpoint-on-policy-overflow``
+is set to "true" (any ``bpf_map_pressure`` above a value of ``1.0``).
+
+.. _Policymap pressure and overflow: /operations/troubleshooting.html#policymap-pressure-and-overflow

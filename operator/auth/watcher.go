@@ -5,15 +5,16 @@ package auth
 
 import (
 	"context"
+	"log/slog"
 
+	"github.com/cilium/hive/cell"
 	"github.com/cilium/workerpool"
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/operator/auth/identity"
-	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
+	"github.com/cilium/cilium/operator/auth/spire"
 	ciliumv2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
 	"github.com/cilium/cilium/pkg/k8s/resource"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
 // params contains all the dependencies for the identity-gc.
@@ -21,23 +22,23 @@ import (
 type params struct {
 	cell.In
 
-	Logger         logrus.FieldLogger
-	Lifecycle      hive.Lifecycle
+	Logger         *slog.Logger
+	Lifecycle      cell.Lifecycle
 	IdentityClient identity.Provider
 	Identity       resource.Resource[*ciliumv2.CiliumIdentity]
 
-	Cfg Config
+	Cfg spire.MutualAuthConfig
 }
 
 // IdentityWatcher represents the Cilium identities watcher.
 // It watches for Cilium identities and upserts or deletes them in Spire.
 type IdentityWatcher struct {
-	logger logrus.FieldLogger
+	logger *slog.Logger
 
 	identityClient identity.Provider
 	identity       resource.Resource[*ciliumv2.CiliumIdentity]
 	wg             *workerpool.WorkerPool
-	cfg            Config
+	cfg            spire.MutualAuthConfig
 }
 
 func registerIdentityWatcher(p params) {
@@ -51,13 +52,13 @@ func registerIdentityWatcher(p params) {
 		wg:             workerpool.New(1),
 		cfg:            p.Cfg,
 	}
-	p.Lifecycle.Append(hive.Hook{
-		OnStart: func(ctx hive.HookContext) error {
+	p.Lifecycle.Append(cell.Hook{
+		OnStart: func(ctx cell.HookContext) error {
 			return iw.wg.Submit("identity-watcher", func(ctx context.Context) error {
 				return iw.run(ctx)
 			})
 		},
-		OnStop: func(_ hive.HookContext) error {
+		OnStop: func(_ cell.HookContext) error {
 			return iw.wg.Close()
 		},
 	})
@@ -69,10 +70,14 @@ func (iw *IdentityWatcher) run(ctx context.Context) error {
 		switch e.Kind {
 		case resource.Upsert:
 			err = iw.identityClient.Upsert(ctx, e.Object.GetName())
-			iw.logger.WithError(err).WithField("identity", e.Object.GetName()).Info("Upsert identity")
+			iw.logger.Info("Upsert identity",
+				logfields.Identity, e.Object.GetName(),
+				logfields.Error, err)
 		case resource.Delete:
 			err = iw.identityClient.Delete(ctx, e.Object.GetName())
-			iw.logger.WithError(err).WithField("identity", e.Object.GetName()).Info("Delete identity")
+			iw.logger.Info("Delete identity",
+				logfields.Identity, e.Object.GetName(),
+				logfields.Error, err)
 		}
 		e.Done(err)
 	}

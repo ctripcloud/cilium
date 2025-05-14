@@ -10,19 +10,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	. "gopkg.in/check.v1"
-)
-
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type BugtoolSuite struct{}
-
-var (
-	_ = Suite(&BugtoolSuite{})
-
-	baseDir, tmpDir string
+	"github.com/stretchr/testify/require"
 )
 
 type testStrings struct {
@@ -43,7 +31,7 @@ func (t *dummyTarWriter) WriteHeader(h *tar.Header) error {
 }
 
 type logWrapper struct {
-	logf func(format string, args ...interface{})
+	logf func(format string, args ...any)
 }
 
 func (l *logWrapper) Write(p []byte) (n int, err error) {
@@ -51,74 +39,63 @@ func (l *logWrapper) Write(p []byte) (n int, err error) {
 	return len(p), nil
 }
 
-func (b *BugtoolSuite) SetUpSuite(c *C) {
-	var err error
-	baseDir, err = os.MkdirTemp("", "cilium_test_bugtool_base")
-	c.Assert(err, IsNil)
-	tmpDir, err = os.MkdirTemp("", "cilium_test_bugtool_tmp")
-	c.Assert(err, IsNil)
-}
-
-func (b *BugtoolSuite) TearDownSuite(c *C) {
-	os.RemoveAll(baseDir)
-	os.RemoveAll(tmpDir)
-}
-
 // TestWalkPath tests that with various different error types, we can safely
 // back out and continue with the filepath walk. This allows gathering of other
 // information in a bugtool run when there's an issue with a particular file.
-func (b *BugtoolSuite) TestWalkPath(c *C) {
-	w := newWalker(baseDir, tmpDir, &dummyTarWriter{}, &logWrapper{c.Logf})
-	c.Assert(w, NotNil)
+func TestWalkPath(t *testing.T) {
+	baseDir, tmpDir := t.TempDir(), t.TempDir()
+
+	w := newWalker(baseDir, tmpDir, &dummyTarWriter{}, &logWrapper{t.Logf})
+	require.NotNil(t, w)
 
 	// Invalid paths
 	invalidFile := "doesnotexist"
 	err := w.walkPath(invalidFile, nil, nil)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = w.walkPath(invalidFile, nil, fmt.Errorf("ignore me please"))
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// Invalid symlink
 	invalidLink := filepath.Join(baseDir, "totes_real_link")
 	err = os.Symlink(invalidFile, invalidLink)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	_, err = os.Stat(invalidLink)
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 	info, err := os.Lstat(invalidLink)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = w.walkPath(invalidLink, info, nil)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// With real file
 	realFile, err := os.CreateTemp(baseDir, "test")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	info, err = os.Stat(realFile.Name())
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = w.walkPath(realFile.Name(), info, nil)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// With real link to real file
 	realLink := filepath.Join(baseDir, "test_link")
 	err = os.Symlink(realFile.Name(), realLink)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	info, err = os.Lstat(realLink)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = w.walkPath(realLink, info, nil)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// With directory
 	nestedDir, err := os.MkdirTemp(baseDir, "nested")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	info, err = os.Stat(nestedDir)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	err = w.walkPath(nestedDir, info, nil)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
 // TestHashEncryptionKeys tests proper hashing of keys. Lines in which `auth` or
 // other relevant pattern are found but not the hexadecimal keys are intentionally
 // redacted from the output to avoid accidental leaking of keys.
-func (b *BugtoolSuite) TestHashEncryptionKeys(c *C) {
+func TestHashEncryptionKeys(t *testing.T) {
 	testdata := []testStrings{
 		{
 			// `auth` and hexa string
@@ -144,6 +121,6 @@ func (b *BugtoolSuite) TestHashEncryptionKeys(c *C) {
 
 	for _, v := range testdata {
 		modifiedString := hashEncryptionKeys([]byte(v.input))
-		c.Assert(string(modifiedString), Equals, v.output)
+		require.Equal(t, string(modifiedString), v.output)
 	}
 }

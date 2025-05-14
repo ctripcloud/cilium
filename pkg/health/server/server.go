@@ -5,6 +5,7 @@ package server
 
 import (
 	"fmt"
+	"log/slog"
 	"path"
 	"time"
 
@@ -18,11 +19,14 @@ import (
 	ciliumDefaults "github.com/cilium/cilium/pkg/defaults"
 	healthClientPkg "github.com/cilium/cilium/pkg/health/client"
 	"github.com/cilium/cilium/pkg/health/defaults"
+	"github.com/cilium/cilium/pkg/health/probe"
 	"github.com/cilium/cilium/pkg/health/probe/responder"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 var (
@@ -33,7 +37,7 @@ var (
 type Config struct {
 	Debug         bool
 	CiliumURI     string
-	ProbeInterval time.Duration
+	ICMPReqsCount int
 	ProbeDeadline time.Duration
 	HTTPPathPort  int
 	HealthAPISpec *healthApi.Spec
@@ -66,6 +70,8 @@ type Server struct {
 	lock.RWMutex
 	connectivity *healthReport
 	localStatus  *healthModels.SelfStatus
+
+	nodesSeen map[string]struct{}
 }
 
 // DumpUptime returns the time that this server has been running.
@@ -89,7 +95,7 @@ func (s *Server) getNodes() (nodeMap, nodeMap, error) {
 	clusterNodesParam.SetClientID(&cID)
 	resp, err := s.Daemon.GetClusterNodes(clusterNodesParam)
 	if err != nil {
-		return nil, nil, fmt.Errorf("unable to get nodes' cluster: %s", err)
+		return nil, nil, fmt.Errorf("unable to get nodes' cluster: %w", err)
 	}
 	log.Debug("Got cilium /cluster/nodes")
 
@@ -111,29 +117,6 @@ func (s *Server) getNodes() (nodeMap, nodeMap, error) {
 	nodesRemoved := nodeElementSliceToNodeMap(resp.Payload.NodesRemoved)
 
 	return nodesAdded, nodesRemoved, nil
-}
-
-// getAllNodes fetches all nodes the daemon is aware of.
-func (s *Server) getAllNodes() (nodeMap, error) {
-	scopedLog := log
-	if s.CiliumURI != "" {
-		scopedLog = log.WithField("URI", s.CiliumURI)
-	}
-	scopedLog.Debug("Sending request for /cluster/nodes ...")
-
-	resp, err := s.Daemon.GetClusterNodes(nil)
-	if err != nil {
-		return nil, fmt.Errorf("unable to get nodes' cluster: %s", err)
-	}
-	log.Debug("Got cilium /cluster/nodes")
-
-	if resp == nil || resp.Payload == nil {
-		return nil, fmt.Errorf("received nil health response")
-	}
-
-	nodesAdded := nodeElementSliceToNodeMap(resp.Payload.NodesAdded)
-
-	return nodesAdded, nil
 }
 
 // nodeElementSliceToNodeMap returns a slice of models.NodeElement into a
@@ -167,24 +150,33 @@ func nodeElementSliceToNodeMap(nodeElements []*models.NodeElement) nodeMap {
 // updateCluster makes the specified health report visible to the API.
 //
 // It only updates the server's API-visible health report if the provided
-// report started after the current report.
+// report started at the same time as or after the current report.
 func (s *Server) updateCluster(report *healthReport) {
 	s.Lock()
 	defer s.Unlock()
 
-	if s.connectivity.startTime.Before(report.startTime) {
+	if s.connectivity.startTime.Compare(report.startTime) <= 0 {
+		if s.connectivity.startTime.Compare(report.startTime) < 0 {
+			// New probe, clear nodesSeen
+			s.nodesSeen = make(map[string]struct{})
+		}
+		s.collectNodeConnectivityMetrics(report)
 		s.connectivity = report
-		s.collectNodeConnectivityMetrics()
 	}
 }
 
-func (s *Server) collectNodeConnectivityMetrics() {
-	if s.localStatus == nil || s.connectivity == nil {
+// collectNodeConnectivityMetrics updates the metrics based on the provided
+// health report.
+func (s *Server) collectNodeConnectivityMetrics(report *healthReport) {
+	if s.localStatus == nil || report == nil {
 		return
 	}
 	localClusterName, localNodeName := getClusterNodeName(s.localStatus.Name)
 
-	for _, n := range s.connectivity.nodes {
+	endpointStatuses := make(map[healthClientPkg.ConnectivityStatusType]int)
+	nodeStatuses := make(map[healthClientPkg.ConnectivityStatusType]int)
+
+	for _, n := range report.nodes {
 		if n == nil || n.Host == nil || n.Host.PrimaryAddress == nil || n.HealthEndpoint == nil || n.HealthEndpoint.PrimaryAddress == nil {
 			continue
 		}
@@ -194,8 +186,12 @@ func (s *Server) collectNodeConnectivityMetrics() {
 		nodePathSecondaryAddress := healthClientPkg.GetHostSecondaryAddresses(n)
 
 		endpointPathStatus := n.HealthEndpoint
-		isEndpointReachable := healthClientPkg.SummarizePathConnectivityStatusType(healthClientPkg.GetAllEndpointAddresses(n)) == healthClientPkg.ConnStatusReachable
-		isNodeReachable := healthClientPkg.SummarizePathConnectivityStatusType(healthClientPkg.GetAllHostAddresses(n)) == healthClientPkg.ConnStatusReachable
+
+		isEndpointReachable := healthClientPkg.SummarizePathConnectivityStatus(healthClientPkg.GetAllEndpointAddresses(n)) == healthClientPkg.ConnStatusReachable
+		isNodeReachable := healthClientPkg.SummarizePathConnectivityStatus(healthClientPkg.GetAllHostAddresses(n)) == healthClientPkg.ConnStatusReachable
+
+		isHealthEndpointReachable := healthClientPkg.SummarizePathConnectivityStatusType(healthClientPkg.GetAllEndpointAddresses(n))
+		isHealthNodeReachable := healthClientPkg.SummarizePathConnectivityStatusType(healthClientPkg.GetAllHostAddresses(n))
 
 		location := metrics.LabelLocationLocalNode
 		if targetClusterName != localClusterName {
@@ -204,6 +200,7 @@ func (s *Server) collectNodeConnectivityMetrics() {
 			location = metrics.LabelLocationRemoteIntraCluster
 		}
 
+		// Update idempotent metrics here (to prevent overwriting with nil values).
 		// Aggregated status for endpoint connectivity
 		metrics.NodeConnectivityStatus.WithLabelValues(
 			localClusterName, localNodeName, targetClusterName, targetNodeName, location, metrics.LabelPeerEndpoint).
@@ -213,6 +210,29 @@ func (s *Server) collectNodeConnectivityMetrics() {
 		metrics.NodeConnectivityStatus.WithLabelValues(
 			localClusterName, localNodeName, targetClusterName, targetNodeName, location, metrics.LabelPeerNode).
 			Set(metrics.BoolToFloat64(isNodeReachable))
+
+		// Aggregate health connectivity statuses
+		for connectivityStatusType, value := range isHealthEndpointReachable {
+			endpointStatuses[connectivityStatusType] += value
+		}
+		for connectivityStatusType, value := range isHealthNodeReachable {
+			nodeStatuses[connectivityStatusType] += value
+		}
+
+		// In order to avoid updating non-idempotent metrics, considers the possible cases.
+		// Case 1: If the report is newer than the current one, update the connectivity status report and all metrics.
+		// Case 2: If the report is from the same interval as the current one, update the report and only the new metrics.
+		if s.connectivity != nil && s.connectivity.startTime.Compare(report.startTime) == 0 {
+			if s.nodesSeen == nil {
+				continue
+			}
+			if _, ok := s.nodesSeen[n.Name]; ok {
+				// Skip updating non-idempotent latency metrics for nodes already seen.
+				continue
+			}
+		}
+
+		s.nodesSeen[n.Name] = struct{}{}
 
 		// HTTP endpoint primary
 		collectConnectivityMetric(endpointPathStatus.PrimaryAddress.HTTP, localClusterName, localNodeName,
@@ -262,14 +282,60 @@ func (s *Server) collectNodeConnectivityMetrics() {
 				location, metrics.LabelPeerNode, metrics.LabelTrafficICMP, metrics.LabelAddressTypeSecondary)
 		}
 	}
+
+	// Aggregated health statuses for endpoint connectivity
+	metrics.NodeHealthConnectivityStatus.WithLabelValues(
+		localClusterName, localNodeName, metrics.LabelPeerEndpoint, metrics.LabelReachable).
+		Set(float64(endpointStatuses[healthClientPkg.ConnStatusReachable]))
+
+	metrics.NodeHealthConnectivityStatus.WithLabelValues(
+		localClusterName, localNodeName, metrics.LabelPeerEndpoint, metrics.LabelUnreachable).
+		Set(float64(endpointStatuses[healthClientPkg.ConnStatusUnreachable]))
+
+	metrics.NodeHealthConnectivityStatus.WithLabelValues(
+		localClusterName, localNodeName, metrics.LabelPeerEndpoint, metrics.LabelUnknown).
+		Set(float64(endpointStatuses[healthClientPkg.ConnStatusUnknown]))
+
+	// Aggregated health statuses for node connectivity
+	metrics.NodeHealthConnectivityStatus.WithLabelValues(
+		localClusterName, localNodeName, metrics.LabelPeerNode, metrics.LabelReachable).
+		Set(float64(nodeStatuses[healthClientPkg.ConnStatusReachable]))
+
+	metrics.NodeHealthConnectivityStatus.WithLabelValues(
+		localClusterName, localNodeName, metrics.LabelPeerNode, metrics.LabelUnreachable).
+		Set(float64(nodeStatuses[healthClientPkg.ConnStatusUnreachable]))
+
+	metrics.NodeHealthConnectivityStatus.WithLabelValues(
+		localClusterName, localNodeName, metrics.LabelPeerNode, metrics.LabelUnknown).
+		Set(float64(nodeStatuses[healthClientPkg.ConnStatusUnknown]))
 }
 
 func collectConnectivityMetric(status *healthModels.ConnectivityStatus, labels ...string) {
+	// collect deprecated node_connectivity_latency_seconds
 	var metricValue float64 = -1
 	if status != nil {
 		metricValue = float64(status.Latency) / float64(time.Second)
 	}
 	metrics.NodeConnectivityLatency.WithLabelValues(labels...).Set(metricValue)
+
+	// collect node_health_connectivity_latency_seconds
+	if status != nil {
+		// node_health_connectivity_latency_seconds copies a subset of the labels
+		// of the deprecated metric for use when observing metrics
+		if len(labels) < 7 {
+			log.Warn("node_health_connectivity_latency_seconds metric is missing labels, could not be collected")
+			return
+		}
+		healthLabels := make([]string, 5)
+		copy(healthLabels, labels[0:2])
+		copy(healthLabels[2:], labels[6:])
+		if status.Status == "" {
+			metricValue = float64(status.Latency) / float64(time.Second)
+			metrics.NodeHealthConnectivityLatency.WithLabelValues(healthLabels...).Observe(metricValue)
+		} else {
+			metrics.NodeHealthConnectivityLatency.WithLabelValues(healthLabels...).Observe(probe.HttpTimeout.Seconds())
+		}
+	}
 }
 
 // getClusterNodeName returns the cluster name and node name if possible.
@@ -297,28 +363,14 @@ func (s *Server) GetStatusResponse() *healthModels.HealthStatusResponse {
 		Local: &healthModels.SelfStatus{
 			Name: name,
 		},
-		Nodes:     s.connectivity.nodes,
-		Timestamp: s.connectivity.startTime.Format(time.RFC3339),
+		Nodes:         s.connectivity.nodes,
+		Timestamp:     s.connectivity.startTime.Format(time.RFC3339),
+		ProbeInterval: s.connectivity.probeInterval.String(),
 	}
 }
 
-// FetchStatusResponse updates the cluster with the latest set of nodes,
-// runs a synchronous probe across the cluster, updates the connectivity cache
-// and returns the results.
+// FetchStatusResponse returns the results of the most recent probe.
 func (s *Server) FetchStatusResponse() (*healthModels.HealthStatusResponse, error) {
-	nodes, err := s.getAllNodes()
-	if err != nil {
-		return nil, err
-	}
-
-	prober := newProber(s, nodes)
-	if err := prober.Run(); err != nil {
-		log.WithError(err).Info("Failed to run ping")
-		return nil, err
-	}
-	log.Debug("Run complete")
-	s.updateCluster(prober.getResults())
-
 	return s.GetStatusResponse(), nil
 }
 
@@ -327,26 +379,44 @@ func (s *Server) FetchStatusResponse() (*healthModels.HealthStatusResponse, erro
 // Blocks indefinitely, or returns any errors that occur hosting the Unix
 // socket API server.
 func (s *Server) runActiveServices() error {
-	// Run it once at the start so we get some initial status
-	s.FetchStatusResponse()
+	// Set time in initial empty health report.
+	s.updateCluster(&healthReport{startTime: time.Now()})
 
 	// We can safely ignore nodesRemoved since it's the first time we are
 	// fetching the nodes from the server.
 	nodesAdded, _, _ := s.getNodes()
 	prober := newProber(s, nodesAdded)
-	prober.MaxRTT = s.ProbeInterval
-	prober.OnIdle = func() {
-		// Fetch results and update set of nodes to probe every
-		// ProbeInterval
-		s.updateCluster(prober.getResults())
-		if nodesAdded, nodesRemoved, err := s.getNodes(); err != nil {
-			log.WithError(err).Error("unable to get cluster nodes")
-		} else {
-			prober.setNodes(nodesAdded, nodesRemoved)
-		}
-	}
 	prober.RunLoop()
 	defer prober.Stop()
+
+	// Periodically update the cluster status, without waiting for the
+	// probing interval to pass.
+	go func() {
+		tick := time.NewTicker(60 * time.Second)
+	loop:
+		for {
+			select {
+			case <-prober.stop:
+				break loop
+			case <-tick.C:
+				// We don't want to report stale nodes in metrics.
+				// We don't update added nodes in the middle of a probing interval.
+				if nodesAdded, nodesRemoved, err := prober.server.getNodes(); err != nil {
+					// reset the cache by setting clientID to 0 and removing all current nodes
+					prober.server.clientID = 0
+					prober.setNodes(nil, prober.nodes)
+					log.WithError(err).Error("unable to get cluster nodes")
+				} else {
+					// (1) setNodes implementation doesn't override results for existing nodes.
+					// (2) Remove stale nodes so we don't report them in metrics before updating results
+					prober.setNodes(nodesAdded, nodesRemoved)
+					// (2) Update results without stale nodes
+					prober.server.updateCluster(prober.getResults())
+				}
+			}
+		}
+		tick.Stop()
+	}()
 
 	return s.Server.Serve()
 }
@@ -391,7 +461,7 @@ func (s *Server) newServer(spec *healthApi.Spec) *healthApi.Server {
 	restAPI.ConnectivityGetStatusHandler = NewGetStatusHandler(s)
 	restAPI.ConnectivityPutStatusProbeHandler = NewPutStatusProbeHandler(s)
 
-	api.DisableAPIs(spec.DeniedAPIs, restAPI.AddMiddlewareFor)
+	api.DisableAPIs(logging.DefaultSlogLogger, spec.DeniedAPIs, restAPI.AddMiddlewareFor)
 	srv := healthApi.NewServer(restAPI)
 	srv.EnabledListeners = []string{"unix"}
 	srv.SocketPath = defaults.SockPath
@@ -407,6 +477,7 @@ func NewServer(config Config) (*Server, error) {
 		startTime:    time.Now(),
 		Config:       config,
 		connectivity: &healthReport{},
+		nodesSeen:    make(map[string]struct{}),
 	}
 
 	cl, err := ciliumPkg.NewClient(config.CiliumURI)
@@ -417,7 +488,33 @@ func NewServer(config Config) (*Server, error) {
 	server.Client = cl
 	server.Server = *server.newServer(config.HealthAPISpec)
 
-	server.httpPathServer = responder.NewServer(config.HTTPPathPort)
+	server.httpPathServer = responder.NewServers(getAddresses(logging.DefaultSlogLogger), config.HTTPPathPort)
 
 	return server, nil
+}
+
+// Get internal node ipv4/ipv6 addresses based on config enabled.
+// If it fails to get either of internal node address, it returns "0.0.0.0" if ipv4 or "::" if ipv6.
+func getAddresses(logger *slog.Logger) []string {
+	addresses := make([]string, 0, 2)
+
+	if option.Config.EnableIPv4 {
+		if ipv4 := node.GetInternalIPv4(logger); ipv4 != nil {
+			addresses = append(addresses, ipv4.String())
+		} else {
+			// if Get ipv4 fails, then listen on all ipv4 addr.
+			addresses = append(addresses, "0.0.0.0")
+		}
+	}
+
+	if option.Config.EnableIPv6 {
+		if ipv6 := node.GetInternalIPv6(logger); ipv6 != nil {
+			addresses = append(addresses, ipv6.String())
+		} else {
+			// if Get ipv6 fails, then listen on all ipv6 addr.
+			addresses = append(addresses, "::")
+		}
+	}
+
+	return addresses
 }

@@ -1,12 +1,14 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_IPV6__
-#define __LIB_IPV6__
+#pragma once
 
 #include <linux/ipv6.h>
 
 #include "dbg.h"
+#include "l4.h"
+#include "metrics.h"
+#include "ipfrag.h"
 
 /* Number of extension headers that can be skipped */
 #define IPV6_MAX_HEADERS 4
@@ -28,6 +30,36 @@
 
 #define NEXTHDR_MAX             255
 
+#define IPV6_FRAGLEN            8
+
+#define IPV6_SADDR_OFF		offsetof(struct ipv6hdr, saddr)
+#define IPV6_DADDR_OFF		offsetof(struct ipv6hdr, daddr)
+
+/* Follows the structure of ipv6hdr, see ipv6_handle_fragmentation. */
+struct ipv6_frag_id {
+	__be32 id;		/* L4 datagram identifier */
+	__u8 proto;
+	__u8 pad[3];
+	union v6addr saddr;
+	union v6addr daddr;
+} __packed;
+
+struct ipv6_frag_l4ports {
+	__be16 sport;
+	__be16 dport;
+} __packed;
+
+#ifdef ENABLE_IPV6_FRAGMENTS
+struct {
+	__uint(type, BPF_MAP_TYPE_LRU_HASH);
+	__type(key, struct ipv6_frag_id);
+	__type(value, struct ipv6_frag_l4ports);
+	__uint(pinning, LIBBPF_PIN_BY_NAME);
+	__uint(max_entries, CILIUM_IPV6_FRAG_MAP_MAX_ENTRIES);
+	__uint(map_flags, LRU_MEM_FLAVOR);
+} cilium_ipv6_frag_datagrams __section_maps_btf;
+#endif
+
 static __always_inline int ipv6_optlen(const struct ipv6_opt_hdr *opthdr)
 {
 	return (opthdr->hdrlen + 1) << 3;
@@ -38,67 +70,125 @@ static __always_inline int ipv6_authlen(const struct ipv6_opt_hdr *opthdr)
 	return (opthdr->hdrlen + 2) << 2;
 }
 
-static __always_inline int ipv6_hdrlen_offset(struct __ctx_buff *ctx, __u8 *nexthdr, int l3_off)
+static __always_inline int ipv6_skip_exthdr(struct __ctx_buff *ctx, __u8 *nexthdr, int off)
 {
-	int i, len = sizeof(struct ipv6hdr);
 	struct ipv6_opt_hdr opthdr __align_stack_8;
 	__u8 nh = *nexthdr;
 
+	switch (nh) {
+	case NEXTHDR_NONE:
+		return DROP_INVALID_EXTHDR;
+
+	case NEXTHDR_FRAGMENT:
+	case NEXTHDR_AUTH:
+	case NEXTHDR_HOP:
+	case NEXTHDR_ROUTING:
+	case NEXTHDR_DEST:
+		if (ctx_load_bytes(ctx, off, &opthdr, sizeof(opthdr)) < 0)
+			return DROP_INVALID;
+
+		*nexthdr = opthdr.nexthdr;
+		break;
+
+	default: /* L4 protocol */
+		return 0;
+	}
+
+	switch (nh) {
+	case NEXTHDR_FRAGMENT:
+		return IPV6_FRAGLEN;
+
+	case NEXTHDR_AUTH:
+		return ipv6_authlen(&opthdr);
+
+	case NEXTHDR_HOP:
+	case NEXTHDR_ROUTING:
+	case NEXTHDR_DEST:
+		return ipv6_optlen(&opthdr);
+
+	default:
+		/* Returned in the switch above. */
+		__builtin_unreachable();
+	}
+}
+
+static __always_inline int ipv6_hdrlen_offset(struct __ctx_buff *ctx, int l3_off,
+					      __u8 *nexthdr, fraginfo_t *fraginfo)
+{
+	int i, len = sizeof(struct ipv6hdr);
+	__u8 nh = *nexthdr;
+
+	/* 0 is a valid fraginfo that encodes:
+	 * - is_fragment = false
+	 * - has_l4_header = true
+	 * - protocol = 0 (unused when !is_fragment)
+	 * This is the default in case no NEXTHDR_FRAGMENT is found.
+	 */
+	*fraginfo = 0;
+
 #pragma unroll
 	for (i = 0; i < IPV6_MAX_HEADERS; i++) {
-		switch (nh) {
-		case NEXTHDR_NONE:
-			return DROP_INVALID_EXTHDR;
+		__u8 newnh = nh;
+		int hdrlen = ipv6_skip_exthdr(ctx, &newnh, l3_off + len);
 
-		case NEXTHDR_FRAGMENT:
-			return DROP_FRAG_NOSUPPORT;
+		if (hdrlen < 0)
+			return hdrlen;
 
-		case NEXTHDR_HOP:
-		case NEXTHDR_ROUTING:
-		case NEXTHDR_AUTH:
-		case NEXTHDR_DEST:
-			if (ctx_load_bytes(ctx, l3_off + len, &opthdr, sizeof(opthdr)) < 0)
-				return DROP_INVALID;
-
-			if (nh == NEXTHDR_AUTH)
-				len += ipv6_authlen(&opthdr);
-			else
-				len += ipv6_optlen(&opthdr);
-
-			nh = opthdr.nexthdr;
-			break;
-
-		default:
+		if (!hdrlen) {
 			*nexthdr = nh;
 			return len;
 		}
+
+		if (nh == NEXTHDR_FRAGMENT) {
+			struct ipv6_frag_hdr frag;
+
+			if (ctx_load_bytes(ctx, l3_off + len, &frag, sizeof(frag)) < 0)
+				return DROP_INVALID;
+
+			*fraginfo = ipfrag_encode_ipv6(&frag);
+		}
+
+		len += hdrlen;
+		nh = newnh;
 	}
 
 	/* Reached limit of supported extension headers */
 	return DROP_INVALID_EXTHDR;
 }
 
+static __always_inline int ipv6_hdrlen_with_fraginfo(struct __ctx_buff *ctx,
+						     __u8 *nexthdr,
+						     fraginfo_t *fraginfo)
+{
+	return ipv6_hdrlen_offset(ctx, ETH_HLEN, nexthdr, fraginfo);
+}
+
 static __always_inline int ipv6_hdrlen(struct __ctx_buff *ctx, __u8 *nexthdr)
 {
-	return ipv6_hdrlen_offset(ctx, nexthdr, ETH_HLEN);
+	fraginfo_t fraginfo;
+
+	return ipv6_hdrlen_offset(ctx, ETH_HLEN, nexthdr, &fraginfo);
 }
 
 static __always_inline void ipv6_addr_copy(union v6addr *dst,
 					   const union v6addr *src)
 {
+	memcpy(dst, src, sizeof(*dst));
+}
+
+static __always_inline void ipv6_addr_copy_unaligned(union v6addr *dst,
+						     const union v6addr *src)
+{
 	dst->d1 = src->d1;
 	dst->d2 = src->d2;
 }
 
-static __always_inline __u64 ipv6_addrcmp(const union v6addr *a,
-					  const union v6addr *b)
+static __always_inline bool ipv6_addr_equals(const union v6addr *a,
+					     const union v6addr *b)
 {
-	__u64 tmp;
-
-	tmp = a->d1 - b->d1;
-	if (!tmp)
-		tmp = a->d2 - b->d2;
-	return tmp;
+	if (a->d1 != b->d1)
+		return false;
+	return a->d2 == b->d2;
 }
 
 /* Only works with contiguous masks. */
@@ -139,7 +229,7 @@ static __always_inline int ipv6_dec_hoplimit(struct __ctx_buff *ctx, int off)
 		return DROP_INVALID;
 
 	if (hl <= 1)
-		return 1;
+		return DROP_TTL_EXCEEDED;
 	hl--;
 	if (ctx_store_bytes(ctx, off + offsetof(struct ipv6hdr, hop_limit),
 			    &hl, sizeof(hl), BPF_F_RECOMPUTE_CSUM) < 0)
@@ -227,4 +317,124 @@ static __always_inline int ipv6_addr_is_mapped(const union v6addr *addr)
 {
 	return addr->p1 == 0 && addr->p2 == 0 && addr->p3 == 0xFFFF0000;
 }
-#endif /* __LIB_IPV6__ */
+
+/* As opposed to ipfrag_encode_ipv6, this function can return errors. */
+static __always_inline fraginfo_t
+ipv6_get_fraginfo(struct __ctx_buff *ctx, const struct ipv6hdr *ip6)
+{
+	int l3_off = (int)((void *)ip6 - ctx_data(ctx));
+	int i, len = sizeof(struct ipv6hdr);
+	__u8 nh = ip6->nexthdr;
+
+#pragma unroll
+	for (i = 0; i < IPV6_MAX_HEADERS; i++) {
+		__u8 newnh = nh;
+		int hdrlen = ipv6_skip_exthdr(ctx, &newnh, l3_off + len);
+
+		if (hdrlen < 0)
+			return hdrlen;
+
+		if (!hdrlen) {
+			/* No fragment header. 0 is a valid fraginfo that encodes:
+			 * - is_fragment = false
+			 * - has_l4_header = true
+			 * - protocol = 0 (unused when !is_fragment)
+			 */
+			return 0;
+		}
+
+		if (nh == NEXTHDR_FRAGMENT) {
+			struct ipv6_frag_hdr frag;
+
+			if (ctx_load_bytes(ctx, l3_off + len, &frag, sizeof(frag)) < 0)
+				return DROP_INVALID;
+
+			return ipfrag_encode_ipv6(&frag);
+		}
+
+		len += hdrlen;
+		nh = newnh;
+	}
+
+	/* Reached limit of supported extension headers */
+	return DROP_INVALID_EXTHDR;
+}
+
+#ifdef ENABLE_IPV6_FRAGMENTS
+static __always_inline int
+ipv6_frag_get_l4ports(const struct ipv6_frag_id *frag_id,
+		      struct ipv6_frag_l4ports *ports)
+{
+	struct ipv6_frag_l4ports *tmp;
+
+	tmp = map_lookup_elem(&cilium_ipv6_frag_datagrams, frag_id);
+	if (!tmp)
+		return DROP_FRAG_NOT_FOUND;
+
+	memcpy(ports, tmp, sizeof(*ports));
+	return 0;
+}
+
+static __always_inline int
+ipv6_handle_fragmentation(struct __ctx_buff *ctx,
+			  const struct ipv6hdr *ip6,
+			  fraginfo_t fraginfo,
+			  int l4_off,
+			  enum ct_dir ct_dir,
+			  struct ipv6_frag_l4ports *ports)
+{
+	/* frag_id and ip6 have saddr and daddr at the same offset, which allows
+	 * to spare a bit of stack space and save a copy of 32 bytes.
+	 */
+	union {
+		__u64 diff;
+		struct ipv6_frag_id frag_id;
+		struct ipv6hdr ip6;
+	} *u = (void *)ip6;
+	__u64 backup = u->diff;
+	int ret = 0;
+
+	u->diff = 0; /* Clear the padding. */
+	u->frag_id.id = ipfrag_get_id(fraginfo);
+	u->frag_id.proto = ipfrag_get_protocol(fraginfo);
+	/* saddr and daddr are already there. */
+
+	if (unlikely(!ipfrag_has_l4_header(fraginfo))) {
+		ret = ipv6_frag_get_l4ports(&u->frag_id, ports);
+		goto out;
+	}
+
+	if (l4_load_ports(ctx, l4_off, (__be16 *)ports) < 0) {
+		ret = DROP_CT_INVALID_HDR;
+		goto out;
+	}
+
+	if (unlikely(ipfrag_is_fragment(fraginfo))) {
+		if (map_update_elem(&cilium_ipv6_frag_datagrams, &u->frag_id, ports, BPF_ANY))
+			update_metrics(ctx_full_len(ctx), ct_to_metrics_dir(ct_dir),
+				       REASON_FRAG_PACKET_UPDATE);
+	}
+
+out:
+	u->diff = backup;
+	return ret;
+}
+#endif
+
+static __always_inline int
+ipv6_load_l4_ports(struct __ctx_buff *ctx, struct ipv6hdr *ip6 __maybe_unused,
+		   fraginfo_t fraginfo, int l4_off, enum ct_dir dir __maybe_unused,
+		   __be16 *ports)
+{
+#ifdef ENABLE_IPV6_FRAGMENTS
+	return ipv6_handle_fragmentation(ctx, ip6, fraginfo, l4_off, dir,
+					 (struct ipv6_frag_l4ports *)ports);
+#else
+	if (unlikely(!ipfrag_has_l4_header(fraginfo)))
+		return DROP_FRAG_NOSUPPORT;
+	if (l4_load_ports(ctx, l4_off, ports) < 0)
+		return DROP_CT_INVALID_HDR;
+#endif
+
+	return 0;
+}

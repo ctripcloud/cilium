@@ -5,6 +5,7 @@ package authmap
 
 import (
 	"fmt"
+	"log/slog"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -12,8 +13,6 @@ import (
 	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/linux/utime"
 	"github.com/cilium/cilium/pkg/ebpf"
-	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/policy"
 )
 
 const (
@@ -24,28 +23,31 @@ const (
 type Map interface {
 	// Lookup returns the auth map object associated with the provided
 	// (local identity, remote identity, remote host id, auth type) quadruple.
-	Lookup(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType) (*AuthInfo, error)
+	Lookup(key AuthKey) (AuthInfo, error)
 
 	// Update inserts or updates the auth map object associated with the provided
 	// (local identity, remote identity, remote host id, auth type) quadruple.
-	Update(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType, expiration utime.UTime) error
+	Update(key AuthKey, expiration utime.UTime) error
 
 	// Delete deletes the auth map object associated with the provided
 	// (local identity, remote identity, remote host id, auth type) quadruple.
-	Delete(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType) error
+	Delete(key AuthKey) error
 
 	// IterateWithCallback iterates through all the keys/values of an auth map,
 	// passing each key/value pair to the cb callback.
 	IterateWithCallback(cb IterateCallback) error
+
+	// MaxEntries returns the maximum number of entries the auth map can hold.
+	MaxEntries() uint32
 }
 
 type authMap struct {
 	bpfMap *ebpf.Map
 }
 
-func newMap(maxEntries int) *authMap {
+func newMap(logger *slog.Logger, maxEntries int) *authMap {
 	return &authMap{
-		bpfMap: ebpf.NewMap(&ebpf.MapSpec{
+		bpfMap: ebpf.NewMap(logger, &ebpf.MapSpec{
 			Name:       MapName,
 			Type:       ebpf.Hash,
 			KeySize:    uint32(unsafe.Sizeof(AuthKey{})),
@@ -60,8 +62,8 @@ func newMap(maxEntries int) *authMap {
 // LoadAuthMap loads the pre-initialized auth map for access.
 // This should only be used from components which aren't capable of using hive - mainly the Cilium CLI.
 // It needs to initialized beforehand via the Cilium Agent.
-func LoadAuthMap() (Map, error) {
-	bpfMap, err := ebpf.LoadRegisterMap(MapName)
+func LoadAuthMap(logger *slog.Logger) (Map, error) {
+	bpfMap, err := ebpf.LoadRegisterMap(logger, MapName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to load bpf map: %w", err)
 	}
@@ -85,24 +87,19 @@ func (m *authMap) close() error {
 	return nil
 }
 
-func (m *authMap) Update(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType, expiration utime.UTime) error {
-	key := newAuthKey(localIdentity, remoteIdentity, remoteNodeID, authType)
+func (m *authMap) Update(key AuthKey, expiration utime.UTime) error {
 	val := AuthInfo{Expiration: expiration}
 	return m.bpfMap.Update(key, val, 0)
 }
 
-func (m *authMap) Delete(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType) error {
-	key := newAuthKey(localIdentity, remoteIdentity, remoteNodeID, authType)
+func (m *authMap) Delete(key AuthKey) error {
 	return m.bpfMap.Delete(key)
 }
 
-func (m *authMap) Lookup(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType) (*AuthInfo, error) {
-	key := newAuthKey(localIdentity, remoteIdentity, remoteNodeID, authType)
+func (m *authMap) Lookup(key AuthKey) (AuthInfo, error) {
 	val := AuthInfo{}
-
-	err := m.bpfMap.Lookup(&key, &val)
-
-	return &val, err
+	err := m.bpfMap.Lookup(key, &val)
+	return val, err
 }
 
 // IterateCallback represents the signature of the callback function
@@ -112,7 +109,7 @@ type IterateCallback func(*AuthKey, *AuthInfo)
 
 func (m *authMap) IterateWithCallback(cb IterateCallback) error {
 	return m.bpfMap.IterateWithCallback(&AuthKey{}, &AuthInfo{},
-		func(k, v interface{}) {
+		func(k, v any) {
 			key := k.(*AuthKey)
 			value := v.(*AuthInfo)
 			cb(key, value)
@@ -120,11 +117,13 @@ func (m *authMap) IterateWithCallback(cb IterateCallback) error {
 	)
 }
 
+func (m *authMap) MaxEntries() uint32 {
+	return m.bpfMap.MaxEntries()
+}
+
 // AuthKey implements the bpf.MapKey interface.
 //
 // Must be in sync with struct auth_key in <bpf/lib/common.h>
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type AuthKey struct {
 	LocalIdentity  uint32 `align:"local_sec_label"`
 	RemoteIdentity uint32 `align:"remote_sec_label"`
@@ -133,34 +132,17 @@ type AuthKey struct {
 	Pad            uint8  `align:"pad"`
 }
 
-func (r *AuthKey) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(r) }
-
-func (r *AuthKey) NewValue() bpf.MapValue { return &AuthInfo{} }
-
 func (r *AuthKey) String() string {
 	return fmt.Sprintf("localIdentity=%d, remoteIdentity=%d, remoteNodeID=%d, authType=%d", r.LocalIdentity, r.RemoteIdentity, r.RemoteNodeID, r.AuthType)
 }
-
-func newAuthKey(localIdentity identity.NumericIdentity, remoteIdentity identity.NumericIdentity, remoteNodeID uint16, authType policy.AuthType) AuthKey {
-	return AuthKey{
-		LocalIdentity:  localIdentity.Uint32(),
-		RemoteIdentity: remoteIdentity.Uint32(),
-		RemoteNodeID:   remoteNodeID,
-		AuthType:       authType.Uint8(),
-	}
-}
+func (r *AuthKey) New() bpf.MapKey { return &AuthKey{} }
 
 // AuthInfo implements the bpf.MapValue interface.
 //
 // Must be in sync with struct auth_info in <bpf/lib/common.h>
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type AuthInfo struct {
 	Expiration utime.UTime `align:"expiration"`
 }
-
-// GetValuePtr returns the unsafe pointer to the BPF value.
-func (r *AuthInfo) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(r) }
 
 func (r *AuthInfo) String() string {
 	return fmt.Sprintf("expiration=%q", r.Expiration)

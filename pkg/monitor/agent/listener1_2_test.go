@@ -7,25 +7,21 @@ import (
 	"net"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
 	"github.com/cilium/cilium/pkg/monitor/agent/listener"
 )
 
-func Test(t *testing.T) { TestingT(t) }
-
-type ListenerSuite struct{}
-
-var _ = Suite(&ListenerSuite{})
-
-func (m *ListenerSuite) TestListenerv1_2(c *C) {
+func TestListenerv1_2(t *testing.T) {
 	closed := make(chan bool)
 	server, client := net.Pipe()
-	l := newListenerv1_2(client, 10, func(listener listener.MonitorListener) {
+	logger := hivetest.Logger(t)
+	l := newListenerv1_2(logger, client, 10, func(listener listener.MonitorListener) {
 		closed <- true
 	})
 	// Verify the listener version.
-	c.Assert(l.Version(), Equals, listener.Version1_2)
+	require.Equal(t, listener.Version1_2, l.Version())
 	// Calling Close() multiple times shouldn't cause panic.
 	l.Close()
 	l.Close()

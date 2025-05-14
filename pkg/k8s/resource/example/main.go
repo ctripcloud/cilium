@@ -7,21 +7,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
-	"time"
+	"log/slog"
+	"math/rand/v2"
 
+	"github.com/cilium/hive/cell"
 	"github.com/cilium/workerpool"
 	"github.com/spf13/pflag"
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/k8s/resource"
 	"github.com/cilium/cilium/pkg/k8s/utils"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // PrintServices for the pkg/k8s/resource which observers pods and services and once a second prints the list of
@@ -36,7 +37,7 @@ import (
 //  kubectl run -it --rm --image=nginx  --port=80 --expose nginx
 
 var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "example")
+	log = logging.DefaultSlogLogger.With(logfields.LogSubsys, "example")
 )
 
 func main() {
@@ -49,7 +50,7 @@ func main() {
 	)
 	hive.RegisterFlags(pflag.CommandLine)
 	pflag.Parse()
-	hive.Run()
+	hive.Run(slog.Default())
 }
 
 var resourcesCell = cell.Module(
@@ -57,19 +58,19 @@ var resourcesCell = cell.Module(
 	"Kubernetes Pod and Service resources",
 
 	cell.Provide(
-		func(lc hive.Lifecycle, c client.Clientset) resource.Resource[*corev1.Pod] {
+		func(lc cell.Lifecycle, c client.Clientset) resource.Resource[*corev1.Pod] {
 			if !c.IsEnabled() {
 				return nil
 			}
 			lw := utils.ListerWatcherFromTyped[*corev1.PodList](c.CoreV1().Pods(""))
-			return resource.New[*corev1.Pod](lc, lw)
+			return resource.New[*corev1.Pod](lc, lw, resource.WithMetric("Pod"))
 		},
-		func(lc hive.Lifecycle, c client.Clientset) resource.Resource[*corev1.Service] {
+		func(lc cell.Lifecycle, c client.Clientset) resource.Resource[*corev1.Service] {
 			if !c.IsEnabled() {
 				return nil
 			}
 			lw := utils.ListerWatcherFromTyped[*corev1.ServiceList](c.CoreV1().Services(""))
-			return resource.New[*corev1.Service](lc, lw)
+			return resource.New[*corev1.Service](lc, lw, resource.WithMetric("Service"))
 		},
 	),
 )
@@ -91,7 +92,7 @@ type PrintServices struct {
 type printServicesParams struct {
 	cell.In
 
-	Lifecycle hive.Lifecycle
+	Lifecycle cell.Lifecycle
 	Pods      resource.Resource[*corev1.Pod]
 	Services  resource.Resource[*corev1.Service]
 }
@@ -108,7 +109,7 @@ func newPrintServices(p printServicesParams) (*PrintServices, error) {
 	return ps, nil
 }
 
-func (ps *PrintServices) Start(startCtx hive.HookContext) error {
+func (ps *PrintServices) Start(startCtx cell.HookContext) error {
 	ps.wp = workerpool.New(1)
 	ps.wp.Submit("processLoop", ps.processLoop)
 
@@ -120,7 +121,7 @@ func (ps *PrintServices) Start(startCtx hive.HookContext) error {
 	return nil
 }
 
-func (ps *PrintServices) Stop(hive.HookContext) error {
+func (ps *PrintServices) Stop(cell.HookContext) error {
 	ps.wp.Close()
 	return nil
 }
@@ -132,14 +133,14 @@ func (ps *PrintServices) printServices(ctx context.Context) {
 	// Can fail if the context is cancelled (e.g. PrintServices is being stopped).
 	store, err := ps.services.Store(ctx)
 	if err != nil {
-		log.Errorf("Failed to retrieve store: %s, aborting", err)
+		log.Error("Failed to retrieve store, aborting", logfields.Error, err)
 		return
 	}
 
 	log.Info("Services:")
 	for _, svc := range store.List() {
-		labels := labels.Map2Labels(svc.Spec.Selector, "k8s")
-		log.Infof("  - %s/%s\ttype=%s\tselector=%s", svc.Namespace, svc.Name, svc.Spec.Type, labels)
+		labels := labels.Map2Labels(svc.Spec.Selector, labels.LabelSourceK8s)
+		log.Info(fmt.Sprintf("  - %s/%s\ttype=%s\tselector=%s", svc.Namespace, svc.Name, svc.Spec.Type, labels))
 	}
 
 }
@@ -166,18 +167,18 @@ func (ps *PrintServices) processLoop(ctx context.Context) error {
 		select {
 		case <-ticker.C:
 			for key, selectors := range serviceSelectors {
-				log.Infof("%s (%s)", key, selectors)
+				log.Info(fmt.Sprintf("%s (%s)", key, selectors))
 				for podName, lbls := range podLabels {
 					match := true
 					for _, sel := range selectors {
 						match = match && lbls.Has(sel)
 					}
 					if match {
-						log.Infof("  - %s", podName)
+						log.Info(fmt.Sprintf("  - %s", podName))
 					}
 				}
 			}
-			log.Println("----------------------------------------------------------")
+			log.Info("----------------------------------------------------------")
 
 		case ev, ok := <-pods:
 			if !ok {
@@ -194,10 +195,10 @@ func (ps *PrintServices) processLoop(ctx context.Context) error {
 				// existed at the api-server brief moment ago and can remove persisted
 				// data of pods that are not part of this set.
 			case resource.Upsert:
-				log.Infof("Pod %s updated", ev.Key)
-				podLabels[ev.Key] = labels.Map2Labels(ev.Object.Labels, "k8s")
+				log.Info("Pod updated", logfields.Pod, ev.Key)
+				podLabels[ev.Key] = labels.Map2Labels(ev.Object.Labels, labels.LabelSourceK8s)
 			case resource.Delete:
-				log.Infof("Pod %s deleted", ev.Key)
+				log.Info("Pod deleted", logfields.Pod, ev.Key)
 				delete(podLabels, ev.Key)
 			}
 
@@ -214,7 +215,7 @@ func (ps *PrintServices) processLoop(ctx context.Context) error {
 
 			// Simulate a fault 10% of the time. This will cause this event to be retried
 			// later.
-			if rand.Intn(10) == 1 {
+			if rand.IntN(10) == 1 {
 				log.Info("Injecting a fault!")
 				ev.Done(errors.New("injected fault"))
 				continue
@@ -224,12 +225,12 @@ func (ps *PrintServices) processLoop(ctx context.Context) error {
 			case resource.Sync:
 				log.Info("Services synced")
 			case resource.Upsert:
-				log.Infof("Service %s updated", ev.Key)
+				log.Info("Service updated", logfields.Service, ev.Key)
 				if len(ev.Object.Spec.Selector) > 0 {
-					serviceSelectors[ev.Key] = labels.Map2Labels(ev.Object.Spec.Selector, "k8s")
+					serviceSelectors[ev.Key] = labels.Map2Labels(ev.Object.Spec.Selector, labels.LabelSourceK8s)
 				}
 			case resource.Delete:
-				log.Infof("Service %s deleted", ev.Key)
+				log.Info("Service deleted", logfields.Service, ev.Key)
 				delete(serviceSelectors, ev.Key)
 			}
 			ev.Done(nil)

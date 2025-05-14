@@ -8,11 +8,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"strings"
 	"sync/atomic"
-	"time"
 
-	"github.com/sirupsen/logrus"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/timestamppb"
@@ -27,7 +26,10 @@ import (
 	observerTypes "github.com/cilium/cilium/pkg/hubble/observer/types"
 	"github.com/cilium/cilium/pkg/hubble/parser"
 	parserErrors "github.com/cilium/cilium/pkg/hubble/parser/errors"
+	"github.com/cilium/cilium/pkg/hubble/parser/fieldmask"
+	"github.com/cilium/cilium/pkg/logging/logfields"
 	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // DefaultOptions to include in the server. Other packages may extend this
@@ -49,10 +51,10 @@ type LocalObserverServer struct {
 	// channel is empty, once it's closed.
 	stopped chan struct{}
 
-	log logrus.FieldLogger
+	log *slog.Logger
 
 	// payloadParser decodes flowpb.Payload into flowpb.Flow
-	payloadParser *parser.Parser
+	payloadParser parser.Decoder
 
 	opts observeroption.Options
 
@@ -60,42 +62,47 @@ type LocalObserverServer struct {
 	startTime time.Time
 
 	// numObservedFlows counts how many flows have been observed
-	numObservedFlows uint64
+	numObservedFlows atomic.Uint64
+
+	namespaceManager NamespaceManager
 }
 
 // NewLocalServer returns a new local observer server.
 func NewLocalServer(
-	payloadParser *parser.Parser,
-	logger logrus.FieldLogger,
+	payloadParser parser.Decoder,
+	namespaceManager NamespaceManager,
+	logger *slog.Logger,
 	options ...observeroption.Option,
 ) (*LocalObserverServer, error) {
 	opts := observeroption.Default // start with defaults
 	options = append(options, DefaultOptions...)
 	for _, opt := range options {
 		if err := opt(&opts); err != nil {
-			return nil, fmt.Errorf("failed to apply option: %v", err)
+			return nil, fmt.Errorf("failed to apply option: %w", err)
 		}
 	}
 
-	logger.WithFields(logrus.Fields{
-		"maxFlows":       opts.MaxFlows,
-		"eventQueueSize": opts.MonitorBuffer,
-	}).Info("Configuring Hubble server")
+	logger.Info(
+		"Configuring Hubble server",
+		logfields.MaxFlows, opts.MaxFlows,
+		logfields.EventQueueSize, opts.MonitorBuffer,
+	)
 
 	s := &LocalObserverServer{
-		log:           logger,
-		ring:          container.NewRing(opts.MaxFlows),
-		events:        make(chan *observerTypes.MonitorEvent, opts.MonitorBuffer),
-		stopped:       make(chan struct{}),
-		payloadParser: payloadParser,
-		startTime:     time.Now(),
-		opts:          opts,
+		log:              logger,
+		ring:             container.NewRing(opts.MaxFlows),
+		events:           make(chan *observerTypes.MonitorEvent, opts.MonitorBuffer),
+		stopped:          make(chan struct{}),
+		payloadParser:    payloadParser,
+		startTime:        time.Now(),
+		namespaceManager: namespaceManager,
+		opts:             opts,
 	}
 
 	for _, f := range s.opts.OnServerInit {
 		err := f.OnServerInit(s)
 		if err != nil {
-			s.log.WithError(err).Error("failed in OnServerInit")
+			s.log.Error("failed in OnServerInit", logfields.Error, err)
 			return nil, err
 		}
 	}
@@ -118,7 +125,11 @@ nextEvent:
 		for _, f := range s.opts.OnMonitorEvent {
 			stop, err := f.OnMonitorEvent(ctx, monitorEvent)
 			if err != nil {
-				s.log.WithError(err).WithField("event", monitorEvent).Info("failed in OnMonitorEvent")
+				s.log.Info(
+					"failed in OnMonitorEvent",
+					logfields.Error, err,
+					logfields.Event, monitorEvent,
+				)
 			}
 			if stop {
 				continue nextEvent
@@ -136,29 +147,43 @@ nextEvent:
 				// since they are not intended for us (e.g. MessageTypeRecCapture)
 				parserErrors.IsErrInvalidType(err):
 			default:
-				s.log.WithError(err).WithField("event", monitorEvent).Debug("failed to decode payload")
+				s.log.Debug(
+					"failed to decode payload",
+					logfields.Error, err,
+					logfields.Event, monitorEvent,
+				)
 			}
 			continue
 		}
 
 		if flow, ok := ev.Event.(*flowpb.Flow); ok {
+			// track namespaces seen.
+			s.trackNamespaces(flow)
 			for _, f := range s.opts.OnDecodedFlow {
 				stop, err := f.OnDecodedFlow(ctx, flow)
 				if err != nil {
-					s.log.WithError(err).WithField("event", monitorEvent).Info("failed in OnDecodedFlow")
+					s.log.Info(
+						"failed in OnDecodedFlow",
+						logfields.Error, err,
+						logfields.Event, monitorEvent,
+					)
 				}
 				if stop {
 					continue nextEvent
 				}
 			}
 
-			atomic.AddUint64(&s.numObservedFlows, 1)
+			s.numObservedFlows.Add(1)
 		}
 
 		for _, f := range s.opts.OnDecodedEvent {
 			stop, err := f.OnDecodedEvent(ctx, ev)
 			if err != nil {
-				s.log.WithError(err).WithField("event", ev).Info("failed in OnDecodedEvent")
+				s.log.Info(
+					"failed in OnDecodedEvent",
+					logfields.Error, err,
+					logfields.Event, ev,
+				)
 			}
 			if stop {
 				continue nextEvent
@@ -180,7 +205,7 @@ func (s *LocalObserverServer) GetRingBuffer() *container.Ring {
 }
 
 // GetLogger implements GRPCServer.GetLogger.
-func (s *LocalObserverServer) GetLogger() logrus.FieldLogger {
+func (s *LocalObserverServer) GetLogger() *slog.Logger {
 	return s.log
 }
 
@@ -190,7 +215,7 @@ func (s *LocalObserverServer) GetStopped() chan struct{} {
 }
 
 // GetPayloadParser implements GRPCServer.GetPayloadParser.
-func (s *LocalObserverServer) GetPayloadParser() *parser.Parser {
+func (s *LocalObserverServer) GetPayloadParser() parser.Decoder {
 	return s.payloadParser
 }
 
@@ -203,18 +228,30 @@ func (s *LocalObserverServer) GetOptions() observeroption.Options {
 func (s *LocalObserverServer) ServerStatus(
 	ctx context.Context, req *observerpb.ServerStatusRequest,
 ) (*observerpb.ServerStatusResponse, error) {
+
+	rate, err := getFlowRate(s.GetRingBuffer(), time.Now())
+	if err != nil {
+		s.log.Warn("Failed to get flow rate", logfields.Error, err)
+	}
+
 	return &observerpb.ServerStatusResponse{
 		Version:   build.ServerVersion.String(),
 		MaxFlows:  s.GetRingBuffer().Cap(),
 		NumFlows:  s.GetRingBuffer().Len(),
-		SeenFlows: atomic.LoadUint64(&s.numObservedFlows),
+		SeenFlows: s.numObservedFlows.Load(),
 		UptimeNs:  uint64(time.Since(s.startTime).Nanoseconds()),
+		FlowsRate: rate,
 	}, nil
 }
 
 // GetNodes implements observerpb.ObserverClient.GetNodes.
 func (s *LocalObserverServer) GetNodes(ctx context.Context, req *observerpb.GetNodesRequest) (*observerpb.GetNodesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "GetNodes not implemented")
+}
+
+// GetNamespaces implements observerpb.ObserverClient.GetNamespaces.
+func (s *LocalObserverServer) GetNamespaces(ctx context.Context, req *observerpb.GetNamespacesRequest) (*observerpb.GetNamespacesResponse, error) {
+	return &observerpb.GetNamespacesResponse{Namespaces: s.namespaceManager.GetNamespaces()}, nil
 }
 
 // GetFlows implements the proto method for client requests.
@@ -238,7 +275,8 @@ func (s *LocalObserverServer) GetFlows(
 		}
 	}
 
-	filterList := append(filters.DefaultFilters, s.opts.OnBuildFilter...)
+	log := s.GetLogger()
+	filterList := append(filters.DefaultFilters(log), s.opts.OnBuildFilter...)
 	whitelist, err := filters.BuildFilterList(ctx, req.Whitelist, filterList)
 	if err != nil {
 		return err
@@ -249,19 +287,21 @@ func (s *LocalObserverServer) GetFlows(
 	}
 
 	start := time.Now()
-	log := s.GetLogger()
 	ring := s.GetRingBuffer()
 
 	i := uint64(0)
-	defer func() {
-		log.WithFields(logrus.Fields{
-			"number_of_flows": i,
-			"buffer_size":     ring.Cap(),
-			"whitelist":       logFilters(req.Whitelist),
-			"blacklist":       logFilters(req.Blacklist),
-			"took":            time.Since(start),
-		}).Debug("GetFlows finished")
-	}()
+	if log.Enabled(context.Background(), slog.LevelDebug) {
+		defer func() {
+			log.Debug(
+				"GetFlows finished",
+				logfields.NumberOfFlows, i,
+				logfields.BufferSize, ring.Cap(),
+				logfields.Whitelist, logFilters(req.Whitelist),
+				logfields.Blacklist, logFilters(req.Blacklist),
+				logfields.Took, time.Since(start),
+			)
+		}()
+	}
 
 	ringReader, err := newRingReader(ring, req, whitelist, blacklist)
 	if err != nil {
@@ -274,6 +314,22 @@ func (s *LocalObserverServer) GetFlows(
 	eventsReader, err := newEventsReader(ringReader, req, log, whitelist, blacklist)
 	if err != nil {
 		return err
+	}
+
+	fm := req.GetFieldMask()
+	if len(fm.GetPaths()) == 0 {
+		// TODO: Remove req.Experimental.GetFieldMask after v1.17
+		fm = req.Experimental.GetFieldMask()
+	}
+	mask, err := fieldmask.New(fm)
+	if err != nil {
+		return err
+	}
+
+	var flow *flowpb.Flow
+	if mask.Active() {
+		flow = new(flowpb.Flow)
+		mask.Alloc(flow.ProtoReflect())
 	}
 
 nextEvent:
@@ -299,6 +355,11 @@ nextEvent:
 				case stop:
 					continue nextEvent
 				}
+			}
+			if mask.Active() {
+				// Copy only fields in the mask
+				mask.Copy(flow.ProtoReflect(), ev.ProtoReflect())
+				ev = flow
 			}
 			resp = &observerpb.GetFlowsResponse{
 				Time:     ev.GetTime(),
@@ -352,13 +413,16 @@ func (s *LocalObserverServer) GetAgentEvents(
 	ring := s.GetRingBuffer()
 
 	i := uint64(0)
-	defer func() {
-		log.WithFields(logrus.Fields{
-			"number_of_agent_events": i,
-			"buffer_size":            ring.Cap(),
-			"took":                   time.Since(start),
-		}).Debug("GetAgentEvents finished")
-	}()
+	if log.Enabled(context.Background(), slog.LevelDebug) {
+		defer func() {
+			log.Debug(
+				"GetAgentEvents finished",
+				logfields.NumberOfAgentEvents, i,
+				logfields.BufferSize, ring.Cap(),
+				logfields.Took, time.Since(start),
+			)
+		}()
+	}
 
 	ringReader, err := newRingReader(ring, req, whitelist, blacklist)
 	if err != nil {
@@ -417,13 +481,16 @@ func (s *LocalObserverServer) GetDebugEvents(
 	ring := s.GetRingBuffer()
 
 	i := uint64(0)
-	defer func() {
-		log.WithFields(logrus.Fields{
-			"number_of_debug_events": i,
-			"buffer_size":            ring.Cap(),
-			"took":                   time.Since(start),
-		}).Debug("GetDebugEvents finished")
-	}()
+	if log.Enabled(context.Background(), slog.LevelDebug) {
+		defer func() {
+			log.Debug(
+				"GetDebugEvents finished",
+				logfields.NumberOfDebugEvents, i,
+				logfields.BufferSize, ring.Cap(),
+				logfields.Took, time.Since(start),
+			)
+		}()
+	}
 
 	ringReader, err := newRingReader(ring, req, whitelist, blacklist)
 	if err != nil {
@@ -501,12 +568,13 @@ type eventsReader struct {
 // newEventsReader creates a new eventsReader that uses the given RingReader to
 // read through the ring buffer. Only events that match the request criteria
 // are returned.
-func newEventsReader(r *container.RingReader, req genericRequest, log logrus.FieldLogger, whitelist, blacklist filters.FilterFuncs) (*eventsReader, error) {
-	log.WithFields(logrus.Fields{
-		"req":       req,
-		"whitelist": whitelist,
-		"blacklist": blacklist,
-	}).Debug("creating a new eventsReader")
+func newEventsReader(r *container.RingReader, req genericRequest, log *slog.Logger, whitelist, blacklist filters.FilterFuncs) (*eventsReader, error) {
+	log.Debug(
+		"creating a new eventsReader",
+		logfields.Request, req,
+		logfields.Whitelist, whitelist,
+		logfields.Blacklist, blacklist,
+	)
 
 	since, until := req.GetSince(), req.GetUntil()
 	reader := &eventsReader{
@@ -594,6 +662,22 @@ func (r *eventsReader) Next(ctx context.Context) (*v1.Event, error) {
 	}
 }
 
+func (s *LocalObserverServer) trackNamespaces(flow *flowpb.Flow) {
+	// track namespaces seen.
+	if srcNs := flow.GetSource().GetNamespace(); srcNs != "" {
+		s.namespaceManager.AddNamespace(&observerpb.Namespace{
+			Namespace: srcNs,
+			Cluster:   nodeTypes.GetClusterName(),
+		})
+	}
+	if dstNs := flow.GetDestination().GetNamespace(); dstNs != "" {
+		s.namespaceManager.AddNamespace(&observerpb.Namespace{
+			Namespace: dstNs,
+			Cluster:   nodeTypes.GetClusterName(),
+		})
+	}
+}
+
 func validateRequest(req genericRequest) error {
 	if req.GetFirst() && req.GetFollow() {
 		return status.Errorf(codes.InvalidArgument, "first cannot be specified with follow")
@@ -664,4 +748,44 @@ func newRingReader(ring *container.Ring, req genericRequest, whitelist, blacklis
 		}
 	}
 	return container.NewRingReader(ring, idx), nil
+}
+
+func getFlowRate(ring *container.Ring, at time.Time) (float64, error) {
+	reader := container.NewRingReader(ring, ring.LastWriteParallel())
+	count := 0
+	since := at.Add(-1 * time.Minute)
+	var lastSeenEvent *v1.Event
+	for {
+		e, err := reader.Previous()
+		lost := e.GetLostEvent()
+		if lost != nil && lost.Source == flowpb.LostEventSource_HUBBLE_RING_BUFFER {
+			// a lost event means we read the complete ring buffer
+			// if we read at least one flow, update `since` to calculate the rate over the available time range
+			if lastSeenEvent != nil {
+				since = lastSeenEvent.Timestamp.AsTime()
+			}
+			break
+		} else if errors.Is(err, io.EOF) {
+			// an EOF error means the ring buffer is empty, ignore error and continue
+			break
+		} else if err != nil {
+			// unexpected error
+			return 0, err
+		}
+		if _, isFlowEvent := e.Event.(*flowpb.Flow); !isFlowEvent {
+			// ignore non flow events
+			continue
+		}
+		if err := e.Timestamp.CheckValid(); err != nil {
+			return 0, err
+		}
+		ts := e.Timestamp.AsTime()
+		if ts.Before(since) {
+			// scanned the last minute, exit loop
+			break
+		}
+		lastSeenEvent = e
+		count++
+	}
+	return float64(count) / at.Sub(since).Seconds(), nil
 }

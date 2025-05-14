@@ -10,10 +10,9 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	operatorOption "github.com/cilium/cilium/operator/option"
 	"github.com/cilium/cilium/pkg/cidr"
-	fakeDatapath "github.com/cilium/cilium/pkg/datapath/fake"
-	agentOption "github.com/cilium/cilium/pkg/option"
+	fakeTypes "github.com/cilium/cilium/pkg/datapath/fake/types"
+	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/test/controlplane"
 	"github.com/cilium/cilium/test/controlplane/suite"
 )
@@ -38,8 +37,8 @@ var (
 	}
 )
 
-func validateNodes(dp *fakeDatapath.FakeDatapath) error {
-	nodes := dp.FakeNode().Nodes
+func validateNodes(fnh *fakeTypes.FakeNodeHandler) error {
+	nodes := fnh.Nodes
 
 	if len(nodes) != 1 {
 		return fmt.Errorf("expected 1 node, found %d (%v)", len(nodes), nodes)
@@ -69,9 +68,10 @@ func init() {
 
 		test.
 			UpdateObjects(minimalNode).
-			SetupEnvironment(func(*agentOption.DaemonConfig, *operatorOption.OperatorConfig) {}).
-			StartAgent().
-			Eventually(func() error { return validateNodes(test.Datapath) }).
-			StopAgent()
+			SetupEnvironment().
+			StartAgent(func(*option.DaemonConfig) {}).
+			Eventually(func() error { return validateNodes(test.FakeNodeHandler) }).
+			StopAgent().
+			ClearEnvironment()
 	})
 }

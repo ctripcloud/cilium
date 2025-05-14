@@ -5,35 +5,36 @@ package link
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strconv"
-	"sync"
-	"time"
 
+	"github.com/cilium/hive/cell"
+	"github.com/cilium/hive/job"
 	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/mac"
-)
-
-var (
-	// linkCache is the singleton instance of the LinkCache, only needed to
-	// ensure that the single controller used to update the LinkCache is
-	// triggered exactly once and the same instance is handed to all users.
-	linkCache LinkCache
-	once      sync.Once
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // DeleteByName deletes the interface with the name ifName.
+//
+// Returns nil if the interface does not exist.
 func DeleteByName(ifName string) error {
-	iface, err := netlink.LinkByName(ifName)
+	iface, err := safenetlink.LinkByName(ifName)
+	if errors.As(err, &netlink.LinkNotFoundError{}) {
+		return nil
+	}
+
 	if err != nil {
-		return fmt.Errorf("failed to lookup %q: %v", ifName, err)
+		return fmt.Errorf("failed to lookup %q: %w", ifName, err)
 	}
 
 	if err = netlink.LinkDel(iface); err != nil {
-		return fmt.Errorf("failed to delete %q: %v", ifName, err)
+		return fmt.Errorf("failed to delete %q: %w", ifName, err)
 	}
 
 	return nil
@@ -41,7 +42,7 @@ func DeleteByName(ifName string) error {
 
 // Rename renames a network link
 func Rename(curName, newName string) error {
-	link, err := netlink.LinkByName(curName)
+	link, err := safenetlink.LinkByName(curName)
 	if err != nil {
 		return err
 	}
@@ -50,7 +51,7 @@ func Rename(curName, newName string) error {
 }
 
 func GetHardwareAddr(ifName string) (mac.MAC, error) {
-	iface, err := netlink.LinkByName(ifName)
+	iface, err := safenetlink.LinkByName(ifName)
 	if err != nil {
 		return nil, err
 	}
@@ -58,7 +59,7 @@ func GetHardwareAddr(ifName string) (mac.MAC, error) {
 }
 
 func GetIfIndex(ifName string) (uint32, error) {
-	iface, err := netlink.LinkByName(ifName)
+	iface, err := safenetlink.LinkByName(ifName)
 	if err != nil {
 		return 0, err
 	}
@@ -68,28 +69,38 @@ func GetIfIndex(ifName string) (uint32, error) {
 type LinkCache struct {
 	mu          lock.RWMutex
 	indexToName map[int]string
+	manager     *controller.Manager
 }
 
-// NewLinkCache begins monitoring local interfaces for changes in order to
-// track local link information.
+var Cell = cell.Module(
+	"link-cache",
+	"Provides a cache of link names to ifindex mappings",
+
+	cell.Provide(newLinkCache),
+)
+
+type linkCacheParams struct {
+	cell.In
+	JobGroup job.Group
+}
+
 func NewLinkCache() *LinkCache {
-	once.Do(func() {
-		linkCache = LinkCache{}
-		controller.NewManager().UpdateController("link-cache",
-			controller.ControllerParams{
-				RunInterval: 15 * time.Second,
-				DoFunc: func(ctx context.Context) error {
-					return linkCache.syncCache()
-				},
-			},
-		)
-	})
-
-	return &linkCache
+	return &LinkCache{
+		indexToName: make(map[int]string),
+		manager:     controller.NewManager(),
+	}
 }
 
-func (c *LinkCache) syncCache() error {
-	links, err := netlink.LinkList()
+func newLinkCache(params linkCacheParams) *LinkCache {
+	lc := NewLinkCache()
+
+	params.JobGroup.Add(job.Timer("sync", lc.SyncCache, 15*time.Second))
+
+	return lc
+}
+
+func (c *LinkCache) SyncCache(_ context.Context) error {
+	links, err := safenetlink.LinkList()
 	if err != nil {
 		return err
 	}

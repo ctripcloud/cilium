@@ -6,19 +6,10 @@
 #include <bpf/ctx/skb.h>
 #include "pktgen.h"
 
-/* Set ETH_HLEN to 14 to indicate that the packet has a 14 byte ethernet header */
-#define ETH_HLEN 14
-
 /* Enable code paths under test */
 #define ENABLE_IPV4
 #define ENABLE_NODEPORT
 #define ENABLE_HOST_ROUTING
-
-#define DISABLE_LOOPBACK_LB
-
-/* Skip ingress policy checks, not needed to validate hairpin flow */
-#define USE_BPF_PROG_FOR_INGRESS_POLICY
-#undef FORCE_LOCAL_POLICY_EVAL_AT_SOURCE
 
 #define CLIENT_IP		v4_ext_one
 #define CLIENT_PORT		__bpf_htons(111)
@@ -32,12 +23,41 @@
 #define BACKEND_IP		v4_pod_one
 #define BACKEND_PORT		__bpf_htons(8080)
 
-#define SECCTX_FROM_IPCACHE 1
-
-#include "bpf_host.c"
+#define BACKEND_EP_ID		127
 
 static volatile const __u8 *node_mac = mac_three;
 static volatile const __u8 *backend_mac = mac_four;
+
+__section("mock-handle-policy")
+int mock_handle_policy(struct __ctx_buff *ctx __maybe_unused)
+{
+	return TC_ACT_REDIRECT;
+}
+
+struct {
+	__uint(type, BPF_MAP_TYPE_PROG_ARRAY);
+	__uint(key_size, sizeof(__u32));
+	__uint(max_entries, 256);
+	__array(values, int());
+} mock_policy_call_map __section(".maps") = {
+	.values = {
+		[BACKEND_EP_ID] = &mock_handle_policy,
+	},
+};
+
+#define tail_call_dynamic mock_tail_call_dynamic
+static __always_inline __maybe_unused void
+mock_tail_call_dynamic(struct __ctx_buff *ctx __maybe_unused,
+		       const void *map __maybe_unused, __u32 slot __maybe_unused)
+{
+	tail_call(ctx, &mock_policy_call_map, slot);
+}
+
+#include "bpf_host.c"
+
+#include "lib/endpoint.h"
+#include "lib/ipcache.h"
+#include "lib/lb.h"
 
 #define FROM_NETDEV	0
 #define TO_NETDEV	1
@@ -65,35 +85,17 @@ int nodeport_nat_backend_pktgen(struct __ctx_buff *ctx)
 	volatile const __u8 *dst = mac_two;
 	struct pktgen builder;
 	struct tcphdr *l4;
-	struct ethhdr *l2;
-	struct iphdr *l3;
 	void *data;
 
 	/* Init packet builder */
 	pktgen__init(&builder, ctx);
 
-	/* Push ethernet header */
-	l2 = pktgen__push_ethhdr(&builder);
-	if (!l2)
-		return TEST_ERROR;
-
-	ethhdr__set_macs(l2, (__u8 *)src, (__u8 *)dst);
-
-	/* Push IPv4 header */
-	l3 = pktgen__push_default_iphdr(&builder);
-	if (!l3)
-		return TEST_ERROR;
-
-	l3->saddr = LB_IP;
-	l3->daddr = BACKEND_IP;
-
-	/* Push TCP header */
-	l4 = pktgen__push_default_tcphdr(&builder);
+	l4 = pktgen__push_ipv4_tcp_packet(&builder,
+					  (__u8 *)src, (__u8 *)dst,
+					  LB_IP, BACKEND_IP,
+					  LB_PORT, BACKEND_PORT);
 	if (!l4)
 		return TEST_ERROR;
-
-	l4->source = LB_PORT;
-	l4->dest = BACKEND_PORT;
 
 	data = pktgen__push_data(&builder, default_data, sizeof(default_data));
 	if (!data)
@@ -108,67 +110,17 @@ int nodeport_nat_backend_pktgen(struct __ctx_buff *ctx)
 SETUP("tc", "tc_nodeport_nat_backend")
 int nodeport_nat_backend_setup(struct __ctx_buff *ctx)
 {
-	/* Register a fake LB backend matching our packet. */
-	struct lb4_key lb_svc_key = {
-		.address = FRONTEND_IP,
-		.dport = FRONTEND_PORT,
-		.scope = LB_LOOKUP_SCOPE_EXT,
-	};
-	/* Create a service with only one backend */
-	struct lb4_service lb_svc_value = {
-		.count = 1,
-		.flags = SVC_FLAG_ROUTABLE,
-	};
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
-	/* We need to register both in the external and internal scopes for the
-	 * packet to be redirected to a neighboring node
-	 */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_INT;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
+	lb_v4_add_service(FRONTEND_IP, FRONTEND_PORT, IPPROTO_TCP, 1, 1);
+	lb_v4_add_backend(FRONTEND_IP, FRONTEND_PORT, 1, 124,
+			  BACKEND_IP, BACKEND_PORT, IPPROTO_TCP, 0);
 
-	/* A backend between 1 and .count is chosen, since we have only one backend
-	 * it is always backend_slot 1. Point it to backend_id 124.
-	 */
-	lb_svc_key.scope = LB_LOOKUP_SCOPE_EXT;
-	lb_svc_key.backend_slot = 1;
-	lb_svc_value.backend_id = 124;
-	map_update_elem(&LB4_SERVICES_MAP_V2, &lb_svc_key, &lb_svc_value, BPF_ANY);
+	endpoint_v4_add_entry(BACKEND_IP, 0, BACKEND_EP_ID, 0, 0, 0,
+			      (__u8 *)backend_mac, (__u8 *)node_mac);
 
-	/* Create backend id 124 which contains the IP and port to send the
-	 * packet to.
-	 */
-	struct lb4_backend backend = {
-		.address = BACKEND_IP,
-		.port = BACKEND_PORT,
-		.proto = IPPROTO_TCP,
-		.flags = BE_STATE_ACTIVE,
-	};
-	map_update_elem(&LB4_BACKEND_MAP, &lb_svc_value.backend_id, &backend, BPF_ANY);
-
-	/* add local backend */
-	struct endpoint_info ep_value = {};
-
-	memcpy(&ep_value.mac, (__u8 *)backend_mac, ETH_ALEN);
-	memcpy(&ep_value.node_mac, (__u8 *)node_mac, ETH_ALEN);
-
-	struct endpoint_key ep_key = {
-		.family = ENDPOINT_KEY_IPV4,
-		.ip4 = BACKEND_IP,
-	};
-	map_update_elem(&ENDPOINTS_MAP, &ep_key, &ep_value, BPF_ANY);
-
-	struct ipcache_key cache_key = {
-		.lpm_key.prefixlen = 32,
-		.family = ENDPOINT_KEY_IPV4,
-		.ip4 = BACKEND_IP,
-	};
-	struct remote_endpoint_info cache_value = {
-		.sec_identity = 112233,
-	};
-	map_update_elem(&IPCACHE_MAP, &cache_key, &cache_value, BPF_ANY);
+	ipcache_v4_add_entry(BACKEND_IP, 0, 112233, 0, 0);
 
 	/* Jump into the entrypoint */
-	tail_call_static(ctx, &entry_call_map, FROM_NETDEV);
+	tail_call_static(ctx, entry_call_map, FROM_NETDEV);
 	/* Fail if we didn't jump */
 	return TEST_ERROR;
 }
@@ -217,11 +169,17 @@ int nodeport_nat_backend_check(const struct __ctx_buff *ctx)
 	if (l3->daddr != BACKEND_IP)
 		test_fatal("dst IP has changed");
 
+	if (l3->check != bpf_htons(0xa712))
+		test_fatal("L3 checksum is invalid: %x", bpf_htons(l3->check));
+
 	if (l4->source != LB_PORT)
 		test_fatal("src port has changed");
 
 	if (l4->dest != BACKEND_PORT)
 		test_fatal("dst port has changed");
+
+	if (l4->check != bpf_htons(0x3c62))
+		test_fatal("L4 checksum is invalid: %x", bpf_htons(l4->check));
 
 	test_finish();
 }

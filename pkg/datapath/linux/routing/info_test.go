@@ -5,20 +5,23 @@ package linuxrouting
 
 import (
 	"net"
+	"testing"
 
-	"gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/checker"
 	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
 	"github.com/cilium/cilium/pkg/mac"
 )
 
-func (e *LinuxRoutingSuite) TestParse(c *check.C) {
+func TestParse(t *testing.T) {
+	setupLinuxRoutingSuite(t)
+
 	_, fakeCIDR, err := net.ParseCIDR("192.168.0.0/16")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	fakeMAC, err := mac.ParseMAC("11:22:33:44:55:66")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	validCIDRs := []net.IPNet{*fakeCIDR}
 
@@ -102,8 +105,8 @@ func (e *LinuxRoutingSuite) TestParse(c *check.C) {
 			macAddr:  "11:22:33:44:55:66",
 			ifaceNum: "1",
 			wantRInfo: &RoutingInfo{
-				IPv4Gateway:     net.ParseIP("192.168.1.1"),
-				IPv4CIDRs:       validCIDRs,
+				Gateway:         net.ParseIP("192.168.1.1"),
+				CIDRs:           validCIDRs,
 				MasterIfMAC:     fakeMAC,
 				InterfaceNumber: 1,
 				IpamMode:        ipamOption.IPAMENI,
@@ -118,8 +121,8 @@ func (e *LinuxRoutingSuite) TestParse(c *check.C) {
 			masq:     false,
 			ifaceNum: "0",
 			wantRInfo: &RoutingInfo{
-				IPv4Gateway: net.ParseIP("192.168.1.1"),
-				IPv4CIDRs:   []net.IPNet{},
+				Gateway:     net.ParseIP("192.168.1.1"),
+				CIDRs:       []net.IPNet{},
 				MasterIfMAC: fakeMAC,
 				IpamMode:    ipamOption.IPAMENI,
 			},
@@ -136,9 +139,15 @@ func (e *LinuxRoutingSuite) TestParse(c *check.C) {
 		},
 	}
 	for _, tt := range tests {
-		c.Log(tt.name)
-		rInfo, err := NewRoutingInfo(tt.gateway, tt.cidrs, tt.macAddr, tt.ifaceNum, ipamOption.IPAMENI, tt.masq)
-		c.Assert(rInfo, checker.DeepEquals, tt.wantRInfo)
-		c.Assert((err != nil), check.Equals, tt.wantErr)
+		t.Run(tt.name, func(t *testing.T) {
+			logger := hivetest.Logger(t)
+			rInfo, err := NewRoutingInfo(logger, tt.gateway, tt.cidrs, tt.macAddr, tt.ifaceNum, ipamOption.IPAMENI, tt.masq)
+			if err == nil {
+				// Do not compare loggers
+				rInfo.logger = nil
+			}
+			require.Equal(t, tt.wantRInfo, rInfo)
+			require.Equal(t, tt.wantErr, err != nil)
+		})
 	}
 }

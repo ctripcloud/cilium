@@ -7,24 +7,13 @@ import (
 	"encoding/json"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"sigs.k8s.io/yaml"
-
-	"github.com/cilium/cilium/pkg/checker"
 )
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-// Hook up gocheck into the "go test" runner.
-type CNPValidationSuite struct {
-}
-
-var _ = Suite(&CNPValidationSuite{})
-
-func (s *CNPValidationSuite) Test_GH10643(c *C) {
+func Test_GH10643(t *testing.T) {
 	cnp := []byte(`apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -71,20 +60,20 @@ spec:
       - example-app-1-spark-driver-qe3
 `)
 	jsnByte, err := yaml.YAMLToJSON(cnp)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	us := unstructured.Unstructured{}
 	err = json.Unmarshal(jsnByte, &us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	validator, err := NewNPValidator()
-	c.Assert(err, IsNil)
+	validator, err := NewNPValidator(hivetest.Logger(t))
+	require.NoError(t, err)
 	err = validator.ValidateCNP(&us)
 	// Err can't be nil since validation should detect the policy is not correct.
-	c.Assert(err, Not(IsNil))
+	require.Error(t, err)
 }
 
-func (s *CNPValidationSuite) Test_BadMatchLabels(c *C) {
+func Test_BadMatchLabels(t *testing.T) {
 	cnp := []byte(`apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -105,20 +94,20 @@ spec:
       - kube-state-metrics
 `)
 	jsnByte, err := yaml.YAMLToJSON(cnp)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	us := unstructured.Unstructured{}
 	err = json.Unmarshal(jsnByte, &us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	validator, err := NewNPValidator()
-	c.Assert(err, IsNil)
+	validator, err := NewNPValidator(hivetest.Logger(t))
+	require.NoError(t, err)
 	err = validator.ValidateCNP(&us)
 	// Err can't be nil since validation should detect the policy is not correct.
-	c.Assert(err, Not(IsNil))
+	require.Error(t, err)
 }
 
-func (s *CNPValidationSuite) Test_GoodCNP(c *C) {
+func Test_GoodCNP(t *testing.T) {
 	cnp := []byte(`apiVersion: cilium.io/v2
 kind: CiliumNetworkPolicy
 metadata:
@@ -136,19 +125,19 @@ spec:
       operator: In
 `)
 	jsnByte, err := yaml.YAMLToJSON(cnp)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	us := unstructured.Unstructured{}
 	err = json.Unmarshal(jsnByte, &us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	validator, err := NewNPValidator()
-	c.Assert(err, IsNil)
+	validator, err := NewNPValidator(hivetest.Logger(t))
+	require.NoError(t, err)
 	err = validator.ValidateCNP(&us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
-func (s *CNPValidationSuite) Test_GoodCCNP(c *C) {
+func Test_GoodCCNP(t *testing.T) {
 	ccnp := []byte(`apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
 metadata:
@@ -165,19 +154,19 @@ spec:
       operator: In
 `)
 	jsnByte, err := yaml.YAMLToJSON(ccnp)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	us := unstructured.Unstructured{}
 	err = json.Unmarshal(jsnByte, &us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	validator, err := NewNPValidator()
-	c.Assert(err, IsNil)
+	validator, err := NewNPValidator(hivetest.Logger(t))
+	require.NoError(t, err)
 	err = validator.ValidateCCNP(&us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
-func (s *CNPValidationSuite) Test_BadCCNP(c *C) {
+func Test_BadCCNP(t *testing.T) {
 	// Bad CCNP with endpointSelector and nodeSelector
 	ccnp := []byte(`apiVersion: cilium.io/v2
 kind: CiliumClusterwideNetworkPolicy
@@ -199,20 +188,20 @@ spec:
       operator: In
 `)
 	jsnByte, err := yaml.YAMLToJSON(ccnp)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	us := unstructured.Unstructured{}
 	err = json.Unmarshal(jsnByte, &us)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
-	validator, err := NewNPValidator()
-	c.Assert(err, IsNil)
+	validator, err := NewNPValidator(hivetest.Logger(t))
+	require.NoError(t, err)
 	err = validator.ValidateCCNP(&us)
 	// Err can't be nil since validation should detect the policy is not correct.
-	c.Assert(err, Not(IsNil))
+	require.Error(t, err)
 }
 
-func (s *CNPValidationSuite) Test_UnknownFieldDetection(c *C) {
+func Test_UnknownFieldDetection(t *testing.T) {
 	tests := []struct {
 		name        string
 		policy      []byte
@@ -319,6 +308,8 @@ metadata:
   name: cnp-test-1
 spec:
   endpointSelector: {}
+  ingress: 
+    - {}
 `),
 			clusterwide: false,
 			err:         ErrTopLevelDescriptionFound,
@@ -332,6 +323,8 @@ metadata:
   name: cnp-test-1
 spec:
   endpointSelector: {}
+  ingress: 
+    - {}
 `),
 			clusterwide: false,
 			err:         nil,
@@ -346,6 +339,8 @@ metadata:
   name: ccnp-test-1
 spec:
   nodeSelector: {}
+  ingress: 
+    - {}
 `),
 			clusterwide: true,
 			err:         ErrTopLevelDescriptionFound,
@@ -359,6 +354,8 @@ metadata:
   name: ccnp-test-1
 spec:
   nodeSelector: {}
+  ingress: 
+    - {}
 `),
 			clusterwide: true,
 			err:         nil,
@@ -374,6 +371,8 @@ metadata:
   name: ccnp-test-1
 spec:
   endpointSelector: {}
+  ingress: 
+    - {}
   bar: baz
 `),
 			clusterwide: false,
@@ -391,6 +390,8 @@ metadata:
   name: ccnp-test-1
 spec:
   nodeSelector: {}
+  ingress: 
+    - {}
   bar: baz
 `),
 			clusterwide: true,
@@ -450,22 +451,51 @@ specs:
 		},
 	}
 	for _, tt := range tests {
-		c.Log(tt.name)
+		t.Log(tt.name)
 
 		jsnByte, err := yaml.YAMLToJSON(tt.policy)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 
 		us := unstructured.Unstructured{}
 		err = json.Unmarshal(jsnByte, &us)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 
-		validator, err := NewNPValidator()
-		c.Assert(err, IsNil)
+		validator, err := NewNPValidator(hivetest.Logger(t))
+		require.NoError(t, err)
 
 		if tt.clusterwide {
-			c.Assert(validator.ValidateCCNP(&us), checker.DeepEquals, tt.err)
+			require.Equal(t, tt.err, validator.ValidateCCNP(&us))
 		} else {
-			c.Assert(validator.ValidateCNP(&us), checker.DeepEquals, tt.err)
+			require.Equal(t, tt.err, validator.ValidateCNP(&us))
 		}
 	}
+}
+
+func Test_GH28007(t *testing.T) {
+	cnp := []byte(`apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: exampleapp
+  namespace: examplens
+spec:
+  egress:
+  - toEntities:
+    - world
+  endpointSelector:
+    matchExpressions:
+    - key: reserved:init
+      operator: DoesNotExist
+`)
+	jsnByte, err := yaml.YAMLToJSON(cnp)
+	require.NoError(t, err)
+
+	us := unstructured.Unstructured{}
+	err = json.Unmarshal(jsnByte, &us)
+	require.NoError(t, err)
+
+	validator, err := NewNPValidator(hivetest.Logger(t))
+	require.NoError(t, err)
+	err = validator.ValidateCNP(&us)
+	// Err can't be nil since validation should detect the policy is not correct.
+	require.Equal(t, errInitPolicyCNP, err)
 }

@@ -4,23 +4,25 @@
 package gateway_api
 
 import (
+	"os"
 	"strings"
 	"testing"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/gateway-api/apis/v1alpha2"
-	"sigs.k8s.io/gateway-api/apis/v1beta1"
-	"sigs.k8s.io/gateway-api/conformance/tests"
-	"sigs.k8s.io/gateway-api/conformance/utils/flags"
-	"sigs.k8s.io/gateway-api/conformance/utils/suite"
+	v1 "sigs.k8s.io/gateway-api/apis/v1"
+	"sigs.k8s.io/gateway-api/conformance"
+	"sigs.k8s.io/gateway-api/pkg/features"
 
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
+var (
+	usableNetworkAddressesEnv   = "GATEWAY_API_CONFORMANCE_USABLE_NETWORK_ADDRESSES"
+	unusableNetworkAddressesEnv = "GATEWAY_API_CONFORMANCE_UNUSABLE_NETWORK_ADDRESSES"
+)
+
 // TestConformance runs the conformance tests for Gateway API
-// Adapted from https://github.com/kubernetes-sigs/gateway-api/blob/v0.6.1/conformance/conformance_test.go
-// Some features are not supported by Cilium (e.g. TLSRoute), so we skip them.
+// Adapted from https://github.com/kubernetes-sigs/gateway-api/blob/main/conformance/conformance_test.go
+// Some features are not supported by Cilium, so we skip them.
 // This test should be adjusted as new features are added to the Gateway API.
 //
 // The below command can be used to run the conformance tests locally, you can also run directly from
@@ -39,43 +41,38 @@ import (
 //		--debug -test.run "TestConformance/HTTPRouteDisallowedKind"
 func TestConformance(t *testing.T) {
 	testutils.GatewayAPIConformanceTest(t)
-
-	cfg, err := config.GetConfig()
-	if err != nil {
-		t.Fatalf("Error loading Kubernetes config: %v", err)
+	var skipTests []string
+	options := conformance.DefaultOptions(t)
+	var usableNetworkAddresses []v1.GatewaySpecAddress
+	var unusableNetworkAddresses []v1.GatewaySpecAddress
+	usableAddresses := os.Getenv(usableNetworkAddressesEnv)
+	if usableAddresses == "" {
+		t.Logf("Set %s to run this test", features.SupportGatewayStaticAddresses)
+		skipTests = append(skipTests, string(features.SupportGatewayStaticAddresses))
+	} else {
+		var addressType = v1.IPAddressType
+		for value := range strings.SplitSeq(usableAddresses, ",") {
+			usableNetworkAddresses = append(usableNetworkAddresses, v1.GatewaySpecAddress{
+				Type:  &addressType,
+				Value: value,
+			})
+		}
 	}
-	c, err := client.New(cfg, client.Options{})
-	if err != nil {
-		t.Fatalf("Error initializing Kubernetes client: %v", err)
+	unusableAddresses := os.Getenv(unusableNetworkAddressesEnv)
+	if unusableAddresses == "" {
+		t.Logf("Set %s to run this test", features.SupportGatewayStaticAddresses)
+		skipTests = append(skipTests, string(features.SupportGatewayStaticAddresses))
+	} else {
+		var addressType = v1.IPAddressType
+		for value := range strings.SplitSeq(unusableAddresses, ",") {
+			unusableNetworkAddresses = append(unusableNetworkAddresses, v1.GatewaySpecAddress{
+				Type:  &addressType,
+				Value: value,
+			})
+		}
 	}
-	_ = v1alpha2.AddToScheme(c.Scheme())
-	_ = v1beta1.AddToScheme(c.Scheme())
-
-	t.Logf("Running conformance tests with %s GatewayClass", *flags.GatewayClassName)
-
-	supportedFeatures := parseSupportedFeatures(*flags.SupportedFeatures)
-	exemptFeatures := parseSupportedFeatures(*flags.ExemptFeatures)
-	for feature := range exemptFeatures {
-		supportedFeatures[feature] = false
-	}
-
-	cSuite := suite.New(suite.Options{
-		Client:               c,
-		GatewayClassName:     *flags.GatewayClassName,
-		Debug:                *flags.ShowDebug,
-		CleanupBaseResources: *flags.CleanupBaseResources,
-		SupportedFeatures:    supportedFeatures,
-	})
-	cSuite.Setup(t)
-	cSuite.Run(t, tests.ConformanceTests)
-}
-
-// parseSupportedFeatures parses flag arguments and converts the string to
-// map[suite.SupportedFeature]bool
-func parseSupportedFeatures(f string) map[suite.SupportedFeature]bool {
-	res := map[suite.SupportedFeature]bool{}
-	for _, value := range strings.Split(f, ",") {
-		res[suite.SupportedFeature(value)] = true
-	}
-	return res
+	options.UnusableNetworkAddresses = unusableNetworkAddresses
+	options.UsableNetworkAddresses = usableNetworkAddresses
+	options.SkipTests = append(options.SkipTests, skipTests...)
+	conformance.RunConformanceWithOptions(t, options)
 }

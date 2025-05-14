@@ -4,11 +4,10 @@
 package peer
 
 import (
-	"context"
 	"net"
+	"strconv"
 	"strings"
 
-	"github.com/cilium/cilium/api/v1/models"
 	peerpb "github.com/cilium/cilium/api/v1/peer"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
 	ciliumDefaults "github.com/cilium/cilium/pkg/defaults"
@@ -29,15 +28,21 @@ type handler struct {
 	C           chan *peerpb.ChangeNotification
 	tls         bool
 	addressPref serviceoption.AddressFamilyPreference
+	hubblePort  int
 }
 
-func newHandler(withoutTLSInfo bool, addressPref serviceoption.AddressFamilyPreference) *handler {
+func newHandler(withoutTLSInfo bool, addressPref serviceoption.AddressFamilyPreference, hubblePort int) *handler {
 	return &handler{
 		stop:        make(chan struct{}),
 		C:           make(chan *peerpb.ChangeNotification),
 		tls:         !withoutTLSInfo,
 		addressPref: addressPref,
+		hubblePort:  hubblePort,
 	}
+}
+
+func (h *handler) Name() string {
+	return "hubble-peer"
 }
 
 // Ensure that Service implements the NodeHandler interface so that it can be
@@ -58,7 +63,7 @@ func (h *handler) NodeAdd(n types.Node) error {
 func (h *handler) NodeUpdate(o, n types.Node) error {
 	oAddr, nAddr := nodeAddress(o, h.addressPref), nodeAddress(n, h.addressPref)
 	if o.Fullname() == n.Fullname() {
-		if oAddr == nAddr {
+		if oAddr.String() == nAddr.String() {
 			// this corresponds to the same peer
 			// => no need to send a notification
 			return nil
@@ -96,6 +101,10 @@ func (h *handler) NodeDelete(n types.Node) error {
 	return nil
 }
 
+// AllNodeValidateImplementation implements
+func (h handler) AllNodeValidateImplementation() {
+}
+
 // NodeValidateImplementation implements
 // datapath.NodeHandler.NodeValidateImplementation. It is a no-op.
 func (h handler) NodeValidateImplementation(_ types.Node) error {
@@ -110,43 +119,9 @@ func (h handler) NodeConfigurationChanged(_ datapath.LocalNodeConfiguration) err
 	return nil
 }
 
-// NodeNeighDiscoveryEnabled implements
-// datapath.NodeHandler.NodeNeighDiscoveryEnabled. It is a no-op.
-func (h handler) NodeNeighDiscoveryEnabled() bool {
-	// no-op
-	return false
-}
-
-// NodeNeighborRefresh implements
-// datapath.NodeHandler.NodeNeighborRefresh. It is a no-op.
-func (h handler) NodeNeighborRefresh(_ context.Context, _ types.Node) {
-	// no-op
-	return
-}
-
-func (h handler) NodeCleanNeighbors(migrateOnly bool) {
-	// no-op
-	return
-}
-
 // Close frees handler resources.
 func (h *handler) Close() {
 	close(h.stop)
-}
-
-func (h *handler) AllocateNodeID(_ net.IP) uint16 {
-	// no-op
-	return 0
-}
-
-func (h *handler) DumpNodeIDs() []*models.NodeID {
-	// no-op
-	return nil
-}
-
-func (h *handler) RestoreNodeIDs() {
-	// no-op
-	return
 }
 
 // newChangeNotification creates a new change notification with the provided
@@ -159,9 +134,18 @@ func (h *handler) newChangeNotification(n types.Node, t peerpb.ChangeNotificatio
 			ServerName: TLSServerName(n.Name, n.Cluster),
 		}
 	}
+
+	addr := ""
+	if ip := nodeAddress(n, h.addressPref); ip != nil {
+		addr = ip.String()
+		if h.hubblePort != 0 {
+			addr = net.JoinHostPort(addr, strconv.Itoa(h.hubblePort))
+		}
+	}
+
 	return &peerpb.ChangeNotification{
 		Name:    n.Fullname(),
-		Address: nodeAddress(n, h.addressPref),
+		Address: addr,
 		Type:    t,
 		Tls:     tls,
 	}
@@ -169,20 +153,20 @@ func (h *handler) newChangeNotification(n types.Node, t peerpb.ChangeNotificatio
 
 // nodeAddress returns the node's address. If the node has both IPv4 and IPv6
 // addresses, pref controls which address type is returned.
-func nodeAddress(n types.Node, pref serviceoption.AddressFamilyPreference) string {
+func nodeAddress(n types.Node, pref serviceoption.AddressFamilyPreference) net.IP {
 	for _, family := range pref {
 		switch family {
 		case serviceoption.AddressFamilyIPv4:
 			if addr := n.GetNodeIP(false); addr.To4() != nil {
-				return addr.String()
+				return addr
 			}
 		case serviceoption.AddressFamilyIPv6:
 			if addr := n.GetNodeIP(true); addr.To4() == nil {
-				return addr.String()
+				return addr
 			}
 		}
 	}
-	return ""
+	return nil
 }
 
 // TLSServerName constructs a server name to be used as the TLS server name.

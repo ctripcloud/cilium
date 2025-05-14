@@ -4,24 +4,22 @@
 package xds
 
 import (
-	. "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-type NodeSuite struct{}
-
-var _ = Suite(&NodeSuite{})
-
-func (s *NodeSuite) TestIstioNodeToIP(c *C) {
+func TestEnvoyNodeToIP(t *testing.T) {
 	var ip string
 	var err error
 
-	ip, err = IstioNodeToIP("sidecar~10.1.1.0~v0.default~default.svc.cluster.local")
-	c.Assert(err, IsNil)
-	c.Check(ip, Equals, "10.1.1.0")
+	ip, err = EnvoyNodeIdToIP("host~127.0.0.1~no-id~localdomain")
+	require.NoError(t, err)
+	require.Equal(t, "127.0.0.1", ip)
 
-	_, err = IstioNodeToIP("sidecar~10.1.1.0~v0.default")
-	c.Assert(err, Not(IsNil))
+	_, err = EnvoyNodeIdToIP("host~127.0.0.1~localdomain")
+	require.Error(t, err)
 
-	_, err = IstioNodeToIP("sidecar~not-an-ip~v0.default~default.svc.cluster.local")
-	c.Assert(err, Not(IsNil))
+	_, err = EnvoyNodeIdToIP("host~not-an-ip~v0.default~default.svc.cluster.local")
+	require.Error(t, err)
 }

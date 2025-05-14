@@ -4,14 +4,22 @@
 package manager
 
 import (
-	"time"
+	"log/slog"
 
+	"github.com/cilium/hive/cell"
+	"github.com/cilium/hive/job"
+	"github.com/cilium/statedb"
+
+	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	"github.com/cilium/cilium/pkg/datapath/iptables/ipset"
+	"github.com/cilium/cilium/pkg/datapath/tables"
+	"github.com/cilium/cilium/pkg/datapath/tunnel"
 	datapath "github.com/cilium/cilium/pkg/datapath/types"
-	"github.com/cilium/cilium/pkg/hive"
-	"github.com/cilium/cilium/pkg/hive/cell"
 	"github.com/cilium/cilium/pkg/ipcache"
+	"github.com/cilium/cilium/pkg/metrics"
 	"github.com/cilium/cilium/pkg/node/types"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 // Cell provides the NodeManager, which manages information about Cilium nodes
@@ -20,6 +28,8 @@ var Cell = cell.Module(
 	"node-manager",
 	"Manages the collection of Cilium nodes",
 	cell.Provide(newAllNodeManager),
+	cell.Provide(newGetClusterNodesRestAPIHandler),
+	metrics.Metric(NewNodeMetrics),
 )
 
 // Notifier is the interface the wraps Subscribe and Unsubscribe. An
@@ -37,6 +47,8 @@ type Notifier interface {
 }
 
 type NodeManager interface {
+	datapath.NodeNeighborEnqueuer
+
 	Notifier
 
 	// GetNodes returns a copy of all the nodes as a map from Identity to Node.
@@ -53,6 +65,11 @@ type NodeManager interface {
 	// NodeDeleted is called when the store detects a deletion of a node
 	NodeDeleted(n types.Node)
 
+	// NodeSync is called when the store completes the initial nodes listing
+	NodeSync()
+	// MeshNodeSync is called when the store completes the initial nodes listing including meshed nodes
+	MeshNodeSync()
+
 	// ClusterSizeDependantInterval returns a time.Duration that is dependent on
 	// the cluster size, i.e. the number of nodes that have been discovered. This
 	// can be used to control sync intervals of shared or centralized resources to
@@ -61,14 +78,37 @@ type NodeManager interface {
 
 	// StartNeighborRefresh spawns a controller which refreshes neighbor table
 	// by sending arping periodically.
-	StartNeighborRefresh(nh datapath.NodeHandler)
+	StartNeighborRefresh(nh datapath.NodeNeighbors)
+
+	// StartNodeNeighborLinkUpdater spawns a controller that watches a queue
+	// for node neighbor link updates.
+	StartNodeNeighborLinkUpdater(nh datapath.NodeNeighbors)
+
+	// SetPrefixClusterMutatorFn allows to inject a custom prefix cluster mutator.
+	// The mutator may then be applied to the PrefixCluster(s) using cmtypes.PrefixClusterFrom,
+	// cmtypes.PrefixClusterFromCIDR and the like.
+	SetPrefixClusterMutatorFn(mutator func(*types.Node) []cmtypes.PrefixClusterOpts)
 }
 
-func newAllNodeManager(lc hive.Lifecycle, ipCache *ipcache.IPCache) (NodeManager, error) {
-	mngr, err := New("all", option.Config, ipCache)
+func newAllNodeManager(in struct {
+	cell.In
+	Logger      *slog.Logger
+	TunnelConf  tunnel.Config
+	Lifecycle   cell.Lifecycle
+	IPCache     *ipcache.IPCache
+	IPSetMgr    ipset.Manager
+	IPSetFilter IPSetFilterFn `optional:"true"`
+	NodeMetrics *nodeMetrics
+	Health      cell.Health
+	JobGroup    job.Group
+	DB          *statedb.DB
+	Devices     statedb.Table[*tables.Device]
+},
+) (NodeManager, error) {
+	mngr, err := New(in.Logger, option.Config, in.TunnelConf, in.IPCache, in.IPSetMgr, in.IPSetFilter, in.NodeMetrics, in.Health, in.JobGroup, in.DB, in.Devices)
 	if err != nil {
 		return nil, err
 	}
-	lc.Append(mngr)
+	in.Lifecycle.Append(mngr)
 	return mngr, nil
 }

@@ -6,16 +6,16 @@ package kvstore
 import (
 	"context"
 	"fmt"
-	"time"
+	"log/slog"
 
 	"github.com/davecgh/go-spew/spew"
 	"github.com/google/uuid"
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/debug"
 	"github.com/cilium/cilium/pkg/defaults"
-	"github.com/cilium/cilium/pkg/inctimer"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 var (
@@ -36,7 +36,7 @@ type KVLocker interface {
 	// Comparator returns an object that should be used by the KVStore to make
 	// sure if the lock is still valid for its client or nil if no such
 	// verification exists.
-	Comparator() interface{}
+	Comparator() any
 }
 
 // getLockPath returns the lock path representation of the given path.
@@ -67,11 +67,11 @@ func (pl *pathLocks) DebugStatus() string {
 	return str
 }
 
-func (pl *pathLocks) runGC() {
+func (pl *pathLocks) runGC(logger *slog.Logger) {
 	pl.mutex.Lock()
 	for path, owner := range pl.lockPaths {
 		if time.Since(owner.created) > staleLockTimeout {
-			log.WithField("path", path).Error("Forcefully unlocking local kvstore lock")
+			logger.Error("Forcefully unlocking local kvstore lock", fieldKey, path)
 			delete(pl.lockPaths, path)
 		}
 	}
@@ -79,8 +79,6 @@ func (pl *pathLocks) runGC() {
 }
 
 func (pl *pathLocks) lock(ctx context.Context, path string) (id uuid.UUID, err error) {
-	lockTimer, lockTimerDone := inctimer.New()
-	defer lockTimerDone()
 	for {
 		pl.mutex.Lock()
 		if _, ok := pl.lockPaths[path]; !ok {
@@ -95,9 +93,9 @@ func (pl *pathLocks) lock(ctx context.Context, path string) (id uuid.UUID, err e
 		pl.mutex.Unlock()
 
 		select {
-		case <-lockTimer.After(time.Duration(10) * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 		case <-ctx.Done():
-			err = fmt.Errorf("lock was cancelled: %s", ctx.Err())
+			err = fmt.Errorf("lock was cancelled: %w", ctx.Err())
 			return
 		}
 	}
@@ -116,6 +114,7 @@ type Lock struct {
 	path   string
 	id     uuid.UUID
 	kvLock KVLocker
+	logger *slog.Logger
 }
 
 // LockPath locks the specified path. The key for the lock is not the path
@@ -123,7 +122,7 @@ type Lock struct {
 // returned also contains a patch specific local Mutex which will be held.
 //
 // It is required to call Unlock() on the returned Lock to unlock
-func LockPath(ctx context.Context, backend BackendOperations, path string) (l *Lock, err error) {
+func LockPath(ctx context.Context, logger *slog.Logger, backend BackendOperations, path string) (l *Lock, err error) {
 	id, err := kvstoreLocks.lock(ctx, path)
 	if err != nil {
 		return nil, err
@@ -132,20 +131,20 @@ func LockPath(ctx context.Context, backend BackendOperations, path string) (l *L
 	lock, err := backend.LockPath(ctx, path)
 	if err != nil {
 		kvstoreLocks.unlock(path, id)
-		Trace("Failed to lock", err, logrus.Fields{fieldKey: path})
-		err = fmt.Errorf("error while locking path %s: %s", path, err)
+		Trace(logger, "Failed to lock", fieldKey, path)
+		err = fmt.Errorf("error while locking path %s: %w", path, err)
 		return nil, err
 	}
 
-	Trace("Successful lock", err, logrus.Fields{fieldKey: path})
-	return &Lock{kvLock: lock, path: path, id: id}, err
+	Trace(logger, "Successful lock", fieldKey, path)
+	return &Lock{kvLock: lock, path: path, id: id, logger: logger}, err
 }
 
 // RunLockGC inspects all local kvstore locks to determine whether they have
 // been held longer than the stale lock timeout, and if so, unlocks them
 // forceably.
-func RunLockGC() {
-	kvstoreLocks.runGC()
+func RunLockGC(logger *slog.Logger) {
+	kvstoreLocks.runGC(logger)
 }
 
 // Unlock unlocks a lock
@@ -157,16 +156,19 @@ func (l *Lock) Unlock(ctx context.Context) error {
 	// Unlock kvstore mutex first
 	err := l.kvLock.Unlock(ctx)
 	if err != nil {
-		log.WithError(err).WithField("path", l.path).Error("Unable to unlock kvstore lock")
+		l.logger.Error("Unable to unlock kvstore lock",
+			logfields.Error, err,
+			fieldKey, l.path,
+		)
 	}
 
 	// unlock local lock even if kvstore cannot be unlocked
 	kvstoreLocks.unlock(l.path, l.id)
-	Trace("Unlocked", nil, logrus.Fields{fieldKey: l.path})
+	Trace(l.logger, "Unlocked", fieldKey, l.path)
 
 	return err
 }
 
-func (l *Lock) Comparator() interface{} {
+func (l *Lock) Comparator() any {
 	return l.kvLock.Comparator()
 }

@@ -8,22 +8,21 @@ package node
 import (
 	"fmt"
 	"net"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/vishvananda/netlink"
 
 	"github.com/cilium/cilium/pkg/testutils"
-
-	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 )
 
-type NodePrivilegedSuite struct{}
-
-var _ = Suite(&NodePrivilegedSuite{})
-
-func (s *NodePrivilegedSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+func setUpSuite(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
 }
 
-func (s *NodePrivilegedSuite) Test_firstGlobalV4Addr(c *C) {
+func Test_firstGlobalV4Addr(t *testing.T) {
+	setUpSuite(t)
+
 	testCases := []struct {
 		name           string
 		ipsOnInterface []string
@@ -64,14 +63,11 @@ func (s *NodePrivilegedSuite) Test_firstGlobalV4Addr(c *C) {
 	const ifName = "dummy_iface"
 	for _, tc := range testCases {
 		err := setupDummyDevice(ifName, tc.ipsOnInterface...)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 
 		got, err := firstGlobalV4Addr(ifName, net.ParseIP(tc.preferredIP), tc.preferPublic)
-		if err != nil {
-			c.Error(err)
-		} else {
-			c.Check(tc.want, Equals, got.String())
-		}
+		require.NoError(t, err)
+		require.Equal(t, tc.want, got.String())
 		removeDevice(ifName)
 	}
 }
@@ -83,12 +79,12 @@ func setupDummyDevice(name string, ips ...string) error {
 		},
 	}
 	if err := netlink.LinkAdd(dummy); err != nil {
-		return fmt.Errorf("netlink.LinkAdd failed: %v", err)
+		return fmt.Errorf("netlink.LinkAdd failed: %w", err)
 	}
 
 	if err := netlink.LinkSetUp(dummy); err != nil {
 		removeDevice(name)
-		return fmt.Errorf("netlink.LinkSetUp failed: %v", err)
+		return fmt.Errorf("netlink.LinkSetUp failed: %w", err)
 	}
 
 	for _, ipStr := range ips {

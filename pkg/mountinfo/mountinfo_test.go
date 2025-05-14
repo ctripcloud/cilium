@@ -9,10 +9,8 @@ import (
 	"bytes"
 	"testing"
 
+	"github.com/stretchr/testify/require"
 	"golang.org/x/sys/unix"
-	. "gopkg.in/check.v1"
-
-	"github.com/cilium/cilium/pkg/checker"
 )
 
 const (
@@ -60,16 +58,7 @@ const (
 657 21 0:98 / /sys/fs/bpf rw,relatime shared:267 - bpf bpffs rw`
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type MountInfoTestSuite struct{}
-
-var _ = Suite(&MountInfoTestSuite{})
-
-func (s *MountInfoTestSuite) TestParseMountInfoFile(c *C) {
+func TestParseMountInfoFile(t *testing.T) {
 	expectedLength := 42
 	expectedMountInfos := []*MountInfo{
 		{
@@ -580,31 +569,31 @@ func (s *MountInfoTestSuite) TestParseMountInfoFile(c *C) {
 
 	r := bytes.NewBuffer([]byte(mountInfoContent))
 	mountInfos, err := parseMountInfoFile(r)
-	c.Assert(err, IsNil)
-	c.Assert(mountInfos, HasLen, expectedLength)
-	c.Assert(mountInfos, checker.DeepEquals, expectedMountInfos)
+	require.NoError(t, err)
+	require.Len(t, mountInfos, expectedLength)
+	require.Equal(t, expectedMountInfos, mountInfos)
 }
 
-func (s *MountInfoTestSuite) TestGetMountInfo(c *C) {
+func TestGetMountInfo(t *testing.T) {
 	_, err := GetMountInfo()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
 // TestIsMountFS tests the public function IsMountFS. We cannot expect every
 // system and machine to have any predictable mounts, but let's try a couple
 // of very well known paths.
-func (s *MountInfoTestSuite) TestIsMountFS(c *C) {
+func TestIsMountFS(t *testing.T) {
 	mounted, matched, err := IsMountFS(unix.PROC_SUPER_MAGIC, "/proc")
-	c.Assert(err, IsNil)
-	c.Assert(mounted, Equals, true)
-	c.Assert(matched, Equals, true)
+	require.NoError(t, err)
+	require.True(t, mounted)
+	require.True(t, matched)
 
 	mounted, matched, err = IsMountFS(FilesystemTypeBPFFS, "/sys/fs/bpf")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	// We can't expect /sys/fs/bpf is mounted, so only check fstype
 	// if it is mounted. IOW, if /sys/fs/bpf is a mount point,
 	// we expect it to be bpffs.
 	if mounted {
-		c.Assert(matched, Equals, true)
+		require.True(t, matched)
 	}
 }

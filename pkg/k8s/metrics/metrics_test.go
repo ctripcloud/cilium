@@ -7,18 +7,10 @@ import (
 	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 )
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type MetricsSuite struct{}
-
-var _ = Suite(&MetricsSuite{})
-
-func (s *MetricsSuite) TestLastInteraction(c *C) {
+func TestLastInteraction(t *testing.T) {
 	LastInteraction.Reset()
-	c.Assert(time.Since(LastInteraction.Time()) < time.Second, Equals, true)
+	require.Less(t, time.Since(LastInteraction.Time()), time.Second)
 }

@@ -29,7 +29,7 @@ func DiffRunes(a, b []rune) []Diff { return diff(runesSeqs{a, b}) }
 
 func diff(seqs sequences) []Diff {
 	// A limit on how deeply the LCS algorithm should search. The value is just a guess.
-	const maxDiffs = 30
+	const maxDiffs = 100
 	diff, _ := compute(seqs, twosided, maxDiffs/2)
 	return diff
 }
@@ -86,7 +86,7 @@ func (lcs lcs) toDiffs(alen, blen int) []Diff {
 
 // --- FORWARD ---
 
-// fdone decides if the forwward path has reached the upper right
+// fdone decides if the forward path has reached the upper right
 // corner of the rectangle. If so, it also returns the computed lcs.
 func (e *editGraph) fdone(D, k int) (bool, lcs) {
 	// x, y, k are relative to the rectangle
@@ -199,6 +199,7 @@ func (e *editGraph) bdone(D, k int) (bool, lcs) {
 }
 
 // run the backward algorithm, until success or up to the limit on D.
+// (used only by tests)
 func backward(e *editGraph) lcs {
 	e.setBackward(0, 0, e.ux)
 	if ok, ans := e.bdone(0, 0); ok {
@@ -376,10 +377,7 @@ func (e *editGraph) twoDone(df, db int) (int, bool) {
 	if (df+db+e.delta)%2 != 0 {
 		return 0, false // diagonals cannot overlap
 	}
-	kmin := -db + e.delta
-	if -df > kmin {
-		kmin = -df
-	}
+	kmin := max(-df, -db+e.delta)
 	kmax := db + e.delta
 	if df < kmax {
 		kmax = df

@@ -5,12 +5,10 @@ package api
 
 import (
 	"fmt"
-	"regexp"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"k8s.io/utils/strings/slices"
 
 	pb "github.com/cilium/cilium/api/v1/flow"
 	k8sConst "github.com/cilium/cilium/pkg/k8s/apis/cilium.io"
@@ -30,9 +28,6 @@ const (
 	ContextNamespace
 	// ContextPod uses the namespace and pod name for identification purposes in the form of namespace/pod-name.
 	ContextPod
-	// ContextPodShort uses a short version of the pod name. It should
-	// typically map to the deployment/replicaset name. Deprecated.
-	ContextPodShort
 	// ContextPodName uses the pod name for identification purposes
 	ContextPodName
 	// ContextDNS uses the DNS name for identification purposes
@@ -43,6 +38,8 @@ const (
 	// purpose. It uses "reserved:kube-apiserver" label if it's present in the identity label list.
 	// Otherwise, it uses the first label in the identity label list with "reserved:" prefix.
 	ContextReservedIdentity
+	// ContextWorkload uses the namespace and the pod's workload name for identification.
+	ContextWorkload
 	// ContextWorkloadName uses the pod's workload name for identification.
 	ContextWorkloadName
 	// ContextApp uses the pod's app label for identification.
@@ -58,12 +55,11 @@ const ContextOptionsHelp = `
  destinationEgressContext  ::= identifier , { "|", identifier }
  destinationIngressContext ::= identifier , { "|", identifier }
  labels                    ::= label , { ",", label }
- identifier             ::= identity | namespace | pod | pod-short | pod-name | dns | ip | reserved-identity | workload-name | app
- label                     ::= source_ip | source_pod | source_namespace | source_workload | source_app | destination_ip | destination_pod | destination_namespace | destination_workload | destination_app | traffic_direction
+ identifier                ::= identity | namespace | pod | pod-name | dns | ip | reserved-identity | workload | workload-name | app
+ label                     ::= source_ip | source_pod | source_namespace | source_workload | source_workload_kind | source_app | destination_ip | destination_pod | destination_namespace | destination_workload | destination_workload_kind | destination_app | traffic_direction
 `
 
 var (
-	shortPodPattern    = regexp.MustCompile("^(.+?)(-[a-z0-9]+){1,2}$")
 	kubeAPIServerLabel = ciliumLabels.LabelKubeAPIServer.String()
 	// contextLabelsList defines available labels for the ContextLabels
 	// ContextIdentifier and the order of those labels for GetLabelNames and GetLabelValues.
@@ -72,11 +68,13 @@ var (
 		"source_pod",
 		"source_namespace",
 		"source_workload",
+		"source_workload_kind",
 		"source_app",
 		"destination_ip",
 		"destination_pod",
 		"destination_namespace",
 		"destination_workload",
+		"destination_workload_kind",
 		"destination_app",
 		"traffic_direction",
 	}
@@ -104,14 +102,14 @@ func (c ContextIdentifier) String() string {
 		return "namespace"
 	case ContextPod:
 		return "pod"
-	case ContextPodShort:
-		return "pod-short"
 	case ContextDNS:
 		return "dns"
 	case ContextIP:
 		return "ip"
 	case ContextReservedIdentity:
 		return "reserved-identity"
+	case ContextWorkload:
+		return "workload"
 	case ContextWorkloadName:
 		return "workload-name"
 	case ContextApp:
@@ -164,8 +162,6 @@ func parseContextIdentifier(s string) (ContextIdentifier, error) {
 		return ContextNamespace, nil
 	case "pod":
 		return ContextPod, nil
-	case "pod-short":
-		return ContextPodShort, nil
 	case "pod-name":
 		return ContextPodName, nil
 	case "dns":
@@ -174,6 +170,8 @@ func parseContextIdentifier(s string) (ContextIdentifier, error) {
 		return ContextIP, nil
 	case "reserved-identity":
 		return ContextReservedIdentity, nil
+	case "workload":
+		return ContextWorkload, nil
 	case "workload-name":
 		return ContextWorkloadName, nil
 	case "app":
@@ -183,8 +181,8 @@ func parseContextIdentifier(s string) (ContextIdentifier, error) {
 	}
 }
 
-func parseContext(s string) (cs ContextIdentifierList, err error) {
-	for _, v := range strings.Split(s, "|") {
+func parseContextValues(s ContextValues) (cs ContextIdentifierList, err error) {
+	for _, v := range s {
 		c, err := parseContextIdentifier(v)
 		if err != nil {
 			return nil, err
@@ -195,62 +193,64 @@ func parseContext(s string) (cs ContextIdentifierList, err error) {
 	return cs, nil
 }
 
-func parseLabels(s string) (labelsSet, error) {
-	labels := strings.Split(s, ",")
-	for _, label := range labels {
+func parseLabels(s ContextValues) (labelsSet, error) {
+	// TODO this labels parsing is different from options | parsing
+	// be care ful and support this
+	//labels := strings.Split(s, ",")
+	for _, label := range s {
 		if !allowedContextLabels.HasLabel(label) {
 			return labelsSet{}, fmt.Errorf("invalid labelsContext value: %s", label)
 		}
 	}
-	ls := newLabelsSet(labels)
+	ls := newLabelsSet(s)
 	return ls, nil
 }
 
 // ParseContextOptions parses a set of options and extracts the context
 // relevant options
-func ParseContextOptions(options Options) (*ContextOptions, error) {
+func ParseContextOptions(config []*ContextOptionConfig) (*ContextOptions, error) {
 	o := &ContextOptions{}
 	var err error
-	for key, value := range options {
-		switch strings.ToLower(key) {
+	for _, option := range config {
+		switch strings.ToLower(option.Name) {
 		case "destinationcontext":
-			o.Destination, err = parseContext(value)
+			o.Destination, err = parseContextValues(option.Values)
 			o.allDestinationCtx = append(o.allDestinationCtx, o.Destination...)
 			if err != nil {
 				return nil, err
 			}
 		case "destinationegresscontext":
-			o.DestinationEgress, err = parseContext(value)
+			o.DestinationEgress, err = parseContextValues(option.Values)
 			o.allDestinationCtx = append(o.allDestinationCtx, o.DestinationEgress...)
 			if err != nil {
 				return nil, err
 			}
 		case "destinationingresscontext":
-			o.DestinationIngress, err = parseContext(value)
+			o.DestinationIngress, err = parseContextValues(option.Values)
 			o.allDestinationCtx = append(o.allDestinationCtx, o.DestinationIngress...)
 			if err != nil {
 				return nil, err
 			}
 		case "sourcecontext":
-			o.Source, err = parseContext(value)
+			o.Source, err = parseContextValues(option.Values)
 			o.allSourceCtx = append(o.allSourceCtx, o.Source...)
 			if err != nil {
 				return nil, err
 			}
 		case "sourceegresscontext":
-			o.SourceEgress, err = parseContext(value)
+			o.SourceEgress, err = parseContextValues(option.Values)
 			o.allSourceCtx = append(o.allSourceCtx, o.SourceEgress...)
 			if err != nil {
 				return nil, err
 			}
 		case "sourceingresscontext":
-			o.SourceIngress, err = parseContext(value)
+			o.SourceIngress, err = parseContextValues(option.Values)
 			o.allSourceCtx = append(o.allSourceCtx, o.SourceIngress...)
 			if err != nil {
 				return nil, err
 			}
 		case "labelscontext":
-			o.Labels, err = parseLabels(value)
+			o.Labels, err = parseLabels(option.Values)
 			if err != nil {
 				return nil, err
 			}
@@ -312,6 +312,10 @@ func labelsContext(invertSourceDestination bool, wantedLabels labelsSet, flow *p
 				if workloads := source.GetWorkloads(); len(workloads) != 0 {
 					labelValue = workloads[0].Name
 				}
+			case "source_workload_kind":
+				if workloads := source.GetWorkloads(); len(workloads) != 0 {
+					labelValue = workloads[0].Kind
+				}
 			case "source_app":
 				labelValue = getK8sAppFromLabels(source.GetLabels())
 			case "destination_ip":
@@ -323,6 +327,10 @@ func labelsContext(invertSourceDestination bool, wantedLabels labelsSet, flow *p
 			case "destination_workload":
 				if workloads := destination.GetWorkloads(); len(workloads) != 0 {
 					labelValue = workloads[0].Name
+				}
+			case "destination_workload_kind":
+				if workloads := destination.GetWorkloads(); len(workloads) != 0 {
+					labelValue = workloads[0].Kind
 				}
 			case "destination_app":
 				labelValue = getK8sAppFromLabels(destination.GetLabels())
@@ -342,10 +350,6 @@ func labelsContext(invertSourceDestination bool, wantedLabels labelsSet, flow *p
 		}
 	}
 	return outputLabels, nil
-}
-
-func shortenPodName(name string) string {
-	return shortPodPattern.ReplaceAllString(name, "${1}")
 }
 
 func handleReservedIdentityLabels(lbls []string) string {
@@ -438,10 +442,10 @@ func (o *ContextOptions) getLabelValues(invert bool, flow *pb.Flow) (labels []st
 	if invert {
 		sourceLabel, destinationLabel = destinationLabel, sourceLabel
 	}
-	if len(o.Source) != 0 {
+	if o.includeSourceLabel() {
 		labels = append(labels, sourceLabel)
 	}
-	if len(o.Destination) != 0 {
+	if o.includeDestinationLabel() {
 		labels = append(labels, destinationLabel)
 	}
 	return
@@ -465,11 +469,6 @@ func getContextIDLabelValue(contextID ContextIdentifier, flow *pb.Flow, source b
 		if ep.GetNamespace() != "" {
 			labelValue = ep.GetNamespace() + "/" + labelValue
 		}
-	case ContextPodShort:
-		labelValue = shortenPodName(ep.GetPodName())
-		if ep.GetNamespace() != "" {
-			labelValue = ep.GetNamespace() + "/" + labelValue
-		}
 	case ContextPodName:
 		labelValue = ep.GetPodName()
 	case ContextDNS:
@@ -486,7 +485,13 @@ func getContextIDLabelValue(contextID ContextIdentifier, flow *pb.Flow, source b
 		}
 	case ContextReservedIdentity:
 		labelValue = handleReservedIdentityLabels(ep.GetLabels())
-
+	case ContextWorkload:
+		if workloads := ep.GetWorkloads(); len(workloads) != 0 {
+			labelValue = workloads[0].Name
+		}
+		if labelValue != "" && ep.GetNamespace() != "" {
+			labelValue = ep.GetNamespace() + "/" + labelValue
+		}
 	case ContextWorkloadName:
 		if workloads := ep.GetWorkloads(); len(workloads) != 0 {
 			labelValue = workloads[0].Name
@@ -510,15 +515,23 @@ func (o *ContextOptions) GetLabelNames() (labels []string) {
 		}
 	}
 
-	if len(o.Source) != 0 {
+	if o.includeSourceLabel() {
 		labels = append(labels, "source")
 	}
 
-	if len(o.Destination) != 0 {
+	if o.includeDestinationLabel() {
 		labels = append(labels, "destination")
 	}
 
 	return
+}
+
+func (o *ContextOptions) includeSourceLabel() bool {
+	return len(o.Source) != 0 || len(o.SourceIngress) != 0 || len(o.SourceEgress) != 0
+}
+
+func (o *ContextOptions) includeDestinationLabel() bool {
+	return len(o.Destination) != 0 || len(o.DestinationIngress) != 0 || len(o.DestinationEgress) != 0
 }
 
 // Status returns the configuration status of context options suitable for use
@@ -537,7 +550,7 @@ func (o *ContextOptions) Status() string {
 		status = append(status, "destination="+o.Destination.String())
 	}
 
-	sort.Strings(status)
+	slices.Sort(status)
 
 	return strings.Join(status, ",")
 }

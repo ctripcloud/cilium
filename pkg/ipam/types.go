@@ -4,20 +4,29 @@
 package ipam
 
 import (
+	"log/slog"
 	"net"
 
 	"github.com/davecgh/go-spew/spew"
 
-	"github.com/cilium/cilium/pkg/cidr"
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
+	"github.com/cilium/cilium/pkg/datapath/linux/sysctl"
 	"github.com/cilium/cilium/pkg/datapath/types"
-	ipamOption "github.com/cilium/cilium/pkg/ipam/option"
+	"github.com/cilium/cilium/pkg/endpoint"
+	"github.com/cilium/cilium/pkg/k8s/client"
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/cilium/pkg/node"
+	"github.com/cilium/cilium/pkg/option"
 )
 
 // AllocationResult is the result of an allocation
 type AllocationResult struct {
 	// IP is the allocated IP
 	IP net.IP
+
+	// IPPoolName is the IPAM pool from which the above IP was allocated from
+	IPPoolName Pool
 
 	// CIDRs is a list of all CIDRs to which the IP has direct access to.
 	// This is primarily useful if the IP has been allocated out of a VPC
@@ -65,11 +74,14 @@ type Allocator interface {
 	// upstream or fails if no more IPs are available
 	AllocateNextWithoutSyncUpstream(owner string, pool Pool) (*AllocationResult, error)
 
-	// Dump returns a map of all allocated IPs with the IP represented as
-	// key in the map. Dump must also provide a status one-liner to
-	// represent the overall status, e.g. number of IPs allocated and
-	// overall health information if available.
-	Dump() (map[string]string, string)
+	// Dump returns a map of all allocated IPs per pool with the IP represented as key in the
+	// map. Dump must also provide a status one-liner to represent the overall status, e.g.
+	// number of IPs allocated and overall health information if available.
+	Dump() (map[Pool]map[string]string, string)
+
+	// Capacity returns the total IPAM allocator capacity (not the current
+	// available).
+	Capacity() uint64
 
 	// RestoreFinished marks the status of restoration as done
 	RestoreFinished()
@@ -77,11 +89,16 @@ type Allocator interface {
 
 // IPAM is the configuration used for a particular IPAM type.
 type IPAM struct {
+	logger *slog.Logger
+
 	nodeAddressing types.NodeAddressing
-	config         Configuration
+	config         *option.DaemonConfig
 
 	IPv6Allocator Allocator
 	IPv4Allocator Allocator
+
+	// metadata provides information about a particular IP owner.
+	metadata Metadata
 
 	// owner maps an IP to the owner per pool.
 	owner map[Pool]map[string]string
@@ -89,7 +106,7 @@ type IPAM struct {
 	// expirationTimers is a map of all expiration timers. Each entry
 	// represents a IP allocation which is protected by an expiration
 	// timer.
-	expirationTimers map[string]string
+	expirationTimers map[timerKey]expirationTimer
 
 	// mutex covers access to all members of this struct
 	allocatorMutex lock.RWMutex
@@ -97,44 +114,69 @@ type IPAM struct {
 	// excludedIPS contains excluded IPs and their respective owners per pool. The key is a
 	// combination pool:ip to avoid having to maintain a map of maps.
 	excludedIPs map[string]string
+
+	localNodeStore *node.LocalNodeStore
+	k8sEventReg    K8sEventRegister
+	nodeResource   agentK8s.LocalCiliumNodeResource
+	mtuConfig      MtuConfiguration
+	clientset      client.Clientset
+	nodeDiscovery  Owner
+	sysctl         sysctl.Sysctl
 }
+
+func (ipam *IPAM) EndpointCreated(ep *endpoint.Endpoint) {}
+
+func (ipam *IPAM) EndpointDeleted(ep *endpoint.Endpoint, conf endpoint.DeleteConfig) {
+	if !conf.NoIPRelease {
+		if option.Config.EnableIPv4 {
+			if err := ipam.ReleaseIP(ep.IPv4.AsSlice(), PoolOrDefault(ep.IPv4IPAMPool)); err != nil {
+				ipam.logger.Warn("Unable to release IPv4 address during endpoint deletion", logfields.Error, err)
+			}
+		}
+		if option.Config.EnableIPv6 {
+			if err := ipam.ReleaseIP(ep.IPv6.AsSlice(), PoolOrDefault(ep.IPv6IPAMPool)); err != nil {
+				ipam.logger.Warn("Unable to release IPv6 address during endpoint deletion", logfields.Error, err)
+			}
+		}
+	}
+}
+
+func (ipam *IPAM) EndpointRestored(ep *endpoint.Endpoint) {}
 
 // DebugStatus implements debug.StatusObject to provide debug status collection
 // ability
 func (ipam *IPAM) DebugStatus() string {
-	if ipam == nil {
-		return "<nil>"
-	}
-
 	ipam.allocatorMutex.RLock()
-	str := spew.Sdump(ipam)
+	str := spew.Sdump(
+		"owners", ipam.owner,
+		"expiration timers", ipam.expirationTimers,
+		"excluded ips", ipam.excludedIPs,
+	)
 	ipam.allocatorMutex.RUnlock()
 	return str
 }
 
-// GetVpcCIDRs returns all the CIDRs associated with the VPC this node belongs to.
-// This works only cloud provider IPAM modes and returns nil for other modes.
-// sharedNodeStore must be initialized before calling this method.
-func (ipam *IPAM) GetVpcCIDRs() (vpcCIDRs []*cidr.CIDR) {
-	sharedNodeStore.mutex.RLock()
-	defer sharedNodeStore.mutex.RUnlock()
-	primary, secondary := deriveVpcCIDRs(sharedNodeStore.ownNode)
-	if primary == nil {
-		return nil
-	}
-	if secondary == nil {
-		return []*cidr.CIDR{primary}
-	}
-	return append(secondary, primary)
-}
-
-// Pool is the the IP pool from which to allocate.
+// Pool is the IP pool from which to allocate.
 type Pool string
 
 func (p Pool) String() string {
 	return string(p)
 }
 
-const (
-	PoolDefault Pool = ipamOption.PoolDefault
-)
+type timerKey struct {
+	ip   string
+	pool Pool
+}
+
+type expirationTimer struct {
+	uuid string
+	stop chan<- struct{}
+}
+
+// LimitsNotFound is an error that signals lack of limits for given instance type
+type LimitsNotFound struct{}
+
+// Error implements error interface
+func (_ LimitsNotFound) Error() string {
+	return "Limits not found"
+}

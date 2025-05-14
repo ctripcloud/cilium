@@ -5,183 +5,164 @@ package watchers
 
 import (
 	"context"
-	"sync"
+	"errors"
+	"fmt"
+	"log/slog"
+	"maps"
+	"sync/atomic"
 
+	"github.com/cilium/hive/cell"
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
-	"k8s.io/client-go/tools/cache"
 
-	"github.com/cilium/cilium/pkg/comparator"
+	agentK8s "github.com/cilium/cilium/daemon/k8s"
 	"github.com/cilium/cilium/pkg/k8s"
 	cilium_v2 "github.com/cilium/cilium/pkg/k8s/apis/cilium.io/v2"
-	"github.com/cilium/cilium/pkg/k8s/client"
-	"github.com/cilium/cilium/pkg/k8s/informer"
-	"github.com/cilium/cilium/pkg/k8s/utils"
-	"github.com/cilium/cilium/pkg/k8s/watchers/resources"
-	"github.com/cilium/cilium/pkg/k8s/watchers/subscriber"
-	"github.com/cilium/cilium/pkg/kvstore"
-	"github.com/cilium/cilium/pkg/lock"
-	nodeTypes "github.com/cilium/cilium/pkg/node/types"
+	k8sClient "github.com/cilium/cilium/pkg/k8s/client"
+	"github.com/cilium/cilium/pkg/k8s/resource"
+	k8sSynced "github.com/cilium/cilium/pkg/k8s/synced"
+	"github.com/cilium/cilium/pkg/logging/logfields"
+	nm "github.com/cilium/cilium/pkg/node/manager"
+	"github.com/cilium/cilium/pkg/node/types"
 )
 
-// RegisterCiliumNodeSubscriber allows registration of subscriber.CiliumNode implementations.
-// On CiliumNode events all registered subscriber.CiliumNode implementations will
-// have their event handling methods called in order of registration.
-func (k *K8sWatcher) RegisterCiliumNodeSubscriber(s subscriber.CiliumNode) {
-	k.CiliumNodeChain.Register(s)
+type k8sCiliumNodeWatcherParams struct {
+	cell.In
+
+	Logger *slog.Logger
+
+	Clientset         k8sClient.Clientset
+	Resources         agentK8s.Resources
+	K8sResourceSynced *k8sSynced.Resources
+	K8sAPIGroups      *k8sSynced.APIGroups
+
+	NodeManager nm.NodeManager
 }
 
-func (k *K8sWatcher) ciliumNodeInit(ciliumNPClient client.Clientset, asyncControllers *sync.WaitGroup) {
-	// CiliumNode objects are used for node discovery until the key-value
-	// store is connected
-	var once sync.Once
-	apiGroup := k8sAPIGroupCiliumNodeV2
-	for {
-		swgNodes := lock.NewStoppableWaitGroup()
-		ciliumNodeStore, ciliumNodeInformer := informer.NewInformer(
-			utils.ListerWatcherFromTyped[*cilium_v2.CiliumNodeList](ciliumNPClient.CiliumV2().CiliumNodes()),
-			&cilium_v2.CiliumNode{},
-			0,
-			cache.ResourceEventHandlerFuncs{
-				AddFunc: func(obj interface{}) {
-					var valid, equal bool
-					defer func() { k.K8sEventReceived(apiGroup, metricCiliumNode, resources.MetricCreate, valid, equal) }()
-					if ciliumNode := k8s.ObjToCiliumNode(obj); ciliumNode != nil {
-						valid = true
-						n := nodeTypes.ParseCiliumNode(ciliumNode)
-						errs := k.CiliumNodeChain.OnAddCiliumNode(ciliumNode, swgNodes)
-						if k.egressGatewayManager != nil {
-							k.egressGatewayManager.OnUpdateNode(n)
-						}
-						if n.IsLocal() {
-							return
-						}
-						k.nodeDiscoverManager.NodeUpdated(n)
-						k.K8sEventProcessed(metricCiliumNode, resources.MetricCreate, errs == nil)
-					}
-				},
-				UpdateFunc: func(oldObj, newObj interface{}) {
-					var valid, equal bool
-					defer func() { k.K8sEventReceived(apiGroup, metricCiliumNode, resources.MetricUpdate, valid, equal) }()
-					if oldCN := k8s.ObjToCiliumNode(oldObj); oldCN != nil {
-						if ciliumNode := k8s.ObjToCiliumNode(newObj); ciliumNode != nil {
-							valid = true
-							isLocal := k8s.IsLocalCiliumNode(ciliumNode)
-							if oldCN.DeepEqual(ciliumNode) &&
-								comparator.MapStringEquals(oldCN.ObjectMeta.Labels, ciliumNode.ObjectMeta.Labels) {
-								equal = true
-								if !isLocal {
-									// For remote nodes, we return early here to avoid unnecessary update events if
-									// nothing in the spec or status has changed. But for local nodes, we want to
-									// propagate the new resource version (not compared in DeepEqual) such that any
-									// CiliumNodeChain subscribers are able to perform updates to the local CiliumNode
-									// object using the most recent resource version.
-									return
-								}
-							}
-							n := nodeTypes.ParseCiliumNode(ciliumNode)
-							errs := k.CiliumNodeChain.OnUpdateCiliumNode(oldCN, ciliumNode, swgNodes)
-							if k.egressGatewayManager != nil {
-								k.egressGatewayManager.OnUpdateNode(n)
-							}
-							if isLocal {
-								return
-							}
-							k.nodeDiscoverManager.NodeUpdated(n)
-							k.K8sEventProcessed(metricCiliumNode, resources.MetricUpdate, errs == nil)
-						}
-					}
-				},
-				DeleteFunc: func(obj interface{}) {
-					var valid, equal bool
-					defer func() { k.K8sEventReceived(apiGroup, metricCiliumNode, resources.MetricDelete, valid, equal) }()
-					ciliumNode := k8s.ObjToCiliumNode(obj)
-					if ciliumNode == nil {
-						return
-					}
-					valid = true
-					n := nodeTypes.ParseCiliumNode(ciliumNode)
-					if k.egressGatewayManager != nil {
-						k.egressGatewayManager.OnDeleteNode(n)
-					}
-					errs := k.CiliumNodeChain.OnDeleteCiliumNode(ciliumNode, swgNodes)
-					if errs != nil {
-						valid = false
-					}
-					k.nodeDiscoverManager.NodeDeleted(n)
-				},
-			},
-			k8s.ConvertToCiliumNode,
-		)
-		isConnected := make(chan struct{})
-		// once isConnected is closed, it will stop waiting on caches to be
-		// synchronized.
-		k.blockWaitGroupToSyncResources(isConnected, swgNodes, ciliumNodeInformer.HasSynced, apiGroup)
-
-		k.ciliumNodeStoreMU.Lock()
-		k.ciliumNodeStore = ciliumNodeStore
-		k.ciliumNodeStoreMU.Unlock()
-
-		once.Do(func() {
-			// Signalize that we have put node controller in the wait group
-			// to sync resources.
-			asyncControllers.Done()
-		})
-		k.k8sAPIGroups.AddAPI(apiGroup)
-		go ciliumNodeInformer.Run(isConnected)
-
-		<-kvstore.Connected()
-		log.Info("Connected to key-value store, stopping CiliumNode watcher")
-
-		// Set the ciliumNodeStore as nil so that any attempts of getting the
-		// CiliumNode are performed with a request sent to kube-apiserver
-		// directly instead of relying on an outdated version of the CiliumNode
-		// in this cache.
-		k.ciliumNodeStoreMU.Lock()
-		k.ciliumNodeStore = nil
-		k.ciliumNodeStoreMU.Unlock()
-
-		close(isConnected)
-
-		k.cancelWaitGroupToSyncResources(apiGroup)
-		k.k8sAPIGroups.RemoveAPI(apiGroup)
-		// Create a new node controller when we are disconnected with the
-		// kvstore
-		<-kvstore.Client().Disconnected()
-
-		log.Info("Disconnected from key-value store, restarting CiliumNode watcher")
+func newK8sCiliumNodeWatcher(params k8sCiliumNodeWatcherParams) *K8sCiliumNodeWatcher {
+	return &K8sCiliumNodeWatcher{
+		logger:            params.Logger,
+		clientset:         params.Clientset,
+		k8sResourceSynced: params.K8sResourceSynced,
+		k8sAPIGroups:      params.K8sAPIGroups,
+		resources:         params.Resources,
+		nodeManager:       params.NodeManager,
 	}
 }
 
-// GetCiliumNode returns the CiliumNode "nodeName" from the local store. If the
-// local store is not initialized then it will fallback retrieving the node
-// from kube-apiserver.
-func (k *K8sWatcher) GetCiliumNode(ctx context.Context, nodeName string) (*cilium_v2.CiliumNode, error) {
-	var (
-		err                      error
-		nodeInterface            interface{}
-		exists, getFromAPIServer bool
+type K8sCiliumNodeWatcher struct {
+	logger *slog.Logger
+
+	clientset k8sClient.Clientset
+
+	// k8sResourceSynced maps a resource name to a channel. Once the given
+	// resource name is synchronized with k8s, the channel for which that
+	// resource name maps to is closed.
+	k8sResourceSynced *k8sSynced.Resources
+	// k8sAPIGroups is a set of k8s API in use. They are setup in watchers,
+	// and may be disabled while the agent runs.
+	k8sAPIGroups *k8sSynced.APIGroups
+	resources    agentK8s.Resources
+
+	nodeManager nodeManager
+
+	ciliumNodeStore atomic.Pointer[resource.Store[*cilium_v2.CiliumNode]]
+}
+
+func (k *K8sCiliumNodeWatcher) ciliumNodeInit(ctx context.Context) {
+	var synced atomic.Bool
+
+	k.k8sResourceSynced.BlockWaitGroupToSyncResources(
+		ctx.Done(),
+		nil,
+		func() bool { return synced.Load() },
+		k8sAPIGroupCiliumNodeV2,
 	)
-	k.ciliumNodeStoreMU.RLock()
-	// k.ciliumNodeStore might not be set in all invocations of GetCiliumNode,
-	// for example, during Cilium initialization GetCiliumNode is called from
-	// WaitForNodeInformation, which happens before ciliumNodeStore,
-	// so we will fallback to perform an API request to kube-apiserver.
-	if k.ciliumNodeStore == nil {
-		getFromAPIServer = true
-	} else {
-		nodeInterface, exists, err = k.ciliumNodeStore.GetByKey(nodeName)
-	}
-	k.ciliumNodeStoreMU.RUnlock()
+	k.k8sAPIGroups.AddAPI(k8sAPIGroupCiliumNodeV2)
 
-	if !exists || getFromAPIServer {
-		// fallback to using the kube-apiserver
+	go func() {
+		events := k.resources.CiliumNode.Events(ctx)
+		cache := make(map[resource.Key]*cilium_v2.CiliumNode)
+		for event := range events {
+			switch event.Kind {
+			case resource.Sync:
+				synced.Store(true)
+				k.nodeManager.NodeSync()
+
+				// The informer just synchronized, so the Store call will not block.
+				store, err := k.resources.CiliumNode.Store(ctx)
+				if err != nil {
+					if !errors.Is(err, context.Canceled) {
+						k.logger.Warn("unable to retrieve CiliumNode local store, going to query kube-apiserver directly", logfields.Error, err)
+					}
+				} else {
+					k.ciliumNodeStore.Store(&store)
+				}
+
+			case resource.Upsert:
+				var needUpdate bool
+				oldObj, ok := cache[event.Key]
+				if !ok {
+					needUpdate = k.onCiliumNodeInsert(event.Object)
+				} else {
+					needUpdate = k.onCiliumNodeUpdate(oldObj, event.Object)
+				}
+				if needUpdate {
+					cache[event.Key] = event.Object.DeepCopy()
+				}
+			case resource.Delete:
+				k.onCiliumNodeDelete(event.Object)
+				delete(cache, event.Key)
+			}
+			event.Done(nil)
+		}
+	}()
+}
+
+func (k *K8sCiliumNodeWatcher) onCiliumNodeInsert(ciliumNode *cilium_v2.CiliumNode) bool {
+	if k8s.IsLocalCiliumNode(ciliumNode) {
+		return false
+	}
+	n := types.ParseCiliumNode(ciliumNode)
+	k.nodeManager.NodeUpdated(n)
+	return true
+}
+
+func (k *K8sCiliumNodeWatcher) onCiliumNodeUpdate(oldNode, newNode *cilium_v2.CiliumNode) bool {
+	// Comparing Annotations here since wg-pub-key annotation is used to exchange rotated WireGuard keys.
+	if oldNode.DeepEqual(newNode) &&
+		maps.Equal(oldNode.ObjectMeta.Labels, newNode.ObjectMeta.Labels) &&
+		maps.Equal(oldNode.ObjectMeta.Annotations, newNode.ObjectMeta.Annotations) {
+		return false
+	}
+	return k.onCiliumNodeInsert(newNode)
+}
+
+func (k *K8sCiliumNodeWatcher) onCiliumNodeDelete(ciliumNode *cilium_v2.CiliumNode) {
+	if k8s.IsLocalCiliumNode(ciliumNode) {
+		return
+	}
+	n := types.ParseCiliumNode(ciliumNode)
+	k.nodeManager.NodeDeleted(n)
+}
+
+// GetCiliumNode returns the CiliumNode "nodeName" from the local Resource[T] store. If the
+// local Resource[T] store is not initialized or the key value store is connected, then it will
+// retrieve the node from kube-apiserver.
+// Note that it may be possible (although rare) that the requested nodeName is not yet in the
+// store if the local cache is falling behind due to the high amount of CiliumNode events
+// received from the k8s API server. To mitigate this, the caller should retry GetCiliumNode
+// for a given interval to be sure that a CiliumNode with that name has not actually been created.
+func (k *K8sCiliumNodeWatcher) GetCiliumNode(ctx context.Context, nodeName string) (*cilium_v2.CiliumNode, error) {
+	store := k.ciliumNodeStore.Load()
+	if store == nil {
 		return k.clientset.CiliumV2().CiliumNodes().Get(ctx, nodeName, v1.GetOptions{})
 	}
 
+	ciliumNode, exists, err := (*store).GetByKey(resource.Key{Name: nodeName})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("unable to get CiliumNode %s from local store: %w", nodeName, err)
 	}
 	if !exists {
 		return nil, k8sErrors.NewNotFound(schema.GroupResource{
@@ -189,5 +170,5 @@ func (k *K8sWatcher) GetCiliumNode(ctx context.Context, nodeName string) (*ciliu
 			Resource: "CiliumNode",
 		}, nodeName)
 	}
-	return nodeInterface.(*cilium_v2.CiliumNode).DeepCopy(), nil
+	return ciliumNode.DeepCopy(), nil
 }

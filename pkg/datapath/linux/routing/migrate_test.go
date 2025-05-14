@@ -8,15 +8,16 @@ import (
 	"fmt"
 	"net"
 	"os/exec"
+	"testing"
 
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/datapath/linux/linux_defaults"
 	"github.com/cilium/cilium/pkg/testutils"
+	"github.com/cilium/cilium/pkg/testutils/netns"
 )
-
-var _ = Suite(&MigrateSuite{})
 
 type MigrateSuite struct {
 	// rpdb interface mock
@@ -37,17 +38,20 @@ type MigrateSuite struct {
 	OnGetMACByInterfaceNumber func(ifaceNum int) (string, error)
 }
 
-func (s *MigrateSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+func setupMigrateSuite(tb testing.TB) *MigrateSuite {
+	testutils.PrivilegedTest(tb)
+	return &MigrateSuite{}
 }
 
 // n is the number of devices, routes, and rules that will be created in
 // setUpRoutingTable() as fixtures for this test suite.
 const n = 5
 
-func (m *MigrateSuite) TestMigrateENIDatapathUpgradeSuccess(c *C) {
-	// First, we need to setup the Linux routing policy database to mimic a
-	// broken setup (1). Then we will call MigrateENIDatapath (2).
+func TestMigrateENIDatapathUpgradeSuccess(t *testing.T) {
+	m := setupMigrateSuite(t)
+	logger := hivetest.Logger(t)
+	// First, we need to setupMigrateSuite the Linux routing policy database to mimic a
+	// broken setupMigrateSuite (1). Then we will call MigrateENIDatapath (2).
 
 	// This test case will cover the successful path. We will create:
 	//   - One rule with the old priority referencing the old table ID.
@@ -57,7 +61,8 @@ func (m *MigrateSuite) TestMigrateENIDatapathUpgradeSuccess(c *C) {
 	//     table ID.
 	//   - The route has the new table ID.
 
-	runFuncInNetNS(c, func() {
+	ns := netns.NewNetNS(t)
+	ns.Do(func() error {
 		// (1) Setting up the routing table.
 
 		// Pick an arbitrary iface index. In the old table ID scheme, we used this
@@ -70,7 +75,7 @@ func (m *MigrateSuite) TestMigrateENIDatapathUpgradeSuccess(c *C) {
 		//
 		// The reason we pass index twice is because we want to use the ifindex as
 		// the table ID.
-		devIfNumLookup, _ := setUpRoutingTable(c, index, index, linux_defaults.RulePriorityEgress)
+		devIfNumLookup, _ := setUpRoutingTable(t, index, index, linux_defaults.RulePriorityEgress)
 
 		// Set up the rpdb mocks to just forward to netlink implementation.
 		m.defaultNetlinkMock()
@@ -87,46 +92,50 @@ func (m *MigrateSuite) TestMigrateENIDatapathUpgradeSuccess(c *C) {
 		}
 
 		// (2) Make the call to modifying the routing table.
-		mig := migrator{rpdb: m, getter: m}
+		mig := migrator{logger: logger, rpdb: m, getter: m}
 		migrated, failed := mig.MigrateENIDatapath(false)
-		c.Assert(migrated, Equals, n)
-		c.Assert(failed, Equals, 0)
+		require.Equal(t, n, migrated)
+		require.Equal(t, 0, failed)
 
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: index,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 0) // We don't expect any routes with the old table ID.
+		require.NoError(t, err)
+		require.Empty(t, routes) // We don't expect any routes with the old table ID.
 
 		routes, err = netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: tableID,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 1) // We only expect one route that we created above in the setup.
-		c.Assert(routes[0].Table, Not(Equals), index)
+		require.NoError(t, err)
+		require.Len(t, routes, 1) // We only expect one route that we created above in the setupMigrateSuite.
+		require.NotEqual(t, index, routes[0].Table)
 
 		rules, err := findRulesByPriority(linux_defaults.RulePriorityEgress)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 0) // We don't expect any rules from old priority.
+		require.NoError(t, err)
+		require.Empty(t, rules) // We don't expect any rules from old priority.
 
 		rules, err = findRulesByPriority(linux_defaults.RulePriorityEgressv2)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 5) // We expect all rules to be migrated to new priority.
-		c.Assert(rules[0].Table, Not(Equals), index)
+		require.NoError(t, err)
+		require.Len(t, rules, 5) // We expect all rules to be migrated to new priority.
+		require.NotEqual(t, index, rules[0].Table)
+		return nil
 	})
 }
 
-func (m *MigrateSuite) TestMigrateENIDatapathUpgradeFailure(c *C) {
+func TestMigrateENIDatapathUpgradeFailure(t *testing.T) {
+	logger := hivetest.Logger(t)
 	// This test case will cover one failure path where we successfully migrate
 	// all the old rules and routes, but fail to cleanup the old rule. This
 	// test case will be set up identically to the successful case. After we
 	// call MigrateENIDatapath(), we assert that we failed to migrate 1 rule.
 	// We assert that the revert of the upgrade was successfully as well,
 	// meaning we expect the old rules and routes to be reinstated.
+	m := setupMigrateSuite(t)
 
-	runFuncInNetNS(c, func() {
+	ns := netns.NewNetNS(t)
+	ns.Do(func() error {
 		index := 5
-		devIfNumLookup, _ := setUpRoutingTable(c, index, index, linux_defaults.RulePriorityEgress)
+		devIfNumLookup, _ := setUpRoutingTable(t, index, index, linux_defaults.RulePriorityEgress)
 
 		m.defaultNetlinkMock()
 
@@ -153,37 +162,38 @@ func (m *MigrateSuite) TestMigrateENIDatapathUpgradeFailure(c *C) {
 			return devIfNumLookup[mac], nil
 		}
 
-		mig := migrator{rpdb: m, getter: m}
+		mig := migrator{logger: logger, rpdb: m, getter: m}
 		migrated, failed := mig.MigrateENIDatapath(false)
-		c.Assert(migrated, Equals, 4)
-		c.Assert(failed, Equals, 1)
+		require.Equal(t, 4, migrated)
+		require.Equal(t, 1, failed)
 
 		tableID := 11
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: index,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 1) // We expect old route to be untouched b/c we failed.
-		c.Assert(routes[0].Table, Equals, index)
+		require.NoError(t, err)
+		require.Len(t, routes, 1) // We expect old route to be untouched b/c we failed.
+		require.Equal(t, index, routes[0].Table)
 
 		routes, err = netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: tableID,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 0) // We don't expect any routes under new table ID b/c of revert.
+		require.NoError(t, err)
+		require.Empty(t, routes) // We don't expect any routes under new table ID b/c of revert.
 
 		rules, err := findRulesByPriority(linux_defaults.RulePriorityEgress)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 1) // We expect the old rule to be reinstated.
-		c.Assert(rules[0].Table, Equals, index)
+		require.NoError(t, err)
+		require.Len(t, rules, 1) // We expect the old rule to be reinstated.
+		require.Equal(t, index, rules[0].Table)
 
 		rules, err = findRulesByPriority(linux_defaults.RulePriorityEgressv2)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 4) // We expect the rest of the rules to be upgraded.
+		require.NoError(t, err)
+		require.Len(t, rules, 4) // We expect the rest of the rules to be upgraded.
+		return nil
 	})
 }
 
-func (m *MigrateSuite) TestMigrateENIDatapathDowngradeSuccess(c *C) {
+func TestMigrateENIDatapathDowngradeSuccess(t *testing.T) {
 	// This test case will cover the successful downgrade path. We will create:
 	//   - One rule with the new priority referencing the new table ID.
 	//   - One route with the new table ID.
@@ -191,8 +201,10 @@ func (m *MigrateSuite) TestMigrateENIDatapathDowngradeSuccess(c *C) {
 	//   - The rule has switched to the old priority and references the old
 	//     table ID.
 	//   - The route has the old table ID.
-
-	runFuncInNetNS(c, func() {
+	m := setupMigrateSuite(t)
+	logger := hivetest.Logger(t)
+	ns := netns.NewNetNS(t)
+	ns.Do(func() error {
 		// (1) Setting up the routing table.
 
 		// Pick an arbitrary table ID. In the new table ID scheme, it is the
@@ -205,7 +217,7 @@ func (m *MigrateSuite) TestMigrateENIDatapathDowngradeSuccess(c *C) {
 
 		// (1) Setting up the routing table for testing downgrade, hence creating
 		// rules with RulePriorityEgressv2.
-		_, devMACLookup := setUpRoutingTable(c, index, tableID, linux_defaults.RulePriorityEgressv2)
+		_, devMACLookup := setUpRoutingTable(t, index, tableID, linux_defaults.RulePriorityEgressv2)
 
 		// Set up the rpdb mocks to just forward to netlink implementation.
 		m.defaultNetlinkMock()
@@ -221,36 +233,37 @@ func (m *MigrateSuite) TestMigrateENIDatapathDowngradeSuccess(c *C) {
 		}
 
 		// (2) Make the call to modifying the routing table.
-		mig := migrator{rpdb: m, getter: m}
+		mig := migrator{logger: logger, rpdb: m, getter: m}
 		migrated, failed := mig.MigrateENIDatapath(true)
-		c.Assert(migrated, Equals, n)
-		c.Assert(failed, Equals, 0)
+		require.Equal(t, n, migrated)
+		require.Equal(t, 0, failed)
 
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: tableID,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 0) // We don't expect any routes with the new table ID.
+		require.NoError(t, err)
+		require.Empty(t, routes) // We don't expect any routes with the new table ID.
 
 		routes, err = netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: index,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 1) // We only expect one route with the old table ID.
-		c.Assert(routes[0].Table, Not(Equals), tableID)
+		require.NoError(t, err)
+		require.Len(t, routes, 1) // We only expect one route with the old table ID.
+		require.NotEqual(t, tableID, routes[0].Table)
 
 		rules, err := findRulesByPriority(linux_defaults.RulePriorityEgressv2)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 0) // We don't expect any rules with this priority.
+		require.NoError(t, err)
+		require.Empty(t, rules) // We don't expect any rules with this priority.
 
 		rules, err = findRulesByPriority(linux_defaults.RulePriorityEgress)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 5) // We expect all rules to have the original priority.
-		c.Assert(rules[0].Table, Not(Equals), tableID)
+		require.NoError(t, err)
+		require.Len(t, rules, 5) // We expect all rules to have the original priority.
+		require.NotEqual(t, tableID, rules[0].Table)
+		return nil
 	})
 }
 
-func (m *MigrateSuite) TestMigrateENIDatapathDowngradeFailure(c *C) {
+func TestMigrateENIDatapathDowngradeFailure(t *testing.T) {
 	// This test case will cover one downgrade failure path where we failed to
 	// migrate the rule to the old scheme. This test case will be set up
 	// identically to the successful case. "New" meaning the rules and routes
@@ -258,11 +271,14 @@ func (m *MigrateSuite) TestMigrateENIDatapathDowngradeFailure(c *C) {
 	// MigrateENIDatapath(), we assert that we failed to migrate 1 rule. We
 	// assert that the revert of the downgrade was successfully as well,
 	// meaning we expect the "newer" rules and routes to be reinstated.
+	m := setupMigrateSuite(t)
 
-	runFuncInNetNS(c, func() {
+	logger := hivetest.Logger(t)
+	ns := netns.NewNetNS(t)
+	ns.Do(func() error {
 		index := 5
 		tableID := 11
-		_, devMACLookup := setUpRoutingTable(c, index, tableID, linux_defaults.RulePriorityEgressv2)
+		_, devMACLookup := setUpRoutingTable(t, index, tableID, linux_defaults.RulePriorityEgressv2)
 
 		m.defaultNetlinkMock()
 
@@ -286,36 +302,37 @@ func (m *MigrateSuite) TestMigrateENIDatapathDowngradeFailure(c *C) {
 			return devMACLookup[fmt.Sprintf("gotestdummy%d", i)], nil
 		}
 
-		mig := migrator{rpdb: m, getter: m}
+		mig := migrator{logger: logger, rpdb: m, getter: m}
 		migrated, failed := mig.MigrateENIDatapath(true)
-		c.Assert(migrated, Equals, n-1) // One failed migration.
-		c.Assert(failed, Equals, 1)
+		require.Equal(t, n-1, migrated) // One failed migration.
+		require.Equal(t, 1, failed)
 
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: tableID,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 1) // We expect "new" route to be untouched b/c we failed to delete.
-		c.Assert(routes[0].Table, Equals, tableID)
+		require.NoError(t, err)
+		require.Len(t, routes, 1) // We expect "new" route to be untouched b/c we failed to delete.
+		require.Equal(t, tableID, routes[0].Table)
 
 		routes, err = netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: index,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 0) // We don't expect routes under original table ID b/c of revert.
+		require.NoError(t, err)
+		require.Empty(t, routes) // We don't expect routes under original table ID b/c of revert.
 
 		rules, err := findRulesByPriority(linux_defaults.RulePriorityEgressv2)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 1) // We expect the "new" rule to be reinstated.
-		c.Assert(rules[0].Table, Equals, tableID)
+		require.NoError(t, err)
+		require.Len(t, rules, 1) // We expect the "new" rule to be reinstated.
+		require.Equal(t, tableID, rules[0].Table)
 
 		rules, err = findRulesByPriority(linux_defaults.RulePriorityEgress)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, n-1) // Successfully migrated rules.
+		require.NoError(t, err)
+		require.Len(t, rules, n-1) // Successfully migrated rules.
+		return nil
 	})
 }
 
-func (m *MigrateSuite) TestMigrateENIDatapathPartial(c *C) {
+func TestMigrateENIDatapathPartial(t *testing.T) {
 	// This test case will cover one case where we find a partial rule. It will
 	// be set up with a rule with the newer priority and the user has indicated
 	// compatbility=false, meaning they intend to upgrade. The fact that
@@ -325,13 +342,16 @@ func (m *MigrateSuite) TestMigrateENIDatapathPartial(c *C) {
 	// After we call MigrateENIDatapath(), we assert that:
 	//   - We still upgrade the remaining rules that need to be migrated.
 	//   - We ignore the partially migrated rule.
+	m := setupMigrateSuite(t)
+	logger := hivetest.Logger(t)
 
-	runFuncInNetNS(c, func() {
+	ns := netns.NewNetNS(t)
+	ns.Do(func() error {
 		index := 5
 		// ifaceNumber := 1
 		newTableID := 11
 
-		devIfNumLookup, _ := setUpRoutingTable(c, index, index, linux_defaults.RulePriorityEgress)
+		devIfNumLookup, _ := setUpRoutingTable(t, index, index, linux_defaults.RulePriorityEgress)
 
 		// Insert fake rule that has the newer priority to simulate it as
 		// "partially migrated".
@@ -340,7 +360,7 @@ func (m *MigrateSuite) TestMigrateENIDatapathPartial(c *C) {
 			"to", "all",
 			"table", fmt.Sprintf("%d", newTableID),
 			"priority", fmt.Sprintf("%d", linux_defaults.RulePriorityEgressv2)).Run()
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 
 		m.defaultNetlinkMock()
 
@@ -348,39 +368,41 @@ func (m *MigrateSuite) TestMigrateENIDatapathPartial(c *C) {
 			return devIfNumLookup[mac], nil
 		}
 
-		mig := migrator{rpdb: m, getter: m}
+		mig := migrator{logger: logger, rpdb: m, getter: m}
 		migrated, failed := mig.MigrateENIDatapath(false)
-		c.Assert(migrated, Equals, n)
-		c.Assert(failed, Equals, 0)
+		require.Equal(t, n, migrated)
+		require.Equal(t, 0, failed)
 
 		routes, err := netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: newTableID,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 1) // We expect one migrated route.
-		c.Assert(routes[0].Table, Equals, newTableID)
+		require.NoError(t, err)
+		require.Len(t, routes, 1) // We expect one migrated route.
+		require.Equal(t, newTableID, routes[0].Table)
 
 		routes, err = netlink.RouteListFiltered(netlink.FAMILY_V4, &netlink.Route{
 			Table: index,
 		}, netlink.RT_FILTER_TABLE)
-		c.Assert(err, IsNil)
-		c.Assert(routes, HasLen, 0) // We don't expect any routes under old table ID.
+		require.NoError(t, err)
+		require.Empty(t, routes) // We don't expect any routes under old table ID.
 
 		rules, err := findRulesByPriority(linux_defaults.RulePriorityEgressv2)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, n+1) // We expect all migrated rules and the partially migrated rule.
-		c.Assert(rules[0].Table, Equals, newTableID)
-		c.Assert(rules[1].Table, Equals, newTableID)
+		require.NoError(t, err)
+		require.Len(t, rules, n+1) // We expect all migrated rules and the partially migrated rule.
+		require.Equal(t, newTableID, rules[0].Table)
+		require.Equal(t, newTableID, rules[1].Table)
 
 		rules, err = findRulesByPriority(linux_defaults.RulePriorityEgress)
-		c.Assert(err, IsNil)
-		c.Assert(rules, HasLen, 0) // We don't expect any rules with the old priority.
+		require.NoError(t, err)
+		require.Empty(t, rules) // We don't expect any rules with the old priority.
+
+		return nil
 	})
 }
 
 // setUpRoutingTable initializes the routing table for this test suite. The
 // starting ifindex, tableID, and the priority are passed in to give contron to
-// the caller on the setup. The two return values are:
+// the caller on the setupMigrateSuite. The two return values are:
 //  1. Map of string to int, representing a mapping from MAC addrs to
 //     interface numbers.
 //  2. Map of string to string, representing a mapping from device name to MAC
@@ -390,7 +412,7 @@ func (m *MigrateSuite) TestMigrateENIDatapathPartial(c *C) {
 // mock is used. (2) is used for the downgrade test cases where the
 // GetMACByInterfaceNumber mock is used. These maps are used in their
 // respectives mocks to return the desired result data depending on the test.
-func setUpRoutingTable(c *C, ifindex, tableID, priority int) (map[string]int, map[string]string) {
+func setUpRoutingTable(t *testing.T, ifindex, tableID, priority int) (map[string]int, map[string]string) {
 	devIfNum := make(map[string]int)
 	devMAC := make(map[string]string)
 
@@ -407,7 +429,7 @@ func setUpRoutingTable(c *C, ifindex, tableID, priority int) (map[string]int, ma
 
 		gw := net.ParseIP(fmt.Sprintf("172.16.%d.1", i))
 		_, linkCIDR, err := net.ParseCIDR(fmt.Sprintf("172.16.%d.2/24", i))
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 
 		linkIndex := ifindex + (i - 1)
 		newTableID := tableID + (i - 1)
@@ -418,40 +440,27 @@ func setUpRoutingTable(c *C, ifindex, tableID, priority int) (map[string]int, ma
 				Index: linkIndex,
 			},
 		}
-		c.Assert(netlink.LinkAdd(dummyTmpl), IsNil)
-		c.Assert(netlink.LinkSetUp(dummyTmpl), IsNil)
-		c.Assert(netlink.AddrAdd(dummyTmpl, &netlink.Addr{
+		require.NoError(t, netlink.LinkAdd(dummyTmpl))
+		require.NoError(t, netlink.LinkSetUp(dummyTmpl))
+		require.NoError(t, netlink.AddrAdd(dummyTmpl, &netlink.Addr{
 			IPNet: linkCIDR,
-		}), IsNil)
-		c.Assert(netlink.RouteAdd(&netlink.Route{
+		}))
+		require.NoError(t, netlink.RouteAdd(&netlink.Route{
 			Dst:       &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
 			Gw:        gw,
 			LinkIndex: dummyTmpl.Index,
 			Table:     newTableID,
-		}), IsNil)
+		}))
 
-		// _, cidr, err := net.ParseCIDR("172.16.0.2/24")
-		// c.Assert(err, IsNil)
-		// c.Assert(netlink.RuleAdd(&netlink.Rule{
-		// 	// Src:      &net.IPNet{IP: net.ParseIP("172.16.0.2"), Mask: net.CIDRMask(24, 32)},
-		// 	Src: cidr,
-		// 	// Dst:      &net.IPNet{IP: net.IPv4zero, Mask: net.CIDRMask(0, 32)},
-		// 	Priority: linux_defaults.RulePriorityEgress,
-		// 	Table:    dummyTmpl.Index,
-		// }), IsNil)
-
-		// TODO(christarazi): Must shell out here due to netlink request (above)
-		// resulting in EINVAL. See https://github.com/cilium/cilium/issues/14383.
-		err = exec.Command("ip", "rule", "add",
-			"from", linkCIDR.String(),
-			"to", "all",
-			"table", fmt.Sprintf("%d", newTableID),
-			"priority", fmt.Sprintf("%d", priority)).Run()
-		c.Assert(err, IsNil)
+		rule := netlink.NewRule()
+		rule.Src = linkCIDR
+		rule.Priority = priority
+		rule.Table = newTableID
+		require.NoError(t, netlink.RuleAdd(rule))
 
 		// Return the MAC address of the dummy device, which acts as the ENI.
 		link, err := netlink.LinkByName(devName)
-		c.Assert(err, IsNil)
+		require.NoError(t, err)
 
 		mac := link.Attrs().HardwareAddr.String()
 

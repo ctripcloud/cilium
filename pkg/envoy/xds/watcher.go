@@ -5,13 +5,12 @@ package xds
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"log/slog"
 	"sync"
-	"time"
-
-	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/lock"
+	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 )
 
@@ -20,6 +19,7 @@ import (
 // ResourceWatcher implements ResourceVersionObserver to get notified when new
 // resource versions are available in the set.
 type ResourceWatcher struct {
+	logger *slog.Logger
 	// typeURL is the URL that uniquely identifies the resource type.
 	typeURL string
 
@@ -38,20 +38,16 @@ type ResourceWatcher struct {
 	// current version is increased.
 	// versionCond is associated with versionLocker.
 	versionCond *sync.Cond
-
-	// resourceAccessTimeout is the timeout to use for any access to the
-	// resource set.
-	resourceAccessTimeout time.Duration
 }
 
 // NewResourceWatcher creates a new ResourceWatcher backed by the given
 // resource set.
-func NewResourceWatcher(typeURL string, resourceSet ResourceSource, resourceAccessTimeout time.Duration) *ResourceWatcher {
+func NewResourceWatcher(logger *slog.Logger, typeURL string, resourceSet ResourceSource) *ResourceWatcher {
 	w := &ResourceWatcher{
-		version:               1,
-		typeURL:               typeURL,
-		resourceSet:           resourceSet,
-		resourceAccessTimeout: resourceAccessTimeout,
+		logger:      logger,
+		version:     1,
+		typeURL:     typeURL,
+		resourceSet: resourceSet,
 	}
 	w.versionCond = sync.NewCond(&w.versionLocker)
 	return w
@@ -66,11 +62,12 @@ func (w *ResourceWatcher) HandleNewResourceVersion(typeURL string, version uint6
 	}
 
 	if version < w.version {
-		log.WithFields(logrus.Fields{
-			logfields.XDSCachedVersion: version,
-			logfields.XDSTypeURL:       typeURL,
-		}).Panicf(fmt.Sprintf("decreasing version number found for resources of type %s: %d < %d",
-			typeURL, version, w.version))
+		logging.Fatal(w.logger,
+			"decreasing version number found for resources: xdsCachedVersion < resourceWatcherVersion",
+			logfields.XDSCachedVersion, version,
+			logfields.ResourceWatcherVersion, w.version,
+			logfields.XDSTypeURL, typeURL,
+		)
 	}
 	w.version = version
 
@@ -87,15 +84,15 @@ func (w *ResourceWatcher) HandleNewResourceVersion(typeURL string, version uint6
 // lastVersion is the last version successfully applied by the
 // client; nil if this is the first request for resources.
 // This method call must always close the out channel.
-func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, lastVersion uint64, nodeIP string,
+func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, lastVersion, previouslyAckedVersion uint64, nodeIP string,
 	resourceNames []string, out chan<- *VersionedResources) {
 	defer close(out)
 
-	watchLog := log.WithFields(logrus.Fields{
-		logfields.XDSAckedVersion: lastVersion,
-		logfields.XDSClientNode:   nodeIP,
-		logfields.XDSTypeURL:      typeURL,
-	})
+	scopedLog := w.logger.With(
+		logfields.XDSAckedVersion, lastVersion,
+		logfields.XDSClientNode, nodeIP,
+		logfields.XDSTypeURL, typeURL,
+	)
 
 	var res *VersionedResources
 
@@ -108,12 +105,10 @@ func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, la
 
 	for ctx.Err() == nil && res == nil {
 		w.versionLocker.Lock()
-		// If the client ACKed a version that we have never sent back, this
-		// indicates that this server restarted but the client survived and had
-		// received a higher version number from the previous server instance.
-		// Bump the resource set's version number to match the client's and
-		// send a response immediately.
-		if waitForVersion && w.version < waitVersion {
+		// lastVersion == 0 indicates that this is a new stream and
+		// previouslyAckedVersion comes from previous instance of xDS server.
+		// In this case, we artificially increase the version of the resource set.
+		if w.version <= previouslyAckedVersion && lastVersion == 0 {
 			w.versionLocker.Unlock()
 			// Calling EnsureVersion will increase the version of the resource
 			// set, which in turn will callback w.HandleNewResourceVersion with
@@ -121,14 +116,17 @@ func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, la
 			// deadlock, temporarily unlock w.versionLocker.
 			// The w.HandleNewResourceVersion callback will update w.version to
 			// the new resource set version.
-			w.resourceSet.EnsureVersion(typeURL, waitVersion+1)
+			w.resourceSet.EnsureVersion(typeURL, previouslyAckedVersion+1)
 			w.versionLocker.Lock()
 		}
 
 		// Re-check w.version, since it may have been modified by calling
 		// EnsureVersion above.
 		for ctx.Err() == nil && waitForVersion && w.version <= waitVersion {
-			watchLog.Debugf("current resource version is %d, waiting for it to become > %d", w.version, waitVersion)
+			scopedLog.Debug("waiting for current version to increase up to waitVersion",
+				logfields.WaitVersion, waitVersion,
+				logfields.CurrentVersion, w.version,
+			)
 			w.versionCond.Wait()
 		}
 		// In case we need to loop again, wait for any version more recent than
@@ -141,14 +139,16 @@ func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, la
 			break
 		}
 
-		subCtx, cancel := context.WithTimeout(ctx, w.resourceAccessTimeout)
+		scopedLog.Debug("getting resources from set",
+			logfields.Resources, len(resourceNames),
+		)
 		var err error
-		watchLog.Debugf("getting %d resources from set", len(resourceNames))
-		res, err = w.resourceSet.GetResources(subCtx, typeURL, lastVersion, nodeIP, resourceNames)
-		cancel()
-
+		res, err = w.resourceSet.GetResources(typeURL, lastVersion, nodeIP, resourceNames)
 		if err != nil {
-			watchLog.WithError(err).Errorf("failed to query resources named: %v; terminating resource watch", resourceNames)
+			scopedLog.Error("failed to query resources; terminating resource watch",
+				logfields.Error, err,
+				logfields.Resources, resourceNames,
+			)
 			return
 		}
 	}
@@ -165,11 +165,10 @@ func (w *ResourceWatcher) WatchResources(ctx context.Context, typeURL string, la
 
 	err := ctx.Err()
 	if err != nil {
-		switch err {
-		case context.Canceled:
-			watchLog.Debug("context canceled, terminating resource watch")
-		default:
-			watchLog.WithError(err).Error("context error, terminating resource watch")
+		if errors.Is(err, context.Canceled) {
+			scopedLog.Debug("context canceled, terminating resource watch")
+		} else {
+			scopedLog.Error("context error, terminating resource watch", logfields.Error, err)
 		}
 	}
 }

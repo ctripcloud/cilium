@@ -83,6 +83,12 @@ data:
   
     #################################### Analytics ###########################
     [analytics]
+    # Also known as 'usage analytics', when set to false, this option disables
+    # the writers that write to the Grafana database and the associated features,
+    # such as dashboard and data source insights, presence indicators, and
+    # advanced dashboard search. The default value is 'true'.
+    enabled = false
+
     # Server reporting, sends usage counters to stats.grafana.org every 24 hours.
     # No ip addresses are being tracked, only simple counters to track
     # running instances, dashboard and error counts. It is very helpful to us.
@@ -95,7 +101,13 @@ data:
     # This option does not cause any auto updates, nor send any information
     # only a GET request to https://grafana.com to get latest versions
     check_for_updates = false
-  
+    
+    # Set to false, disables checking for new versions of Grafana from Grafana's
+    # GitHub repository. When enabled, the check for a new version runs every
+    # 10 minutes. It will notify, via the UI, when a new version is available.
+    # The check itself will not send any sensitive information.
+    check_for_plugin_updates = false
+
     #################################### Security ############################
     [security]
     # default admin user, created on startup
@@ -4923,21 +4935,21 @@ data:
           "steppedLine": false,
           "targets": [
             {
-              "expr": "sum(rate(cilium_policy_l7_denied_total{k8s_app=\"cilium\", pod=~\"$pod\"}[1m]))",
+              "expr": "sum(rate(cilium_policy_l7_total{k8s_app=\"cilium\", pod=~\"$pod\", rule=\"denied\"}[1m]))",
               "format": "time_series",
               "intervalFactor": 1,
               "legendFormat": "denied",
               "refId": "A"
             },
             {
-              "expr": "sum(rate(cilium_policy_l7_forwarded_total{k8s_app=\"cilium\", pod=~\"$pod\"}[1m]))",
+              "expr": "sum(rate(cilium_policy_l7_total{k8s_app=\"cilium\", pod=~\"$pod\", rule=\"forwarded\"}[1m]))",
               "format": "time_series",
               "intervalFactor": 1,
               "legendFormat": "forwarded",
               "refId": "B"
             },
             {
-              "expr": "sum(rate(cilium_policy_l7_received_total{k8s_app=\"cilium\", pod=~\"$pod\"}[1m]))",
+              "expr": "sum(rate(cilium_policy_l7_total{k8s_app=\"cilium\", pod=~\"$pod\", rule=\"received\"}[1m]))",
               "format": "time_series",
               "intervalFactor": 1,
               "legendFormat": "received",
@@ -5086,7 +5098,7 @@ data:
           "aliasColors": {
             "Max per node processingTime": "#e24d42",
             "Max per node upstreamTime": "#58140c",
-            "avg(cilium_policy_l7_parse_errors_total{pod=~\"cilium.*\"})": "#bf1b00",
+            "avg(cilium_policy_l7_total{pod=~\"cilium.*\", rule=\"parse_errors\"})": "#bf1b00",
             "parse errors": "#bf1b00"
           },
           "bars": true,
@@ -5142,7 +5154,7 @@ data:
               "yaxis": 2
             },
             {
-              "alias": "avg(cilium_policy_l7_parse_errors_total{pod=~\"cilium.*\"})",
+              "alias": "avg(cilium_policy_l7_total{pod=~\"cilium.*\", rule=\"parse_errors\"})",
               "yaxis": 2
             },
             {
@@ -5163,7 +5175,7 @@ data:
               "refId": "A"
             },
             {
-              "expr": "avg(cilium_policy_l7_parse_errors_total{k8s_app=\"cilium\", pod=~\"$pod\"}) by (pod)",
+              "expr": "avg(cilium_policy_l7_total{k8s_app=\"cilium\", pod=~\"$pod\", rule=\"parse_errors\"}) by (pod)",
               "format": "time_series",
               "intervalFactor": 1,
               "legendFormat": "parse errors",
@@ -5512,7 +5524,7 @@ data:
               "refId": "B"
             },
             {
-              "expr": "max(rate(cilium_policy_l7_parse_errors_total{k8s_app=\"cilium\", pod=~\"$pod\"}[1m])) by (pod)",
+              "expr": "max(rate(cilium_policy_l7_total{k8s_app=\"cilium\", pod=~\"$pod\", rule=\"parse_errors\"}[1m])) by (pod)",
               "format": "time_series",
               "intervalFactor": 1,
               "legendFormat": "parse errors",
@@ -6028,7 +6040,7 @@ data:
               "refId": "C"
             },
             {
-              "expr": "sum(cilium_policy_change_total{k8s_app=\"cilium\", pod=~\"$pod\"}, outcome=\"fail\") by (pod)",
+              "expr": "sum(cilium_policy_change_total{k8s_app=\"cilium\", pod=~\"$pod\", outcome=\"failure\"}) by (pod)",
               "format": "time_series",
               "intervalFactor": 1,
               "legendFormat": "policy change errors",

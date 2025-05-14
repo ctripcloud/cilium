@@ -7,21 +7,17 @@ import (
 	"context"
 	"fmt"
 	"math"
-	"time"
+	"math/rand/v2"
 
 	"github.com/google/uuid"
 	"github.com/sirupsen/logrus"
 
 	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
-	"github.com/cilium/cilium/pkg/rand"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "backoff")
-
-	randGen = rand.NewSafeRand(time.Now().UnixNano())
-)
+var log = logging.DefaultLogger.WithField(logfields.LogSubsys, "backoff")
 
 // NodeManager is the interface required to implement cluster size dependent
 // intervals
@@ -98,7 +94,7 @@ func CalculateDuration(min, max time.Duration, factor float64, jitter bool, fail
 	}
 
 	if jitter {
-		t = randGen.Float64()*(t-minFloat) + minFloat
+		t = rand.Float64()*(t-minFloat) + minFloat
 	}
 
 	return time.Duration(t)
@@ -144,6 +140,11 @@ func (b *Exponential) Reset() {
 	b.attempt = 0
 }
 
+// Attempt returns the number of attempts since the last reset.
+func (b *Exponential) Attempt() int {
+	return b.attempt
+}
+
 // Wait waits for the required time using an exponential backoff
 func (b *Exponential) Wait(ctx context.Context) error {
 	if resetDuration := b.ResetAfter; resetDuration != time.Duration(0) && resetDuration > b.Max {
@@ -166,7 +167,7 @@ func (b *Exponential) Wait(ctx context.Context) error {
 
 	select {
 	case <-ctx.Done():
-		return fmt.Errorf("exponential backoff cancelled via context: %s", ctx.Err())
+		return fmt.Errorf("exponential backoff cancelled via context: %w", ctx.Err())
 	case <-time.After(t):
 	}
 

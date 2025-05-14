@@ -6,86 +6,18 @@ package bpf
 import (
 	"sync/atomic"
 
-	"github.com/cilium/cilium/pkg/logging"
-	"github.com/cilium/cilium/pkg/logging/logfields"
+	"github.com/cilium/ebpf"
 )
 
 var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "bpf")
-
 	preAllocateMapSetting uint32 = BPF_F_NO_PREALLOC
+	noCommonLRUMapSetting uint32 = 0
 )
 
 const (
-	// BPF syscall command constants. Must match enum bpf_cmd from linux/bpf.h
-	BPF_MAP_CREATE          = 0
-	BPF_MAP_LOOKUP_ELEM     = 1
-	BPF_MAP_UPDATE_ELEM     = 2
-	BPF_MAP_DELETE_ELEM     = 3
-	BPF_MAP_GET_NEXT_KEY    = 4
-	BPF_PROG_LOAD           = 5
-	BPF_OBJ_PIN             = 6
-	BPF_OBJ_GET             = 7
-	BPF_PROG_ATTACH         = 8
-	BPF_PROG_DETACH         = 9
-	BPF_PROG_TEST_RUN       = 10
-	BPF_PROG_GET_NEXT_ID    = 11
-	BPF_MAP_GET_NEXT_ID     = 12
-	BPF_PROG_GET_FD_BY_ID   = 13
-	BPF_MAP_GET_FD_BY_ID    = 14
-	BPF_OBJ_GET_INFO_BY_FD  = 15
-	BPF_PROG_QUERY          = 16
-	BPF_RAW_TRACEPOINT_OPEN = 17
-	BPF_BTF_LOAD            = 18
-	BPF_BTF_GET_FD_BY_ID    = 19
-	BPF_TASK_FD_QUERY       = 20
-
-	// BPF syscall attach types
-	BPF_CGROUP_INET_INGRESS      = 0
-	BPF_CGROUP_INET_EGRESS       = 1
-	BPF_CGROUP_INET_SOCK_CREATE  = 2
-	BPF_CGROUP_SOCK_OPS          = 3
-	BPF_SK_SKB_STREAM_PARSER     = 4
-	BPF_SK_SKB_STREAM_VERDICT    = 5
-	BPF_CGROUP_DEVICE            = 6
-	BPF_SK_MSG_VERDICT           = 7
-	BPF_CGROUP_INET4_BIND        = 8
-	BPF_CGROUP_INET6_BIND        = 9
-	BPF_CGROUP_INET4_CONNECT     = 10
-	BPF_CGROUP_INET6_CONNECT     = 11
-	BPF_CGROUP_INET4_POST_BIND   = 12
-	BPF_CGROUP_INET6_POST_BIND   = 13
-	BPF_CGROUP_UDP4_SENDMSG      = 14
-	BPF_CGROUP_UDP6_SENDMSG      = 15
-	BPF_LIRC_MODE2               = 16
-	BPF_FLOW_DISSECTOR           = 17
-	BPF_CGROUP_SYSCTL            = 18
-	BPF_CGROUP_UDP4_RECVMSG      = 19
-	BPF_CGROUP_UDP6_RECVMSG      = 20
-	BPF_CGROUP_INET4_GETPEERNAME = 29
-	BPF_CGROUP_INET6_GETPEERNAME = 30
-	BPF_CGROUP_INET4_GETSOCKNAME = 31
-	BPF_CGROUP_INET6_GETSOCKNAME = 32
-
-	// Flags for BPF_MAP_UPDATE_ELEM. Must match values from linux/bpf.h
-	BPF_ANY     = 0
-	BPF_NOEXIST = 1
-	BPF_EXIST   = 2
-
 	// Flags for BPF_MAP_CREATE. Must match values from linux/bpf.h
 	BPF_F_NO_PREALLOC   = 1 << 0
 	BPF_F_NO_COMMON_LRU = 1 << 1
-	BPF_F_NUMA_NODE     = 1 << 2
-
-	// Flags for BPF_PROG_QUERY
-	BPF_F_QUERY_EFFECTVE = 1 << 0
-
-	// Flags for accessing BPF object
-	BPF_F_RDONLY = 1 << 3
-	BPF_F_WRONLY = 1 << 4
-
-	// Flag for stack_map, store build_id+offset instead of pointer
-	BPF_F_STACK_BUILD_ID = 1 << 5
 )
 
 // EnableMapPreAllocation enables BPF map pre-allocation on map types that
@@ -100,17 +32,36 @@ func EnableMapPreAllocation() {
 // take effect in that case. Also note that this does not take effect on
 // existing map although could be recreated later when objCheck() runs.
 func DisableMapPreAllocation() {
-	atomic.StoreUint32(&preAllocateMapSetting, 1)
+	atomic.StoreUint32(&preAllocateMapSetting, BPF_F_NO_PREALLOC)
 }
 
-// GetPreAllocateMapFlags returns the map flags for map which use conditional
-// pre-allocation.
-func GetPreAllocateMapFlags(t MapType) uint32 {
-	switch {
-	case !t.allowsPreallocation():
+// EnableMapDistributedLRU enables the LRU map no-common-LRU feature which
+// splits backend memory pools among CPUs to avoid sharing a common backend
+// pool where frequent allocation/frees might content on internal spinlocks.
+func EnableMapDistributedLRU() {
+	atomic.StoreUint32(&noCommonLRUMapSetting, BPF_F_NO_COMMON_LRU)
+}
+
+// DisableMapDistributedLRU disables the LRU map no-common-LRU feature which
+// is the default case.
+func DisableMapDistributedLRU() {
+	atomic.StoreUint32(&noCommonLRUMapSetting, 0)
+}
+
+// GetMapMemoryFlags returns relevant map memory allocation flags which
+// the user requested.
+func GetMapMemoryFlags(t ebpf.MapType) uint32 {
+	switch t {
+	// LPM Tries don't support preallocation.
+	case ebpf.LPMTrie:
 		return BPF_F_NO_PREALLOC
-	case t.requiresPreallocation():
-		return 0
+	// Support disabling preallocation for these map types.
+	case ebpf.Hash, ebpf.PerCPUHash, ebpf.HashOfMaps:
+		return atomic.LoadUint32(&preAllocateMapSetting)
+	// Support no-common LRU backend memory
+	case ebpf.LRUHash, ebpf.LRUCPUHash:
+		return atomic.LoadUint32(&noCommonLRUMapSetting)
 	}
-	return atomic.LoadUint32(&preAllocateMapSetting)
+
+	return 0
 }

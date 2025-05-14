@@ -6,202 +6,159 @@ package loader
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
-	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
-
+	"github.com/cilium/ebpf"
 	"github.com/cilium/ebpf/rlimit"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
+	"github.com/vishvananda/netlink"
 
-	"github.com/cilium/cilium/pkg/datapath/linux/config"
+	"github.com/cilium/cilium/pkg/bpf"
 	"github.com/cilium/cilium/pkg/datapath/loader/metrics"
-	"github.com/cilium/cilium/pkg/elf"
-	"github.com/cilium/cilium/pkg/maps/callsmap"
-	"github.com/cilium/cilium/pkg/maps/ctmap"
-	"github.com/cilium/cilium/pkg/maps/policymap"
+	"github.com/cilium/cilium/pkg/datapath/tables"
+	"github.com/cilium/cilium/pkg/defaults"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/testutils"
 )
 
-// Hook up gocheck into the "go test" runner.
-type LoaderTestSuite struct {
-	teardown func() error
-}
-
 var (
-	_              = Suite(&LoaderTestSuite{})
 	contextTimeout = 10 * time.Second
 	benchTimeout   = 5*time.Minute + 5*time.Second
 
-	dirInfo *directoryInfo
-	ep      = testutils.NewTestEndpoint()
-	hostEp  = testutils.NewTestHostEndpoint()
-	bpfDir  = filepath.Join("..", "..", "..", "bpf")
+	bpfDir = filepath.Join("..", "..", "..", "bpf")
 )
 
-// SetTestIncludes allows test files to configure additional include flags.
-func SetTestIncludes(includes []string) {
-	testIncludes = includes
-}
+func initEndpoint(tb testing.TB, ep *testutils.TestEndpoint) {
+	testutils.PrivilegedTest(tb)
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
+	require.NoError(tb, rlimit.RemoveMemlock())
 
-func (s *LoaderTestSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
-
-	tmpDir, err := os.MkdirTemp("/tmp/", "cilium_")
-	if err != nil {
-		c.Fatalf("Failed to create temporary directory: %s", err)
-	}
-	dirInfo = getDirs(tmpDir)
-
-	cleanup, err := prepareEnv(&ep)
-	if err != nil {
-		SetTestIncludes(nil)
-		os.RemoveAll(tmpDir)
-		c.Fatalf("Failed to prepare environment: %s", err)
-	}
-
-	s.teardown = func() error {
-		if err := cleanup(); err != nil {
-			return err
+	ep.State = tb.TempDir()
+	for _, iface := range []string{ep.InterfaceName(), defaults.SecondHostDevice} {
+		link := netlink.Dummy{
+			LinkAttrs: netlink.LinkAttrs{
+				Name: iface,
+			},
 		}
-		return os.RemoveAll(tmpDir)
+		if err := netlink.LinkAdd(&link); err != nil {
+			if !os.IsExist(err) {
+				tb.Fatalf("Failed to add link: %s", err)
+			}
+		}
+		tb.Cleanup(func() {
+			if err := netlink.LinkDel(&link); err != nil {
+				tb.Fatalf("Failed to delete link: %s", err)
+			}
+		})
 	}
+}
 
-	ctmap.InitMapInfo(option.CTMapEntriesGlobalTCPDefault, option.CTMapEntriesGlobalAnyDefault, true, true, true)
+func initBpffs(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
 
-	SetTestIncludes([]string{
-		fmt.Sprintf("-I%s", bpfDir),
-		fmt.Sprintf("-I%s", filepath.Join(bpfDir, "include")),
+	tb.Helper()
+
+	require.NoError(tb, bpf.MkdirBPF(bpf.TCGlobalsPath()))
+	require.NoError(tb, bpf.MkdirBPF(bpf.CiliumPath()))
+
+	tb.Cleanup(func() {
+		require.NoError(tb, os.RemoveAll(bpf.TCGlobalsPath()))
+		require.NoError(tb, os.RemoveAll(bpf.CiliumPath()))
 	})
-
-	c.Assert(rlimit.RemoveMemlock(), IsNil)
-
-	sourceFile := filepath.Join(bpfDir, endpointProg)
-	c.Assert(os.Symlink(sourceFile, endpointProg), IsNil)
-
-	sourceFile = filepath.Join(bpfDir, hostEndpointProg)
-	c.Assert(os.Symlink(sourceFile, hostEndpointProg), IsNil)
 }
 
-func (s *LoaderTestSuite) TearDownSuite(c *C) {
-	SetTestIncludes(nil)
-	os.RemoveAll(endpointProg)
-	os.RemoveAll(hostEndpointProg)
-
-	if s.teardown != nil {
-		if err := s.teardown(); err != nil {
-			c.Fatal(err)
-		}
-	}
-}
-
-func (s *LoaderTestSuite) TearDownTest(c *C) {
-	files, err := filepath.Glob("/sys/fs/bpf/tc/globals/test_*")
-	if err != nil {
-		panic(err)
-	}
-	for _, f := range files {
-		if err := os.Remove(f); err != nil {
-			panic(err)
-		}
-	}
-}
-
-func prepareEnv(ep *testutils.TestEndpoint) (func() error, error) {
-	link := netlink.Dummy{
-		LinkAttrs: netlink.LinkAttrs{
-			Name: ep.InterfaceName(),
-		},
-	}
-	if err := netlink.LinkAdd(&link); err != nil {
-		if !os.IsExist(err) {
-			return nil, fmt.Errorf("Failed to add link: %s", err)
-		}
-	}
-	cleanupFn := func() error {
-		if err := netlink.LinkDel(&link); err != nil {
-			return fmt.Errorf("Failed to delete link: %s", err)
-		}
-		return nil
-	}
-	return cleanupFn, nil
-}
-
-func getDirs(tmpDir string) *directoryInfo {
+func getDirs(tb testing.TB) *directoryInfo {
 	return &directoryInfo{
 		Library: bpfDir,
 		Runtime: bpfDir,
 		State:   bpfDir,
-		Output:  tmpDir,
+		Output:  tb.TempDir(),
 	}
 }
 
-func (s *LoaderTestSuite) testCompileAndLoad(c *C, ep *testutils.TestEndpoint) {
+func getEpDirs(ep *testutils.TestEndpoint) *directoryInfo {
+	return &directoryInfo{
+		Library: bpfDir,
+		Runtime: bpfDir,
+		State:   ep.StateDir(),
+		Output:  ep.StateDir(),
+	}
+}
+
+func testReloadDatapath(t *testing.T, ep *testutils.TestEndpoint) {
+	initBpffs(t)
+
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 	stats := &metrics.SpanStat{}
 
-	l := &Loader{}
-	err := l.compileAndLoad(ctx, ep, dirInfo, stats)
-	c.Assert(err, IsNil)
+	l := newTestLoader(t)
+	_, err := l.ReloadDatapath(ctx, ep, &localNodeConfig, stats)
+	require.NoError(t, err)
 }
 
-// TestCompileAndLoadDefaultEndpoint checks that the datapath can be compiled
+// TestCompileOrLoadDefaultEndpoint checks that the datapath can be compiled
 // and loaded.
-func (s *LoaderTestSuite) TestCompileAndLoadDefaultEndpoint(c *C) {
-	s.testCompileAndLoad(c, &ep)
+func TestCompileOrLoadDefaultEndpoint(t *testing.T) {
+	ep := testutils.NewTestEndpoint(t)
+	initEndpoint(t, &ep)
+	testReloadDatapath(t, &ep)
 }
 
-// TestCompileAndLoadHostEndpoint is the same as
+// TestCompileOrLoadHostEndpoint is the same as
 // TestCompileAndLoadDefaultEndpoint, but for the host endpoint.
-func (s *LoaderTestSuite) TestCompileAndLoadHostEndpoint(c *C) {
-	elfMapPrefixes = []string{
-		fmt.Sprintf("test_%s", policymap.MapName),
-		fmt.Sprintf("test_%s", callsmap.MapName),
-	}
+func TestCompileOrLoadHostEndpoint(t *testing.T) {
+	hostEp := testutils.NewTestHostEndpoint(t)
+	initEndpoint(t, &hostEp)
 
-	callsmap.HostMapName = fmt.Sprintf("test_%s", callsmap.MapName)
-	callsmap.NetdevMapName = fmt.Sprintf("test_%s", callsmap.MapName)
-
-	epDir := ep.StateDir()
-	err := os.MkdirAll(epDir, 0755)
-	c.Assert(err, IsNil)
-	defer os.RemoveAll(epDir)
-
-	s.testCompileAndLoad(c, &hostEp)
+	testReloadDatapath(t, &hostEp)
 }
 
-// TestReload compiles and attaches the datapath multiple times.
-func (s *LoaderTestSuite) TestReload(c *C) {
+// TestReload compiles and attaches the datapath.
+func TestReload(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
-	err := compileDatapath(ctx, dirInfo, false, log)
-	c.Assert(err, IsNil)
+	ep := testutils.NewTestEndpoint(t)
+	initEndpoint(t, &ep)
+
+	dirInfo := getEpDirs(&ep)
+	logger := hivetest.Logger(t)
+	err := compileDatapath(ctx, logger, dirInfo, false)
+	require.NoError(t, err)
+
+	l, err := netlink.LinkByName(ep.InterfaceName())
+	require.NoError(t, err)
 
 	objPath := fmt.Sprintf("%s/%s", dirInfo.Output, endpointObj)
-	progs := []progDefinition{
-		{progName: symbolFromEndpoint, direction: dirIngress},
-		{progName: symbolToEndpoint, direction: dirEgress},
-	}
-	finalize, err := replaceDatapath(ctx, ep.InterfaceName(), objPath, progs, "")
-	c.Assert(err, IsNil)
-	finalize()
+	tmp := testutils.TempBPFFS(t)
 
-	finalize, err = replaceDatapath(ctx, ep.InterfaceName(), objPath, progs, "")
-	c.Assert(err, IsNil)
-	finalize()
+	for range 2 {
+		spec, err := bpf.LoadCollectionSpec(logger, objPath)
+		require.NoError(t, err)
+
+		coll, commit, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
+			CollectionOptions: ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: tmp}},
+		})
+		require.NoError(t, err)
+
+		require.NoError(t, attachSKBProgram(logger, l, coll.Programs[symbolFromEndpoint],
+			symbolFromEndpoint, tmp, netlink.HANDLE_MIN_INGRESS, true))
+		require.NoError(t, attachSKBProgram(logger, l, coll.Programs[symbolToEndpoint],
+			symbolToEndpoint, tmp, netlink.HANDLE_MIN_EGRESS, true))
+
+		require.NoError(t, commit())
+
+		coll.Close()
+	}
 }
 
-func (s *LoaderTestSuite) testCompileFailure(c *C, ep *testutils.TestEndpoint) {
+func testCompileFailure(t *testing.T, ep *testutils.TestEndpoint) {
 	ctx, cancel := context.WithTimeout(context.Background(), contextTimeout)
 	defer cancel()
 
@@ -216,26 +173,81 @@ func (s *LoaderTestSuite) testCompileFailure(c *C, ep *testutils.TestEndpoint) {
 		}
 	}()
 
-	l := &Loader{}
+	l := newTestLoader(t)
 	timeout := time.Now().Add(contextTimeout)
 	var err error
 	stats := &metrics.SpanStat{}
 	for err == nil && time.Now().Before(timeout) {
-		err = l.compileAndLoad(ctx, ep, dirInfo, stats)
+		_, err = l.ReloadDatapath(ctx, ep, &localNodeConfig, stats)
 	}
-	c.Assert(err, NotNil)
+	require.Error(t, err)
 }
 
 // TestCompileFailureDefaultEndpoint attempts to compile then cancels the
 // context and ensures that the failure paths may be hit.
-func (s *LoaderTestSuite) TestCompileFailureDefaultEndpoint(c *C) {
-	s.testCompileFailure(c, &ep)
+func TestCompileFailureDefaultEndpoint(t *testing.T) {
+	ep := testutils.NewTestEndpoint(t)
+	initEndpoint(t, &ep)
+	testCompileFailure(t, &ep)
 }
 
 // TestCompileFailureHostEndpoint is the same as
 // TestCompileFailureDefaultEndpoint, but for the host endpoint.
-func (s *LoaderTestSuite) TestCompileFailureHostEndpoint(c *C) {
-	s.testCompileFailure(c, &hostEp)
+func TestCompileFailureHostEndpoint(t *testing.T) {
+	hostEp := testutils.NewTestHostEndpoint(t)
+	initEndpoint(t, &hostEp)
+	testCompileFailure(t, &hostEp)
+}
+
+func TestBPFMasqAddrs(t *testing.T) {
+	old4 := option.Config.EnableIPv4Masquerade
+	option.Config.EnableIPv4Masquerade = true
+	old6 := option.Config.EnableIPv4Masquerade
+	option.Config.EnableIPv6Masquerade = true
+	t.Cleanup(func() {
+		option.Config.EnableIPv4Masquerade = old4
+		option.Config.EnableIPv6Masquerade = old6
+	})
+
+	masq4, masq6 := bpfMasqAddrs("test", &localNodeConfig)
+	require.False(t, masq4.IsValid())
+	require.False(t, masq6.IsValid())
+
+	newConfig := localNodeConfig
+	newConfig.NodeAddresses = []tables.NodeAddress{
+		{
+			Addr:       netip.MustParseAddr("1.0.0.1"),
+			NodePort:   true,
+			Primary:    true,
+			DeviceName: "test",
+		},
+		{
+			Addr:       netip.MustParseAddr("1000::1"),
+			NodePort:   true,
+			Primary:    true,
+			DeviceName: "test",
+		},
+		{
+			Addr:       netip.MustParseAddr("2.0.0.2"),
+			NodePort:   false,
+			Primary:    true,
+			DeviceName: tables.WildcardDeviceName,
+		},
+		{
+			Addr:       netip.MustParseAddr("2000::2"),
+			NodePort:   false,
+			Primary:    true,
+			DeviceName: tables.WildcardDeviceName,
+		},
+	}
+
+	masq4, masq6 = bpfMasqAddrs("test", &newConfig)
+	require.Equal(t, "1.0.0.1", masq4.String())
+	require.Equal(t, "1000::1", masq6.String())
+
+	masq4, masq6 = bpfMasqAddrs("unknown", &newConfig)
+	require.Equal(t, "2.0.0.2", masq4.String())
+	require.Equal(t, "2000::2", masq6.String())
 }
 
 // BenchmarkCompileOnly benchmarks the just the entire compilation process.
@@ -243,25 +255,12 @@ func BenchmarkCompileOnly(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer cancel()
 
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := compileDatapath(ctx, dirInfo, false, log); err != nil {
-			b.Fatal(err)
-		}
-	}
-}
+	dirInfo := getDirs(b)
+	option.Config.Debug = true
+	logger := hivetest.Logger(b)
 
-// BenchmarkCompileAndLoad benchmarks the entire compilation + loading process.
-func BenchmarkCompileAndLoad(b *testing.B) {
-	stats := &metrics.SpanStat{}
-	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
-	defer cancel()
-
-	l := &Loader{}
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := l.compileAndLoad(ctx, &ep, dirInfo, stats); err != nil {
+	for b.Loop() {
+		if err := compileDatapath(ctx, logger, dirInfo, false); err != nil {
 			b.Fatal(err)
 		}
 	}
@@ -273,76 +272,35 @@ func BenchmarkReplaceDatapath(b *testing.B) {
 	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
 	defer cancel()
 
-	if err := compileDatapath(ctx, dirInfo, false, log); err != nil {
+	tmp := testutils.TempBPFFS(b)
+
+	ep := testutils.NewTestEndpoint(b)
+	initEndpoint(b, &ep)
+
+	dirInfo := getEpDirs(&ep)
+
+	logger := hivetest.Logger(b)
+	if err := compileDatapath(ctx, logger, dirInfo, false); err != nil {
 		b.Fatal(err)
 	}
 
 	objPath := fmt.Sprintf("%s/%s", dirInfo.Output, endpointObj)
-	progs := []progDefinition{{progName: symbolFromEndpoint, direction: dirIngress}}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		finalize, err := replaceDatapath(ctx, ep.InterfaceName(), objPath, progs, "")
+
+	for b.Loop() {
+		spec, err := bpf.LoadCollectionSpec(logger, objPath)
 		if err != nil {
 			b.Fatal(err)
 		}
-		finalize()
-	}
-}
 
-// BenchmarkCompileOrLoad benchmarks the ELF rewrite process.
-func BenchmarkCompileOrLoad(b *testing.B) {
-	ignorePrefixes := append(ignoredELFPrefixes, "test_cilium_policy")
-	for _, p := range ignoredELFPrefixes {
-		if strings.HasPrefix(p, "cilium_") {
-			testPrefix := fmt.Sprintf("test_%s", p)
-			ignorePrefixes = append(ignorePrefixes, testPrefix)
-		}
-	}
-	elf.IgnoreSymbolPrefixes(ignorePrefixes)
-
-	SetTestIncludes([]string{
-		fmt.Sprintf("-I%s", bpfDir),
-		fmt.Sprintf("-I%s", filepath.Join(bpfDir, "include")),
-	})
-	defer SetTestIncludes(nil)
-
-	elfMapPrefixes = []string{
-		fmt.Sprintf("test_%s", policymap.MapName),
-		fmt.Sprintf("test_%s", callsmap.MapName),
-	}
-
-	sourceFile := filepath.Join(bpfDir, endpointProg)
-	if err := os.Symlink(sourceFile, endpointProg); err != nil {
-		b.Fatal(err)
-	}
-	defer os.RemoveAll(endpointProg)
-
-	ctx, cancel := context.WithTimeout(context.Background(), benchTimeout)
-	defer cancel()
-
-	tmpDir, err := os.MkdirTemp("", "cilium_test")
-	if err != nil {
-		b.Fatal(err)
-	}
-	defer os.RemoveAll(tmpDir)
-
-	epDir := ep.StateDir()
-	if err := os.MkdirAll(epDir, 0755); err != nil {
-		b.Fatal(err)
-	}
-	defer os.RemoveAll(epDir)
-
-	l := &Loader{}
-	l.templateCache = newObjectCache(&config.HeaderfileWriter{}, nil, tmpDir)
-	if err := l.CompileOrLoad(ctx, &ep, nil); err != nil {
-		log.Warningf("Failure in %s: %s", tmpDir, err)
-		time.Sleep(1 * time.Minute)
-		b.Fatal(err)
-	}
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		if err := l.CompileOrLoad(ctx, &ep, nil); err != nil {
+		coll, commit, err := bpf.LoadCollection(logger, spec, &bpf.CollectionOptions{
+			CollectionOptions: ebpf.CollectionOptions{Maps: ebpf.MapOptions{PinPath: tmp}},
+		})
+		if err != nil {
 			b.Fatal(err)
 		}
+		if err := commit(); err != nil {
+			b.Fatalf("committing bpf pins: %s", err)
+		}
+		coll.Close()
 	}
 }

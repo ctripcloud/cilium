@@ -4,7 +4,9 @@
 package ipam
 
 import (
-	"gopkg.in/check.v1"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 type testNeededDef struct {
@@ -41,7 +43,7 @@ var neededDef = []testNeededDef{
 var excessDef = []testExcessDef{
 	{0, 0, 0, 16, 0, 0},
 	{15, 0, 8, 16, 8, 0},
-	{17, 0, 8, 16, 0, 9}, // 17 used, 8 pre-allocate, 16 min-allocate => 1 excess
+	{17, 0, 8, 16, 0, 1}, // 17 used, 8 pre-allocate, 16 min-allocate => 1 excess
 	{20, 0, 8, 16, 4, 0}, // 20 used, 8 pre-allocate, 16 min-allocate, 4 max-above-watermark => 0 excess
 	{21, 0, 8, 0, 4, 9},  // 21 used, 8 pre-allocate, 4 max-above-watermark => 9 excess
 	{20, 0, 8, 20, 8, 0},
@@ -51,16 +53,16 @@ var excessDef = []testExcessDef{
 	{20, 4, 8, 0, 8, 0},
 }
 
-func (e *IPAMSuite) TestCalculateNeededIPs(c *check.C) {
+func TestCalculateNeededIPs(t *testing.T) {
 	for _, d := range neededDef {
 		result := calculateNeededIPs(d.available, d.used, d.preallocate, d.minallocate, d.maxallocate)
-		c.Assert(result, check.Equals, d.result)
+		require.Equal(t, d.result, result)
 	}
 }
 
-func (e *IPAMSuite) TestCalculateExcessIPs(c *check.C) {
+func TestCalculateExcessIPs(t *testing.T) {
 	for _, d := range excessDef {
 		result := calculateExcessIPs(d.available, d.used, d.preallocate, d.minallocate, d.maxabovewatermark)
-		c.Assert(result, check.Equals, d.result)
+		require.Equal(t, d.result, result)
 	}
 }

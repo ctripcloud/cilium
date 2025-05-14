@@ -23,10 +23,30 @@ import (
 	"flag"
 )
 
+const (
+	// DefaultMode is the operating mode to default to in case no mode is specified.
+	DefaultMode = "default"
+)
+
 var (
-	GatewayClassName     = flag.String("gateway-class", "gateway-conformance", "Name of GatewayClass to use for tests")
-	ShowDebug            = flag.Bool("debug", false, "Whether to print debug logs")
-	CleanupBaseResources = flag.Bool("cleanup-base-resources", true, "Whether to cleanup base test resources after the run")
-	SupportedFeatures    = flag.String("supported-features", "", "Supported features included in conformance tests suites")
-	ExemptFeatures       = flag.String("exempt-features", "", "Exempt Features excluded from conformance tests suites")
+	GatewayClassName           = flag.String("gateway-class", "gateway-conformance", "Name of GatewayClass to use for tests")
+	ShowDebug                  = flag.Bool("debug", false, "Whether to print debug logs")
+	CleanupBaseResources       = flag.Bool("cleanup-base-resources", true, "Whether to cleanup base test resources after the run")
+	SupportedFeatures          = flag.String("supported-features", "", "Supported features included in conformance tests suites")
+	SkipTests                  = flag.String("skip-tests", "", "Comma-separated list of tests to skip")
+	RunTest                    = flag.String("run-test", "", "Name of a single test to run, instead of the whole suite")
+	ExemptFeatures             = flag.String("exempt-features", "", "Exempt Features excluded from conformance tests suites")
+	EnableAllSupportedFeatures = flag.Bool("all-features", false, "Whether to enable all supported features for conformance tests")
+	NamespaceLabels            = flag.String("namespace-labels", "", "Comma-separated list of name=value labels to add to test namespaces")
+	NamespaceAnnotations       = flag.String("namespace-annotations", "", "Comma-separated list of name=value annotations to add to test namespaces")
+	ImplementationOrganization = flag.String("organization", "", "Implementation's Organization")
+	ImplementationProject      = flag.String("project", "", "Implementation's project")
+	ImplementationURL          = flag.String("url", "", "Implementation's url")
+	ImplementationVersion      = flag.String("version", "", "Implementation's version")
+	ImplementationContact      = flag.String("contact", "", "Comma-separated list of contact information for the maintainers")
+	Mode                       = flag.String("mode", DefaultMode, "The operating mode of the implementation.")
+	AllowCRDsMismatch          = flag.Bool("allow-crds-mismatch", false, "Flag to allow the suite not to fail in case there is a mismatch between CRDs versions and channels.")
+	ConformanceProfiles        = flag.String("conformance-profiles", "", "Comma-separated list of the conformance profiles to run")
+	ReportOutput               = flag.String("report-output", "", "The file where to write the conformance report")
+	SkipProvisionalTests       = flag.Bool("skip-provisional-tests", false, "Whether to skip provisional tests")
 )

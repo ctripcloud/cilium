@@ -6,25 +6,19 @@ package allocator
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"path"
 	"strconv"
 	"strings"
 
-	"github.com/sirupsen/logrus"
-
 	"github.com/cilium/cilium/pkg/allocator"
 	"github.com/cilium/cilium/pkg/idpool"
 	"github.com/cilium/cilium/pkg/kvstore"
-	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/rate"
 )
 
-var (
-	log = logging.DefaultLogger.WithField(logfields.LogSubsys, "kvstorebackend")
-)
-
-// kvstoreBackend is an implementaton of pkg/allocator.Backend. It store
+// kvstoreBackend is an implementation of pkg/allocator.Backend. It stores
 // identities in the following format:
 //
 // Slave keys:
@@ -50,10 +44,7 @@ var (
 // longer backed by at least one slave key, the garbage collector will
 // eventually release the master key and return it back to the pool.
 type kvstoreBackend struct {
-	// lockless is true if allocation can be done lockless. This depends on
-	// the underlying kvstore backend
-	lockless bool
-
+	logger *slog.Logger
 	// basePrefix is the prefix in the kvstore that all keys share which
 	// are being managed by this allocator. The basePrefix typically
 	// consists of something like: "space/project/allocatorName"
@@ -76,18 +67,9 @@ type kvstoreBackend struct {
 	// this is typical set to the node's IP address
 	suffix string
 
-	// deleteInvalidPrefixes enables deletion of identities outside of the
-	// valid prefix
-	deleteInvalidPrefixes bool
-
 	backend kvstore.BackendOperations
 
 	keyType allocator.AllocatorKey
-}
-
-func locklessCapability(backend kvstore.BackendOperations) bool {
-	required := kvstore.CapabilityCreateIfExists | kvstore.CapabilityDeleteOnZeroCount
-	return backend.GetCapabilities()&required == required
 }
 
 func prefixMatchesKey(prefix, key string) bool {
@@ -96,29 +78,36 @@ func prefixMatchesKey(prefix, key string) bool {
 	return len(prefix) == lastSlash
 }
 
+type KVStoreBackendConfiguration struct {
+	BasePath string
+	Suffix   string
+	Typ      allocator.AllocatorKey
+	Backend  kvstore.BackendOperations
+}
+
 // NewKVStoreBackend creates a pkg/allocator.Backend compatible instance. The
 // specific kvstore used is configured in pkg/kvstore.
-func NewKVStoreBackend(basePath, suffix string, typ allocator.AllocatorKey, backend kvstore.BackendOperations) (*kvstoreBackend, error) {
-	if backend == nil {
+func NewKVStoreBackend(logger *slog.Logger, c KVStoreBackendConfiguration) (allocator.Backend, error) {
+	if c.Backend == nil {
 		return nil, fmt.Errorf("kvstore client not configured")
 	}
 
 	return &kvstoreBackend{
-		basePrefix:  basePath,
-		idPrefix:    path.Join(basePath, "id"),
-		valuePrefix: path.Join(basePath, "value"),
-		lockPrefix:  path.Join(basePath, "locks"),
-		suffix:      suffix,
-		keyType:     typ,
-		lockless:    locklessCapability(backend),
-		backend:     backend,
+		logger:      logger.With(logfields.LogSubsys, "kvstorebackend"),
+		basePrefix:  c.BasePath,
+		idPrefix:    path.Join(c.BasePath, "id"),
+		valuePrefix: path.Join(c.BasePath, "value"),
+		lockPrefix:  path.Join(c.BasePath, "locks"),
+		suffix:      c.Suffix,
+		keyType:     c.Typ,
+		backend:     c.Backend,
 	}, nil
 }
 
 // lockPath locks a key in the scope of an allocator
 func (k *kvstoreBackend) lockPath(ctx context.Context, key string) (*kvstore.Lock, error) {
 	suffix := strings.TrimPrefix(key, k.basePrefix)
-	return kvstore.LockPath(ctx, k.backend, path.Join(k.lockPrefix, suffix))
+	return kvstore.LockPath(ctx, k.logger, k.backend, path.Join(k.lockPrefix, suffix))
 }
 
 // DeleteAllKeys will delete all keys
@@ -126,37 +115,39 @@ func (k *kvstoreBackend) DeleteAllKeys(ctx context.Context) {
 	k.backend.DeletePrefix(ctx, k.basePrefix)
 }
 
-// AllocateID allocates a key->ID mapping in the kvstore.
-func (k *kvstoreBackend) AllocateID(ctx context.Context, id idpool.ID, key allocator.AllocatorKey) error {
-	// create /id/<ID> and fail if it already exists
-	keyPath := path.Join(k.idPrefix, id.String())
-	keyEncoded := []byte(k.backend.Encode([]byte(key.GetKey())))
-	success, err := k.backend.CreateOnly(ctx, keyPath, keyEncoded, false)
-	if err != nil || !success {
-		return fmt.Errorf("unable to create master key '%s': %s", keyPath, err)
-	}
-
-	return nil
+func (k *kvstoreBackend) DeleteID(ctx context.Context, id idpool.ID) error {
+	return k.backend.Delete(ctx, path.Join(k.idPrefix, id.String()))
 }
 
 // AllocateID allocates a key->ID mapping in the kvstore.
-func (k *kvstoreBackend) AllocateIDIfLocked(ctx context.Context, id idpool.ID, key allocator.AllocatorKey, lock kvstore.KVLocker) error {
+func (k *kvstoreBackend) AllocateID(ctx context.Context, id idpool.ID, key allocator.AllocatorKey) (allocator.AllocatorKey, error) {
 	// create /id/<ID> and fail if it already exists
 	keyPath := path.Join(k.idPrefix, id.String())
-	keyEncoded := []byte(k.backend.Encode([]byte(key.GetKey())))
-	success, err := k.backend.CreateOnlyIfLocked(ctx, keyPath, keyEncoded, false, lock)
+	success, err := k.backend.CreateOnly(ctx, keyPath, []byte(key.GetKey()), false)
 	if err != nil || !success {
-		return fmt.Errorf("unable to create master key '%s': %s", keyPath, err)
+		return nil, fmt.Errorf("unable to create master key '%s': %w", keyPath, err)
 	}
 
-	return nil
+	return key, nil
+}
+
+// AllocateID allocates a key->ID mapping in the kvstore.
+func (k *kvstoreBackend) AllocateIDIfLocked(ctx context.Context, id idpool.ID, key allocator.AllocatorKey, lock kvstore.KVLocker) (allocator.AllocatorKey, error) {
+	// create /id/<ID> and fail if it already exists
+	keyPath := path.Join(k.idPrefix, id.String())
+	success, err := k.backend.CreateOnlyIfLocked(ctx, keyPath, []byte(key.GetKey()), false, lock)
+	if err != nil || !success {
+		return nil, fmt.Errorf("unable to create master key '%s': %w", keyPath, err)
+	}
+
+	return key, nil
 }
 
 // AcquireReference marks that this node is using this key->ID mapping in the kvstore.
 func (k *kvstoreBackend) AcquireReference(ctx context.Context, id idpool.ID, key allocator.AllocatorKey, lock kvstore.KVLocker) error {
-	keyString := k.backend.Encode([]byte(key.GetKey()))
+	keyString := key.GetKey()
 	if err := k.createValueNodeKey(ctx, keyString, id, lock); err != nil {
-		return fmt.Errorf("unable to create slave key '%s': %s", keyString, err)
+		return fmt.Errorf("unable to create slave key '%s': %w", keyString, err)
 	}
 	return nil
 }
@@ -167,7 +158,7 @@ func (k *kvstoreBackend) createValueNodeKey(ctx context.Context, key string, new
 	// The key is protected with a TTL/lease and will expire after LeaseTTL
 	valueKey := path.Join(k.valuePrefix, key, k.suffix)
 	if _, err := k.backend.UpdateIfDifferentIfLocked(ctx, valueKey, []byte(newID.String()), true, lock); err != nil {
-		return fmt.Errorf("unable to create value-node key '%s': %s", valueKey, err)
+		return fmt.Errorf("unable to create value-node key '%s': %w", valueKey, err)
 	}
 
 	return nil
@@ -176,12 +167,12 @@ func (k *kvstoreBackend) createValueNodeKey(ctx context.Context, key string, new
 // Lock locks a key in the scope of an allocator
 func (k *kvstoreBackend) lock(ctx context.Context, key string) (*kvstore.Lock, error) {
 	suffix := strings.TrimPrefix(key, k.basePrefix)
-	return kvstore.LockPath(ctx, k.backend, path.Join(k.lockPrefix, suffix))
+	return kvstore.LockPath(ctx, k.logger, k.backend, path.Join(k.lockPrefix, suffix))
 }
 
 // Lock locks a key in the scope of an allocator
 func (k *kvstoreBackend) Lock(ctx context.Context, key allocator.AllocatorKey) (kvstore.KVLocker, error) {
-	return k.lock(ctx, k.backend.Encode([]byte(key.GetKey())))
+	return k.lock(ctx, key.GetKey())
 }
 
 // Get returns the ID which is allocated to a key in the kvstore
@@ -201,9 +192,13 @@ func (k *kvstoreBackend) Get(ctx context.Context, key allocator.AllocatorKey) (i
 	// key2 := cilium/state/identities/v1/value/label;foo;bar;/172.0.124.60
 	//
 	// Only key1 should match
-	prefix := path.Join(k.valuePrefix, k.backend.Encode([]byte(key.GetKey())))
+	prefix := path.Join(k.valuePrefix, key.GetKey())
 	pairs, err := k.backend.ListPrefix(ctx, prefix)
-	kvstore.Trace("ListPrefix", err, logrus.Fields{fieldPrefix: prefix, "entries": len(pairs)})
+	kvstore.Trace(k.logger, "ListPrefix",
+		logfields.Error, err,
+		logfields.Prefix, prefix,
+		logfields.Entries, len(pairs),
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -238,9 +233,12 @@ func (k *kvstoreBackend) GetIfLocked(ctx context.Context, key allocator.Allocato
 	// key2 := cilium/state/identities/v1/value/label;foo;bar;/172.0.124.60
 	//
 	// Only key1 should match
-	prefix := path.Join(k.valuePrefix, k.backend.Encode([]byte(key.GetKey())))
+	prefix := path.Join(k.valuePrefix, key.GetKey())
 	pairs, err := k.backend.ListPrefixIfLocked(ctx, prefix, lock)
-	kvstore.Trace("ListPrefixLocked", err, logrus.Fields{fieldPrefix: prefix, "entries": len(pairs)})
+	kvstore.Trace(k.logger, "ListPrefixLocked",
+		logfields.Prefix, prefix,
+		logfields.Entries, len(pairs),
+	)
 	if err != nil {
 		return 0, err
 	}
@@ -269,12 +267,7 @@ func (k *kvstoreBackend) GetByID(ctx context.Context, id idpool.ID) (allocator.A
 		return nil, nil
 	}
 
-	s, err := k.backend.Decode(string(v))
-	if err != nil {
-		return nil, err
-	}
-
-	return k.keyType.PutKey(string(s)), nil
+	return k.keyType.PutKey(string(v)), nil
 }
 
 // UpdateKey refreshes the record that this node is using this key -> id
@@ -282,21 +275,23 @@ func (k *kvstoreBackend) GetByID(ctx context.Context, id idpool.ID) (allocator.A
 // slave keys.
 func (k *kvstoreBackend) UpdateKey(ctx context.Context, id idpool.ID, key allocator.AllocatorKey, reliablyMissing bool) error {
 	var (
-		err        error
-		recreated  bool
-		keyPath    = path.Join(k.idPrefix, id.String())
-		keyEncoded = []byte(k.backend.Encode([]byte(key.GetKey())))
-		valueKey   = path.Join(k.valuePrefix, k.backend.Encode([]byte(key.GetKey())), k.suffix)
+		err       error
+		recreated bool
+		keyPath   = path.Join(k.idPrefix, id.String())
+		valueKey  = path.Join(k.valuePrefix, key.GetKey(), k.suffix)
 	)
 
 	// Use of CreateOnly() ensures that any existing potentially
 	// conflicting key is never overwritten.
-	success, err := k.backend.CreateOnly(ctx, keyPath, keyEncoded, false)
+	success, err := k.backend.CreateOnly(ctx, keyPath, []byte(key.GetKey()), false)
 	switch {
 	case err != nil:
-		return fmt.Errorf("Unable to re-create missing master key \"%s\" -> \"%s\": %s", fieldKey, valueKey, err)
+		return fmt.Errorf("Unable to re-create missing master key \"%s\" -> \"%s\": %w", logfields.Key, valueKey, err)
 	case success:
-		log.WithField(fieldKey, keyPath).Warning("Re-created missing master key")
+		k.logger.Warn(
+			"Re-created missing master key",
+			logfields.Key, keyPath,
+		)
 	}
 
 	// Also re-create the slave key in case it has been deleted. This will
@@ -309,9 +304,12 @@ func (k *kvstoreBackend) UpdateKey(ctx context.Context, id idpool.ID, key alloca
 	}
 	switch {
 	case err != nil:
-		return fmt.Errorf("Unable to re-create missing slave key \"%s\" -> \"%s\": %s", fieldKey, valueKey, err)
+		return fmt.Errorf("Unable to re-create missing slave key \"%s\" -> \"%s\": %w", logfields.Key, valueKey, err)
 	case recreated:
-		log.WithField(fieldKey, valueKey).Warning("Re-created missing slave key")
+		k.logger.Warn(
+			"Re-created missing slave key",
+			logfields.Key, valueKey,
+		)
 	}
 
 	return nil
@@ -322,21 +320,23 @@ func (k *kvstoreBackend) UpdateKey(ctx context.Context, id idpool.ID, key alloca
 // slave keys.
 func (k *kvstoreBackend) UpdateKeyIfLocked(ctx context.Context, id idpool.ID, key allocator.AllocatorKey, reliablyMissing bool, lock kvstore.KVLocker) error {
 	var (
-		err        error
-		recreated  bool
-		keyPath    = path.Join(k.idPrefix, id.String())
-		keyEncoded = []byte(k.backend.Encode([]byte(key.GetKey())))
-		valueKey   = path.Join(k.valuePrefix, k.backend.Encode([]byte(key.GetKey())), k.suffix)
+		err       error
+		recreated bool
+		keyPath   = path.Join(k.idPrefix, id.String())
+		valueKey  = path.Join(k.valuePrefix, key.GetKey(), k.suffix)
 	)
 
 	// Use of CreateOnly() ensures that any existing potentially
 	// conflicting key is never overwritten.
-	success, err := k.backend.CreateOnlyIfLocked(ctx, keyPath, keyEncoded, false, lock)
+	success, err := k.backend.CreateOnlyIfLocked(ctx, keyPath, []byte(key.GetKey()), false, lock)
 	switch {
 	case err != nil:
-		return fmt.Errorf("Unable to re-create missing master key \"%s\" -> \"%s\": %s", fieldKey, valueKey, err)
+		return fmt.Errorf("Unable to re-create missing master key \"%s\" -> \"%s\": %w", logfields.Key, valueKey, err)
 	case success:
-		log.WithField(fieldKey, keyPath).Warning("Re-created missing master key")
+		k.logger.Warn(
+			"Re-created missing master key",
+			logfields.Key, keyPath,
+		)
 	}
 
 	// Also re-create the slave key in case it has been deleted. This will
@@ -350,9 +350,12 @@ func (k *kvstoreBackend) UpdateKeyIfLocked(ctx context.Context, id idpool.ID, ke
 	}
 	switch {
 	case err != nil:
-		return fmt.Errorf("Unable to re-create missing slave key \"%s\" -> \"%s\": %s", fieldKey, valueKey, err)
+		return fmt.Errorf("Unable to re-create missing slave key \"%s\" -> \"%s\": %w", logfields.Key, valueKey, err)
 	case recreated:
-		log.WithField(fieldKey, valueKey).Warning("Re-created missing slave key")
+		k.logger.Warn(
+			"Re-created missing slave key",
+			logfields.Key, valueKey,
+		)
 	}
 
 	return nil
@@ -362,13 +365,20 @@ func (k *kvstoreBackend) UpdateKeyIfLocked(ctx context.Context, id idpool.ID, ke
 // not guard against concurrent releases. This is currently guarded by
 // Allocator.slaveKeysMutex when called from pkg/allocator.Allocator.Release.
 func (k *kvstoreBackend) Release(ctx context.Context, _ idpool.ID, key allocator.AllocatorKey) (err error) {
-	valueKey := path.Join(k.valuePrefix, k.backend.Encode([]byte(key.GetKey())), k.suffix)
-	log.WithField(fieldKey, key).Info("Released last local use of key, invoking global release")
+	valueKey := path.Join(k.valuePrefix, key.GetKey(), k.suffix)
+	k.logger.Info(
+		"Released last local use of key, invoking global release",
+		logfields.Key, key,
+	)
 
 	// does not need to be deleted with a lock as its protected by the
 	// Allocator.slaveKeysMutex
 	if err := k.backend.Delete(ctx, valueKey); err != nil {
-		log.WithError(err).WithFields(logrus.Fields{fieldKey: key}).Warning("Ignoring node specific ID")
+		k.logger.Warn(
+			"Ignoring node specific ID",
+			logfields.Error, err,
+			logfields.Key, key,
+		)
 		return err
 	}
 
@@ -388,38 +398,39 @@ func (k *kvstoreBackend) RunLocksGC(ctx context.Context, staleKeysPrevRound map[
 	// fetch list of all /../locks keys
 	allocated, err := k.backend.ListPrefix(ctx, k.lockPrefix)
 	if err != nil {
-		return nil, fmt.Errorf("list failed: %s", err)
+		return nil, fmt.Errorf("list failed: %w", err)
 	}
 
 	staleKeys := map[string]kvstore.Value{}
 
 	// iterate over /../locks
 	for key, v := range allocated {
-		scopedLog := log.WithFields(logrus.Fields{
-			fieldKey:     key,
-			fieldLeaseID: fmt.Sprintf("%x", v.LeaseID),
-		})
 		// Only delete if this key was previously marked as to be deleted
 		if modRev, ok := staleKeysPrevRound[key]; ok &&
 			// comparing ModRevision ensures the same client is still holding
 			// this lock since the last GC was called.
 			modRev.ModRevision == v.ModRevision &&
-			modRev.LeaseID == v.LeaseID &&
-			modRev.SessionID == v.SessionID {
+			modRev.LeaseID == v.LeaseID {
 			if err := k.backend.Delete(ctx, key); err == nil {
-				scopedLog.Warning("Forcefully removed distributed lock due to client staleness." +
-					" Please check the connectivity between the KVStore and the client with that lease ID.")
+				k.logger.Warn("Forcefully removed distributed lock due to client staleness."+
+					" Please check the connectivity between the KVStore and the client with that lease ID.",
+					logfields.Key, key,
+					logfields.LeaseID, strconv.FormatUint(uint64(v.LeaseID), 16),
+				)
 				continue
 			}
-			scopedLog.WithError(err).
-				Warning("Unable to remove distributed lock due to client staleness." +
-					" Please check the connectivity between the KVStore and the client with that lease ID.")
+			k.logger.Warn(
+				"Unable to remove distributed lock due to client staleness."+
+					" Please check the connectivity between the KVStore and the client with that lease ID.",
+				logfields.Error, err,
+				logfields.Key, key,
+				logfields.LeaseID, strconv.FormatUint(uint64(v.LeaseID), 16),
+			)
 		}
 		// If the key was not found mark it to be delete in the next RunGC
 		staleKeys[key] = kvstore.Value{
 			ModRevision: v.ModRevision,
 			LeaseID:     v.LeaseID,
-			SessionID:   v.SessionID,
 		}
 	}
 
@@ -437,7 +448,7 @@ func (k *kvstoreBackend) RunGC(
 	// fetch list of all /id/ keys
 	allocated, err := k.backend.ListPrefix(ctx, k.idPrefix)
 	if err != nil {
-		return nil, nil, fmt.Errorf("list failed: %s", err)
+		return nil, nil, fmt.Errorf("list failed: %w", err)
 	}
 
 	totalEntries := len(allocated)
@@ -447,7 +458,7 @@ func (k *kvstoreBackend) RunGC(
 
 	min := uint64(minID)
 	max := uint64(maxID)
-	reasonOutOfRange := fmt.Sprintf("out of local cluster identity range [%d,%d]", min, max)
+	reasonOutOfRange := "out of local cluster identity range [" + strconv.FormatUint(min, 10) + "," + strconv.FormatUint(max, 10) + "]"
 
 	// iterate over /id/
 	for key, v := range allocated {
@@ -458,27 +469,40 @@ func (k *kvstoreBackend) RunGC(
 		// Parse identity ID
 		items := strings.Split(key, "/")
 		if len(items) == 0 {
-			log.WithField(fieldKey, key).WithError(err).Warning("Unknown identity key found, skipping")
+			k.logger.Warn(
+				"Unknown identity key found, skipping",
+				logfields.Error, err,
+				logfields.Key, key,
+			)
 			continue
 		}
 
 		if identityID, err := strconv.ParseUint(items[len(items)-1], 10, 64); err != nil {
-			log.WithField(fieldKey, key).WithError(err).Warning("Parse identity failed, skipping")
+			k.logger.Warn(
+				"Parse identity failed, skipping",
+				logfields.Error, err,
+				logfields.Key, key,
+			)
 			continue
 		} else {
 			// We should not GC those identities that are out of our scope
 			if identityID < min || identityID > max {
-				log.WithFields(logrus.Fields{
-					fieldKey: key,
-					"reason": reasonOutOfRange,
-				}).Debug("Skipping this key")
+				k.logger.Debug(
+					"Skipping this key",
+					logfields.Key, key,
+					logfields.Reason, reasonOutOfRange,
+				)
 				continue
 			}
 		}
 
 		lock, err := k.lockPath(ctx, key)
 		if err != nil {
-			log.WithError(err).WithField(fieldKey, key).Warning("allocator garbage collector was unable to lock key")
+			k.logger.Warn(
+				"allocator garbage collector was unable to lock key",
+				logfields.Error, err,
+				logfields.Key, key,
+			)
 			continue
 		}
 
@@ -486,7 +510,11 @@ func (k *kvstoreBackend) RunGC(
 		valueKeyPrefix := path.Join(k.valuePrefix, string(v.Data))
 		pairs, err := k.backend.ListPrefixIfLocked(ctx, valueKeyPrefix, lock)
 		if err != nil {
-			log.WithError(err).WithField(fieldPrefix, valueKeyPrefix).Warning("allocator garbage collector was unable to list keys")
+			k.logger.Warn(
+				"allocator garbage collector was unable to list keys",
+				logfields.Error, err,
+				logfields.Prefix, valueKeyPrefix,
+			)
 			lock.Unlock(context.Background())
 			continue
 		}
@@ -502,10 +530,6 @@ func (k *kvstoreBackend) RunGC(
 		var deleted bool
 		// if ID has no user, delete it
 		if !hasUsers {
-			scopedLog := log.WithFields(logrus.Fields{
-				fieldKey: key,
-				fieldID:  path.Base(key),
-			})
 			// Only delete if this key was previously marked as to be deleted
 			if modRev, ok := staleKeysPrevRound[key]; ok {
 				// if the v.ModRevision is different than the modRev (which is
@@ -514,10 +538,19 @@ func (k *kvstoreBackend) RunGC(
 				// but the next GC call will do it.
 				if modRev == v.ModRevision {
 					if err := k.backend.DeleteIfLocked(ctx, key, lock); err != nil {
-						scopedLog.WithError(err).Warning("Unable to delete unused allocator master key")
+						k.logger.Warn(
+							"Unable to delete unused allocator master key",
+							logfields.Error, err,
+							logfields.Key, key,
+							logfields.Identity, path.Base(key),
+						)
 					} else {
 						deletedEntries++
-						scopedLog.Info("Deleted unused allocator master key")
+						k.logger.Info(
+							"Deleted unused allocator master key in KVStore",
+							logfields.Key, key,
+							logfields.Identity, path.Base(key),
+						)
 					}
 					// consider the key regardless if there was an error from
 					// the kvstore. We want to rate limit the number of requests
@@ -568,78 +601,67 @@ func (k *kvstoreBackend) keyToID(key string) (id idpool.ID, err error) {
 	return idpool.ID(idParsed), nil
 }
 
-func (k *kvstoreBackend) ListAndWatch(ctx context.Context, handler allocator.CacheMutations, stopChan chan struct{}) {
-	watcher := k.backend.ListAndWatch(ctx, k.idPrefix, k.idPrefix, 512)
-
-	for {
-		select {
-		case event, ok := <-watcher.Events:
-			if !ok {
-				goto abort
-			}
-			if event.Typ == kvstore.EventTypeListDone {
-				handler.OnListDone()
-				continue
-			}
-
-			id, err := k.keyToID(event.Key)
-			switch {
-			case err != nil:
-				log.WithError(err).WithField(fieldKey, event.Key).Warning("Invalid key")
-
-				if k.deleteInvalidPrefixes {
-					k.backend.Delete(ctx, event.Key)
-				}
-
-			case id != idpool.NoID:
-				var key allocator.AllocatorKey
-
-				if len(event.Value) > 0 {
-					s, err := k.backend.Decode(string(event.Value))
-					if err != nil {
-						log.WithError(err).WithFields(logrus.Fields{
-							fieldKey:   event.Key,
-							fieldValue: event.Value,
-						}).Warning("Unable to decode key value")
-						continue
-					}
-
-					key = k.keyType.PutKey(string(s))
-				} else {
-					if event.Typ != kvstore.EventTypeDelete {
-						log.WithFields(logrus.Fields{
-							fieldKey:       event.Key,
-							fieldEventType: event.Typ,
-						}).Error("Received a key with an empty value")
-						continue
-					}
-				}
-
-				switch event.Typ {
-				case kvstore.EventTypeCreate:
-					handler.OnAdd(id, key)
-
-				case kvstore.EventTypeModify:
-					handler.OnModify(id, key)
-
-				case kvstore.EventTypeDelete:
-					handler.OnDelete(id, key)
-				}
-			}
-
-		case <-stopChan:
-			goto abort
-		}
+func (k *kvstoreBackend) ListIDs(ctx context.Context) (identityIDs []idpool.ID, err error) {
+	identities, err := k.backend.ListPrefix(ctx, k.idPrefix)
+	if err != nil {
+		return nil, err
 	}
 
-abort:
-	watcher.Stop()
+	for key := range identities {
+		id, err := k.keyToID(key)
+		if err != nil {
+			k.logger.Warn(
+				"Cannot parse identity ID",
+				logfields.Identity, key,
+			)
+			continue
+		}
+		identityIDs = append(identityIDs, id)
+	}
+
+	return identityIDs, nil
 }
 
-func (k *kvstoreBackend) Status() (string, error) {
-	return k.backend.Status()
-}
+func (k *kvstoreBackend) ListAndWatch(ctx context.Context, handler allocator.CacheMutations) {
+	events := k.backend.ListAndWatch(ctx, k.idPrefix)
+	for event := range events {
+		if event.Typ == kvstore.EventTypeListDone {
+			handler.OnListDone()
+			continue
+		}
 
-func (k *kvstoreBackend) Encode(v string) string {
-	return k.backend.Encode([]byte(v))
+		id, err := k.keyToID(event.Key)
+		switch {
+		case err != nil:
+			k.logger.Warn(
+				"Invalid key",
+				logfields.Error, err,
+				logfields.Identity, event.Key,
+			)
+
+		case id != idpool.NoID:
+			var key allocator.AllocatorKey
+
+			if len(event.Value) > 0 {
+				key = k.keyType.PutKey(string(event.Value))
+			} else {
+				if event.Typ != kvstore.EventTypeDelete {
+					k.logger.Error(
+						"Received a key with an empty value",
+						logfields.Key, event.Key,
+						logfields.EventType, event.Typ,
+					)
+					continue
+				}
+			}
+
+			switch event.Typ {
+			case kvstore.EventTypeCreate, kvstore.EventTypeModify:
+				handler.OnUpsert(id, key)
+
+			case kvstore.EventTypeDelete:
+				handler.OnDelete(id, key)
+			}
+		}
+	}
 }

@@ -9,6 +9,7 @@ package policy
 // Editing this file might prove futile when you re-run the swagger generate command
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 
@@ -38,6 +39,12 @@ func (o *DeletePolicyReader) ReadResponse(response runtime.ClientResponse, consu
 			return nil, err
 		}
 		return nil, result
+	case 403:
+		result := NewDeletePolicyForbidden()
+		if err := result.readResponse(response, consumer, o.formats); err != nil {
+			return nil, err
+		}
+		return nil, result
 	case 404:
 		result := NewDeletePolicyNotFound()
 		if err := result.readResponse(response, consumer, o.formats); err != nil {
@@ -51,7 +58,7 @@ func (o *DeletePolicyReader) ReadResponse(response runtime.ClientResponse, consu
 		}
 		return nil, result
 	default:
-		return nil, runtime.NewAPIError("response status code does not match any response statuses defined for this endpoint in the swagger spec", response, response.Code())
+		return nil, runtime.NewAPIError("[DELETE /policy] DeletePolicy", response, response.Code())
 	}
 }
 
@@ -94,12 +101,19 @@ func (o *DeletePolicyOK) IsCode(code int) bool {
 	return code == 200
 }
 
+// Code gets the status code for the delete policy o k response
+func (o *DeletePolicyOK) Code() int {
+	return 200
+}
+
 func (o *DeletePolicyOK) Error() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyOK  %+v", 200, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyOK %s", 200, payload)
 }
 
 func (o *DeletePolicyOK) String() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyOK  %+v", 200, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyOK %s", 200, payload)
 }
 
 func (o *DeletePolicyOK) GetPayload() *models.Policy {
@@ -157,12 +171,19 @@ func (o *DeletePolicyInvalid) IsCode(code int) bool {
 	return code == 400
 }
 
+// Code gets the status code for the delete policy invalid response
+func (o *DeletePolicyInvalid) Code() int {
+	return 400
+}
+
 func (o *DeletePolicyInvalid) Error() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyInvalid  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyInvalid %s", 400, payload)
 }
 
 func (o *DeletePolicyInvalid) String() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyInvalid  %+v", 400, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyInvalid %s", 400, payload)
 }
 
 func (o *DeletePolicyInvalid) GetPayload() models.Error {
@@ -175,6 +196,62 @@ func (o *DeletePolicyInvalid) readResponse(response runtime.ClientResponse, cons
 	if err := consumer.Consume(response.Body(), &o.Payload); err != nil && err != io.EOF {
 		return err
 	}
+
+	return nil
+}
+
+// NewDeletePolicyForbidden creates a DeletePolicyForbidden with default headers values
+func NewDeletePolicyForbidden() *DeletePolicyForbidden {
+	return &DeletePolicyForbidden{}
+}
+
+/*
+DeletePolicyForbidden describes a response with status code 403, with default header values.
+
+Forbidden
+*/
+type DeletePolicyForbidden struct {
+}
+
+// IsSuccess returns true when this delete policy forbidden response has a 2xx status code
+func (o *DeletePolicyForbidden) IsSuccess() bool {
+	return false
+}
+
+// IsRedirect returns true when this delete policy forbidden response has a 3xx status code
+func (o *DeletePolicyForbidden) IsRedirect() bool {
+	return false
+}
+
+// IsClientError returns true when this delete policy forbidden response has a 4xx status code
+func (o *DeletePolicyForbidden) IsClientError() bool {
+	return true
+}
+
+// IsServerError returns true when this delete policy forbidden response has a 5xx status code
+func (o *DeletePolicyForbidden) IsServerError() bool {
+	return false
+}
+
+// IsCode returns true when this delete policy forbidden response a status code equal to that given
+func (o *DeletePolicyForbidden) IsCode(code int) bool {
+	return code == 403
+}
+
+// Code gets the status code for the delete policy forbidden response
+func (o *DeletePolicyForbidden) Code() int {
+	return 403
+}
+
+func (o *DeletePolicyForbidden) Error() string {
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyForbidden", 403)
+}
+
+func (o *DeletePolicyForbidden) String() string {
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyForbidden", 403)
+}
+
+func (o *DeletePolicyForbidden) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
 
 	return nil
 }
@@ -217,12 +294,17 @@ func (o *DeletePolicyNotFound) IsCode(code int) bool {
 	return code == 404
 }
 
+// Code gets the status code for the delete policy not found response
+func (o *DeletePolicyNotFound) Code() int {
+	return 404
+}
+
 func (o *DeletePolicyNotFound) Error() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyNotFound ", 404)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyNotFound", 404)
 }
 
 func (o *DeletePolicyNotFound) String() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyNotFound ", 404)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyNotFound", 404)
 }
 
 func (o *DeletePolicyNotFound) readResponse(response runtime.ClientResponse, consumer runtime.Consumer, formats strfmt.Registry) error {
@@ -269,12 +351,19 @@ func (o *DeletePolicyFailure) IsCode(code int) bool {
 	return code == 500
 }
 
+// Code gets the status code for the delete policy failure response
+func (o *DeletePolicyFailure) Code() int {
+	return 500
+}
+
 func (o *DeletePolicyFailure) Error() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyFailure  %+v", 500, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyFailure %s", 500, payload)
 }
 
 func (o *DeletePolicyFailure) String() string {
-	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyFailure  %+v", 500, o.Payload)
+	payload, _ := json.Marshal(o.Payload)
+	return fmt.Sprintf("[DELETE /policy][%d] deletePolicyFailure %s", 500, payload)
 }
 
 func (o *DeletePolicyFailure) GetPayload() models.Error {

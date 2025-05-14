@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/sirupsen/logrus/hooks/test"
+	"github.com/cilium/hive/hivetest"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -17,7 +17,7 @@ func TestWatchedClientConfigIsMutualTLS(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	setup(t, hubble, relay)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	tests := []struct {
 		name        string
@@ -75,7 +75,7 @@ func TestNewWatchedClientConfig(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	setup(t, hubble, relay)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	expectedCaCertPool := x509.NewCertPool()
 	if ok := expectedCaCertPool.AppendCertsFromPEM(initialHubbleServerCA); !ok {
@@ -87,7 +87,7 @@ func TestNewWatchedClientConfig(t *testing.T) {
 	}
 
 	c, err := NewWatchedClientConfig(logger, hubble.caFiles, relay.certFile, relay.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NotNil(t, c)
 	defer c.Stop()
 
@@ -96,7 +96,7 @@ func TestNewWatchedClientConfig(t *testing.T) {
 	})
 	assert.NotNil(t, tlsConfig)
 	keypair, err := tlsConfig.GetClientCertificate(nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NotNil(t, keypair)
 	assert.Equal(t, &expectedKeypair, keypair)
 	assert.Equal(t, expectedCaCertPool.Subjects(), tlsConfig.RootCAs.Subjects())
@@ -104,11 +104,35 @@ func TestNewWatchedClientConfig(t *testing.T) {
 	assert.Equal(t, uint16(tls.VersionTLS13), tlsConfig.MinVersion)
 }
 
+func TestNewWatchedClientConfigWithoutClientCert(t *testing.T) {
+	dir, hubble, relay := directories(t)
+	setup(t, hubble, relay)
+	defer cleanup(dir)
+	logger := hivetest.Logger(t)
+
+	expectedCaCertPool := x509.NewCertPool()
+	if ok := expectedCaCertPool.AppendCertsFromPEM(initialHubbleServerCA); !ok {
+		t.Fatal("AppendCertsFromPEM", initialHubbleServerCA)
+	}
+
+	c, err := NewWatchedClientConfig(logger, hubble.caFiles, "", "")
+	assert.NoError(t, err)
+	assert.NotNil(t, c)
+	defer c.Stop()
+
+	tlsConfig := c.ClientConfig(&tls.Config{
+		MinVersion: tls.VersionTLS13,
+	})
+	assert.NotNil(t, tlsConfig)
+	// GetClientCertificate should be nil when a client keypair isn't configured
+	assert.Nil(t, tlsConfig.GetClientCertificate)
+}
+
 func TestWatchedClientConfigRotation(t *testing.T) {
 	dir, hubble, relay := directories(t)
 	setup(t, hubble, relay)
 	defer cleanup(dir)
-	logger, _ := test.NewNullLogger()
+	logger := hivetest.Logger(t)
 
 	expectedCaCertPool := x509.NewCertPool()
 	if ok := expectedCaCertPool.AppendCertsFromPEM(rotatedHubbleServerCA); !ok {
@@ -120,7 +144,7 @@ func TestWatchedClientConfigRotation(t *testing.T) {
 	}
 
 	c, err := NewWatchedClientConfig(logger, hubble.caFiles, relay.certFile, relay.privkeyFile)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NotNil(t, c)
 	defer c.Stop()
 
@@ -144,7 +168,7 @@ func TestWatchedClientConfigRotation(t *testing.T) {
 	})
 	assert.NotNil(t, tlsConfig)
 	keypair, err := tlsConfig.GetClientCertificate(nil)
-	assert.Nil(t, err)
+	assert.NoError(t, err)
 	assert.NotNil(t, keypair)
 	assert.Equal(t, &expectedKeypair, keypair)
 	assert.Equal(t, expectedCaCertPool.Subjects(), tlsConfig.RootCAs.Subjects())

@@ -15,27 +15,34 @@ import (
 
 	"github.com/cilium/cilium/api/v1/operator/client"
 	"github.com/cilium/cilium/api/v1/operator/models"
+	"github.com/cilium/cilium/operator/api"
 	"github.com/cilium/cilium/pkg/command"
+	"github.com/cilium/cilium/pkg/logging"
 )
 
-var matchPattern string
+var (
+	matchPattern string
+	operatorAddr string
+)
 
 // MetricsListCmd dumps all metrics into stdout
 var MetricsListCmd = &cobra.Command{
 	Use:   "list",
 	Short: "List all metrics for the operator",
 	Run: func(cmd *cobra.Command, args []string) {
+		logger := logging.DefaultSlogLogger
+
 		c := client.NewHTTPClientWithConfig(
 			strfmt.Default, client.DefaultTransportConfig().WithHost(operatorAddr))
 
 		res, err := c.Metrics.GetMetrics(nil)
 		if err != nil {
-			log.Fatalf("Cannot get metrics list: %s", err)
+			logging.Fatal(logger, fmt.Sprintf("Cannot get metrics list: %s", err))
 		}
 
 		re, err := regexp.Compile(matchPattern)
 		if err != nil {
-			log.Fatalf("Cannot compile regex: %s", err)
+			logging.Fatal(logger, fmt.Sprintf("Cannot compile regex: %s", err))
 		}
 
 		metrics := make([]*models.Metric, 0, len(res.Payload))
@@ -74,5 +81,6 @@ func init() {
 	MetricsCmd.AddCommand(MetricsListCmd)
 
 	MetricsListCmd.Flags().StringVarP(&matchPattern, "match-pattern", "p", "", "Show only metrics whose names match matchpattern")
+	MetricsListCmd.Flags().StringVarP(&operatorAddr, "server-address", "s", api.OperatorAPIServeAddrDefault, "Address of the operator API server")
 	command.AddOutputOption(MetricsListCmd)
 }

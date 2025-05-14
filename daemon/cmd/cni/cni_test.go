@@ -6,16 +6,18 @@ package cni
 import (
 	"os"
 	"path"
+	"path/filepath"
 	"testing"
-
-	"github.com/cilium/cilium/pkg/logging"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/tidwall/gjson"
+
+	"github.com/cilium/cilium/pkg/logging"
 )
 
 func TestInstallCNIConfFile(t *testing.T) {
 	workdir := t.TempDir()
+	//exhaustruct:ignore
 	cfg := Config{
 		CNILogFile:            `/opt"/cni.log`,
 		CNIChainingMode:       "none",
@@ -45,48 +47,10 @@ func TestInstallCNIConfFile(t *testing.T) {
 
 }
 
-func TestMergeExistingAWSConfig(t *testing.T) {
-	workdir := t.TempDir()
+func TestRenderCNIConfUnchained(t *testing.T) {
+	//exhaustruct:ignore
 	cfg := Config{
-		CNILogFile:            `/opt"/cni.log`,
-		CNIChainingMode:       "aws-cni",
-		CNIExclusive:          true,
-		WriteCNIConfWhenReady: path.Join(workdir, "05-cilium.conflist"),
-	}
-	c := newConfigManager(logging.DefaultLogger, cfg, false)
-
-	// write an "existing" AWS config
-	existing := `
-{
-	"cniVersion": "0.4.0",
-	"name": "foo",
-	"plugins": [
-		{
-			"type": "a"
-		},
-		{
-			"type": "b"
-		}
-	]
-}
-`
-	assert.NoError(t, os.WriteFile(path.Join(workdir, "10-aws.conflist"), []byte(existing), 0644))
-
-	res, err := c.renderCNIConf()
-	assert.NoError(t, err)
-
-	val := gjson.GetBytes(res, `plugins.#`)
-	assert.Equal(t, int64(3), val.Int())
-
-	val = gjson.GetBytes(res, `plugins.@reverse.0.type`)
-	assert.Equal(t, "cilium-cni", val.String())
-
-}
-
-func TestRenderCNIConf(t *testing.T) {
-	cfg := Config{
-		CNILogFile:      `/opt"/cni.log`,
-		CNIChainingMode: "aws-cni",
+		CNILogFile: `/opt"/cni.log`,
 	}
 	c := newConfigManager(logging.DefaultLogger, cfg, false)
 	// check that all templates compile
@@ -98,38 +62,180 @@ func TestRenderCNIConf(t *testing.T) {
 		assert.True(t, res.Exists(), mode)
 		assert.Equal(t, `/opt"/cni.log`, res.String(), mode)
 	}
+}
 
-	assert.Equal(t,
-		`
+func TestRenderCNIConfChained(t *testing.T) {
+	//exhaustruct:ignore
+	cfg := Config{
+		CNILogFile:        `/opt"/cni.log`,
+		CNIChainingMode:   "testing",
+		CNIChainingTarget: "another-network",
+	}
+
+	c := newConfigManager(logging.DefaultLogger, cfg, false)
+	for _, tc := range []struct {
+		name            string
+		cniConf         string
+		cniConfFilename string // filename to write
+		expected        string
+	}{
+		// Test that we return error when no network is found
+		{
+			name: "empty",
+		},
+
+		// Test on a sample AWS configuration
+		{
+			name: "aws",
+			cniConf: `
 {
-	"type": "cilium-cni",
-	"enable-debug": false,
-	"log-file": "/opt\"/cni.log"
+  "cniVersion": "0.4.0",
+  "name": "another-network",
+  "disableCheck": true,
+  "plugins": [
+    {
+      "type": "aws-cni"
+    },
+    {
+      "type": "egress-v4-cni"
+    },
+    {
+      "type": "portmap"
+    }
+  ]
 }
 `,
-		string(c.renderCNITemplate(awsCNIEntry)),
-	)
+			cniConfFilename: "10-aws.conflist",
+			expected: `
+{
+  "cniVersion": "0.4.0",
+  "name": "another-network",
+  "disableCheck": true,
+  "plugins": [
+    {
+      "type": "aws-cni"
+    },
+    {
+      "type": "egress-v4-cni"
+    },
+    {
+      "type": "portmap"
+    },
+	{
+		"type": "cilium-cni",
+		"chaining-mode": "testing",
+		"enable-debug": false,
+		"log-file": "/opt\"/cni.log"
 
+	}
+  ]
 }
+`,
+		},
 
-func TestFindFile(t *testing.T) {
-	workdir := t.TempDir()
+		// Test that we can upgrade a .conf to a .conflist
+		{
+			name: "cni-conf",
+			cniConf: `
+{
+  "cniVersion": "0.4.0",
+  "name": "another-network",
+  "type": "sample",
+  "foo": "bar"
+}
+`,
+			cniConfFilename: "10-another.conf",
+			expected: `
+{
+  "cniVersion": "0.4.0",
+  "name": "another-network",
+  "plugins": [
+    {
+	  "cniVersion": "0.4.0",
+	  "name": "another-network",
+      "type": "sample",
+	  "foo": "bar"
+    },
+	{
+		"type": "cilium-cni",
+		"chaining-mode": "testing",
+		"enable-debug": false,
+		"log-file": "/opt\"/cni.log"
 
-	_, err := findFile(workdir, []string{"a", "b"})
-	assert.Error(t, err)
+	}
+  ]
+}
+`,
+		},
+		// Test that we handle the (unlikely) case that we're already injected
+		{
+			name: "already-existing",
+			cniConf: `
+{
+  "cniVersion": "0.4.0",
+  "name": "another-network",
+  "disableCheck": true,
+  "plugins": [
+    {
+      "type": "aws-cni"
+    },
+    {
+      "type": "cilium-cni"
+    },
+    {
+      "type": "portmap"
+    }
+  ]
+}
+`,
+			cniConfFilename: "10-existing.conflist",
+			expected: `
+{
+  "cniVersion": "0.4.0",
+  "name": "another-network",
+  "disableCheck": true,
+  "plugins": [
+    {
+      "type": "aws-cni"
+    },
+    {
+		"type": "cilium-cni",
+		"chaining-mode": "testing",
+		"enable-debug": false,
+		"log-file": "/opt\"/cni.log"
 
-	touch(t, workdir, "b")
+	},
+	{
+      "type": "portmap"
+    }
+  ]
+}
+`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			c.cniConfDir = workDir
 
-	found, _ := findFile(workdir, []string{"a", "b"})
-	assert.Equal(t, path.Join(workdir, "b"), found)
+			if tc.cniConf != "" {
+				err := os.WriteFile(filepath.Join(workDir, tc.cniConfFilename), []byte(tc.cniConf), 0o644)
+				assert.NoError(t, err)
+			}
 
-	touch(t, workdir, "a")
-	found, _ = findFile(workdir, []string{"a", "b"})
-	assert.Equal(t, path.Join(workdir, "a"), found)
+			result, err := c.renderCNIConf()
+			if tc.expected == "" {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.JSONEq(t, tc.expected, string(result))
+		})
+	}
 }
 
 func TestCleanupOtherCNI(t *testing.T) {
 	workdir := t.TempDir()
+	//exhaustruct:ignore
 	cfg := Config{
 		CNIExclusive:          true,
 		WriteCNIConfWhenReady: path.Join(workdir, "42-keep.json"),

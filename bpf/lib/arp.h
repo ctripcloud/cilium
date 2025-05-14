@@ -1,8 +1,7 @@
 /* SPDX-License-Identifier: (GPL-2.0-only OR BSD-2-Clause) */
 /* Copyright Authors of Cilium */
 
-#ifndef __LIB_ARP__
-#define __LIB_ARP__
+#pragma once
 
 #include <linux/if_arp.h>
 #include <linux/if_ether.h>
@@ -86,8 +85,5 @@ arp_respond(struct __ctx_buff *ctx, union macaddr *smac, __be32 sip,
 	return ctx_redirect(ctx, ctx_get_ifindex(ctx), direction);
 
 error:
-	return send_drop_notify_error(ctx, 0, ret, CTX_ACT_DROP, METRIC_EGRESS);
+	return send_drop_notify_error(ctx, UNKNOWN_ID, ret, METRIC_EGRESS);
 }
-
-
-#endif /* __LIB_ARP__ */

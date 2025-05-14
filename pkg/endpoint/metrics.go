@@ -4,15 +4,15 @@
 package endpoint
 
 import (
-	"time"
-
-	"github.com/prometheus/client_golang/prometheus"
+	"maps"
 
 	"github.com/cilium/cilium/api/v1/models"
 	loaderMetrics "github.com/cilium/cilium/pkg/datapath/loader/metrics"
 	"github.com/cilium/cilium/pkg/lock"
 	"github.com/cilium/cilium/pkg/metrics"
+	"github.com/cilium/cilium/pkg/metrics/metric"
 	"github.com/cilium/cilium/pkg/spanstat"
+	"github.com/cilium/cilium/pkg/time"
 )
 
 var endpointPolicyStatus endpointPolicyStatusMap
@@ -25,7 +25,7 @@ type statistics interface {
 	GetMap() map[string]*spanstat.SpanStat
 }
 
-func sendMetrics(stats statistics, metric prometheus.ObserverVec) {
+func sendMetrics(stats statistics, metric metric.Vec[metric.Observer]) {
 	for scope, stat := range stats.GetMap() {
 		// Skip scopes that have not been hit (zero duration), so the count in
 		// the histogram accurately reflects the number of times each scope is
@@ -40,19 +40,22 @@ func sendMetrics(stats statistics, metric prometheus.ObserverVec) {
 }
 
 type regenerationStatistics struct {
-	success                bool
-	endpointID             uint16
-	policyStatus           models.EndpointPolicyEnabled
-	totalTime              spanstat.SpanStat
-	waitingForLock         spanstat.SpanStat
-	waitingForCTClean      spanstat.SpanStat
-	policyCalculation      spanstat.SpanStat
-	proxyConfiguration     spanstat.SpanStat
-	proxyPolicyCalculation spanstat.SpanStat
-	proxyWaitForAck        spanstat.SpanStat
-	datapathRealization    loaderMetrics.SpanStat
-	mapSync                spanstat.SpanStat
-	prepareBuild           spanstat.SpanStat
+	success                    bool
+	endpointID                 uint16
+	policyStatus               models.EndpointPolicyEnabled
+	totalTime                  spanstat.SpanStat
+	waitingForLock             spanstat.SpanStat
+	waitingForPolicyRepository spanstat.SpanStat
+	waitingForCTClean          spanstat.SpanStat
+	policyCalculation          spanstat.SpanStat
+	selectorPolicyCalculation  spanstat.SpanStat
+	endpointPolicyCalculation  spanstat.SpanStat
+	proxyConfiguration         spanstat.SpanStat
+	proxyPolicyCalculation     spanstat.SpanStat
+	proxyWaitForAck            spanstat.SpanStat
+	datapathRealization        loaderMetrics.SpanStat
+	mapSync                    spanstat.SpanStat
+	prepareBuild               spanstat.SpanStat
 }
 
 // SendMetrics sends the regeneration statistics for this endpoint to
@@ -74,43 +77,31 @@ func (s *regenerationStatistics) SendMetrics() {
 // GetMap returns a map which key is the stat name and the value is the stat
 func (s *regenerationStatistics) GetMap() map[string]*spanstat.SpanStat {
 	result := map[string]*spanstat.SpanStat{
-		"waitingForLock":         &s.waitingForLock,
-		"waitingForCTClean":      &s.waitingForCTClean,
-		"policyCalculation":      &s.policyCalculation,
-		"proxyConfiguration":     &s.proxyConfiguration,
-		"proxyPolicyCalculation": &s.proxyPolicyCalculation,
-		"proxyWaitForAck":        &s.proxyWaitForAck,
-		"mapSync":                &s.mapSync,
-		"prepareBuild":           &s.prepareBuild,
-		"total":                  &s.totalTime,
+		"waitingForLock":             &s.waitingForLock,
+		"waitingForPolicyRepository": &s.waitingForPolicyRepository,
+		"waitingForCTClean":          &s.waitingForCTClean,
+		"policyCalculation":          &s.policyCalculation,
+		"proxyConfiguration":         &s.proxyConfiguration,
+		"selectorPolicyCalculation":  &s.selectorPolicyCalculation,
+		"endpointPolicyCalculation":  &s.endpointPolicyCalculation,
+		"proxyPolicyCalculation":     &s.proxyPolicyCalculation,
+		"proxyWaitForAck":            &s.proxyWaitForAck,
+		"mapSync":                    &s.mapSync,
+		"prepareBuild":               &s.prepareBuild,
+		"total":                      &s.totalTime,
 	}
-	for k, v := range s.datapathRealization.GetMap() {
-		result[k] = v
-	}
+	maps.Copy(result, s.datapathRealization.GetMap())
 	return result
 }
 
-type policyRegenerationStatistics struct {
-	success                    bool
-	totalTime                  spanstat.SpanStat
-	waitingForIdentityCache    spanstat.SpanStat
-	waitingForPolicyRepository spanstat.SpanStat
-	policyCalculation          spanstat.SpanStat
+// used by PolicyRepository.GetSelectorPolicy
+func (s *regenerationStatistics) WaitingForPolicyRepository() *spanstat.SpanStat {
+	return &s.waitingForPolicyRepository
 }
 
-func (ps *policyRegenerationStatistics) SendMetrics() {
-	metrics.PolicyRegenerationCount.Inc()
-
-	sendMetrics(ps, metrics.PolicyRegenerationTimeStats)
-}
-
-func (ps *policyRegenerationStatistics) GetMap() map[string]*spanstat.SpanStat {
-	return map[string]*spanstat.SpanStat{
-		"waitingForIdentityCache":    &ps.waitingForIdentityCache,
-		"waitingForPolicyRepository": &ps.waitingForPolicyRepository,
-		"policyCalculation":          &ps.policyCalculation,
-		"total":                      &ps.totalTime,
-	}
+// used by PolicyRepository.GetSelectorPolicy
+func (s *regenerationStatistics) SelectorPolicyCalculation() *spanstat.SpanStat {
+	return &s.selectorPolicyCalculation
 }
 
 // endpointPolicyStatusMap is a map to store the endpoint id and the policy

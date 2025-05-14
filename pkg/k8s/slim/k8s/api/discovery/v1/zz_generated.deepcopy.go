@@ -22,6 +22,11 @@ func (in *Endpoint) DeepCopyInto(out *Endpoint) {
 		copy(*out, *in)
 	}
 	in.Conditions.DeepCopyInto(&out.Conditions)
+	if in.Hostname != nil {
+		in, out := &in.Hostname, &out.Hostname
+		*out = new(string)
+		**out = **in
+	}
 	if in.DeprecatedTopology != nil {
 		in, out := &in.DeprecatedTopology, &out.DeprecatedTopology
 		*out = make(map[string]string, len(*in))
@@ -125,6 +130,11 @@ func (in *EndpointPort) DeepCopyInto(out *EndpointPort) {
 	if in.Port != nil {
 		in, out := &in.Port, &out.Port
 		*out = new(int32)
+		**out = **in
+	}
+	if in.AppProtocol != nil {
+		in, out := &in.AppProtocol, &out.AppProtocol
+		*out = new(string)
 		**out = **in
 	}
 	return

@@ -9,38 +9,29 @@ import (
 	"testing"
 
 	cnitypes "github.com/containernetworking/cni/pkg/types"
-	"gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
 
 	eniTypes "github.com/cilium/cilium/pkg/aws/eni/types"
 	azureTypes "github.com/cilium/cilium/pkg/azure/types"
-	"github.com/cilium/cilium/pkg/checker"
 	ipamTypes "github.com/cilium/cilium/pkg/ipam/types"
 )
 
-func Test(t *testing.T) {
-	check.TestingT(t)
-}
-
-type CNITypesSuite struct{}
-
-var _ = check.Suite(&CNITypesSuite{})
-
-func testConfRead(c *check.C, confContent string, netconf *NetConf) {
+func testConfRead(t *testing.T, confContent string, netconf *NetConf) {
 	dir, err := os.MkdirTemp("", "cilium-cnitype-testsuite")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
 	p := path.Join(dir, "conf1")
 	err = os.WriteFile(p, []byte(confContent), 0644)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	netConf, err := ReadNetConf(p)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
-	c.Assert(netConf, checker.DeepEquals, netconf)
+	require.Equal(t, netConf, netconf)
 }
 
-func (t *CNITypesSuite) TestReadCNIConf(c *check.C) {
+func TestReadCNIConf(t *testing.T) {
 	confFile1 := `
 {
   "name": "cilium",
@@ -54,7 +45,7 @@ func (t *CNITypesSuite) TestReadCNIConf(c *check.C) {
 			Type: "cilium-cni",
 		},
 	}
-	testConfRead(c, confFile1, &netConf1)
+	testConfRead(t, confFile1, &netConf1)
 
 	confFile2 := `
 {
@@ -71,10 +62,10 @@ func (t *CNITypesSuite) TestReadCNIConf(c *check.C) {
 		},
 		MTU: 9000,
 	}
-	testConfRead(c, confFile2, &netConf2)
+	testConfRead(t, confFile2, &netConf2)
 }
 
-func (t *CNITypesSuite) TestReadCNIConfENIWithPlugins(c *check.C) {
+func TestReadCNIConfENIWithPlugins(t *testing.T) {
 	confFile1 := `
 {
   "cniVersion":"0.3.1",
@@ -120,10 +111,10 @@ func (t *CNITypesSuite) TestReadCNIConfENIWithPlugins(c *check.C) {
 			},
 		},
 	}
-	testConfRead(c, confFile1, &netConf1)
+	testConfRead(t, confFile1, &netConf1)
 }
 
-func (t *CNITypesSuite) TestReadCNIConfENI(c *check.C) {
+func TestReadCNIConfENI(t *testing.T) {
 	confFile1 := `
 {
   "name": "cilium",
@@ -172,10 +163,10 @@ func (t *CNITypesSuite) TestReadCNIConfENI(c *check.C) {
 			AvailabilityZone: "us-west1",
 		},
 	}
-	testConfRead(c, confFile1, &netConf1)
+	testConfRead(t, confFile1, &netConf1)
 }
 
-func (t *CNITypesSuite) TestReadCNIConfENIv2WithPlugins(c *check.C) {
+func TestReadCNIConfENIv2WithPlugins(t *testing.T) {
 	confFile1 := `
 {
   "cniVersion":"0.3.1",
@@ -229,10 +220,10 @@ func (t *CNITypesSuite) TestReadCNIConfENIv2WithPlugins(c *check.C) {
 			},
 		},
 	}
-	testConfRead(c, confFile1, &netConf1)
+	testConfRead(t, confFile1, &netConf1)
 }
 
-func (t *CNITypesSuite) TestReadCNIConfAzurev2WithPlugins(c *check.C) {
+func TestReadCNIConfAzurev2WithPlugins(t *testing.T) {
 	confFile1 := `
 {
   "cniVersion":"0.3.1",
@@ -265,42 +256,10 @@ func (t *CNITypesSuite) TestReadCNIConfAzurev2WithPlugins(c *check.C) {
 			},
 		},
 	}
-	testConfRead(c, confFile1, &netConf1)
+	testConfRead(t, confFile1, &netConf1)
 }
 
-func (t *CNITypesSuite) TestReadCNIConfClusterPoolV2(c *check.C) {
-	confFile1 := `
-{
-  "cniVersion":"0.3.1",
-  "name":"cilium",
-  "plugins": [
-    {
-      "cniVersion":"0.3.1",
-      "type":"cilium-cni",
-      "ipam": {
-        "pod-cidr-allocation-threshold": 10,
-        "pod-cidr-release-threshold": 20
-      }
-    }
-  ]
-}
-`
-	netConf1 := NetConf{
-		NetConf: cnitypes.NetConf{
-			CNIVersion: "0.3.1",
-			Type:       "cilium-cni",
-		},
-		IPAM: IPAM{
-			IPAMSpec: ipamTypes.IPAMSpec{
-				PodCIDRAllocationThreshold: 10,
-				PodCIDRReleaseThreshold:    20,
-			},
-		},
-	}
-	testConfRead(c, confFile1, &netConf1)
-}
-
-func (t *CNITypesSuite) TestReadCNIConfIPAMType(c *check.C) {
+func TestReadCNIConfIPAMType(t *testing.T) {
 	confFile := `
 {
   "cniVersion":"0.3.1",
@@ -327,10 +286,10 @@ func (t *CNITypesSuite) TestReadCNIConfIPAMType(c *check.C) {
 			},
 		},
 	}
-	testConfRead(c, confFile, &netConf)
+	testConfRead(t, confFile, &netConf)
 }
 
-func (t *CNITypesSuite) TestReadCNIConfError(c *check.C) {
+func TestReadCNIConfError(t *testing.T) {
 	// Try to read errorneous CNI configuration file with MTU provided as
 	// string instead of int
 	errorConf := `
@@ -342,13 +301,13 @@ func (t *CNITypesSuite) TestReadCNIConfError(c *check.C) {
 `
 
 	dir, err := os.MkdirTemp("", "cilium-cnitype-testsuite")
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 	defer os.RemoveAll(dir)
 
 	p := path.Join(dir, "errorconf")
 	err = os.WriteFile(p, []byte(errorConf), 0644)
-	c.Assert(err, check.IsNil)
+	require.NoError(t, err)
 
 	_, err = ReadNetConf(p)
-	c.Assert(err, check.Not(check.IsNil))
+	require.Error(t, err)
 }

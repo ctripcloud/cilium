@@ -4,23 +4,25 @@
 package groups
 
 import (
-	. "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
-func (s *GroupsTestSuite) TestCacheWorkingCorrectly(c *C) {
+func TestCacheWorkingCorrectly(t *testing.T) {
 
 	cnps := groupsCNPCache.GetAllCNP()
-	c.Assert(len(cnps), Equals, 0)
+	require.Empty(t, cnps)
 
 	cnp := getSamplePolicy("test", "test")
 	groupsCNPCache.UpdateCNP(cnp)
 
 	cnps = groupsCNPCache.GetAllCNP()
-	c.Assert(len(cnps), Equals, 1)
+	require.Len(t, cnps, 1)
 
 	groupsCNPCache.DeleteCNP(cnp)
 
 	cnps = groupsCNPCache.GetAllCNP()
-	c.Assert(len(cnps), Equals, 0)
+	require.Empty(t, cnps)
 
 }

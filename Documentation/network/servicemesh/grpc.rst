@@ -20,14 +20,14 @@ For this demo we will use `GCP's microservices demo app <https://github.com/Goog
 
 .. code-block:: shell-session
 
-    $ kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/master/release/kubernetes-manifests.yaml
+    $ kubectl apply -f https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/release/kubernetes-manifests.yaml
 
 Since gRPC is binary-encoded, you also need the proto definitions for the gRPC
 services in order to make gRPC requests. Download this for the demo app:
 
 .. code-block:: shell-session
 
-    $ curl -o demo.proto https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/master/pb/demo.proto
+    $ curl -o demo.proto https://raw.githubusercontent.com/GoogleCloudPlatform/microservices-demo/main/protos/demo.proto
 
 
 Deploy GRPC Ingress
@@ -36,6 +36,7 @@ Deploy GRPC Ingress
 You'll find the example Ingress definition in ``examples/kubernetes/servicemesh/grpc-ingress.yaml``.
 
 .. literalinclude:: ../../../examples/kubernetes/servicemesh/grpc-ingress.yaml
+     :language: yaml
 
 .. parsed-literal::
 

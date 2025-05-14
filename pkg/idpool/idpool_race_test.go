@@ -6,7 +6,7 @@
 package idpool
 
 import (
-	. "gopkg.in/check.v1"
+	"testing"
 )
 
 // TestAllocateID without the race detection enabled is too slow to run with
@@ -14,6 +14,6 @@ import (
 // tests don't time out while running with race detector by having a lower
 // number of parallel goroutines than it would have been if we ran it without
 // the race detector.
-func (s *IDPoolTestSuite) TestAllocateID(c *C) {
-	s.testAllocatedID(c, 5)
+func TestAllocateID(t *testing.T) {
+	testAllocatedID(t, 5)
 }

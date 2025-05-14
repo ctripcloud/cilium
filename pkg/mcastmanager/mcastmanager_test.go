@@ -7,69 +7,65 @@ import (
 	"net/netip"
 	"testing"
 
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
 )
 
-func Test(t *testing.T) { TestingT(t) }
-
-type McastManagerSuite struct {
-}
-
-var _ = Suite(&McastManagerSuite{})
-
-func (m *McastManagerSuite) TestAddRemoveEndpoint(c *C) {
+func TestAddRemoveEndpoint(t *testing.T) {
+	logger := hivetest.Logger(t)
 	ifaces, err := netlink.LinkList()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	if len(ifaces) == 0 {
-		c.Skip("no interfaces to test")
+		t.Skip("no interfaces to test")
 	}
 
-	mgr := New(ifaces[0].Attrs().Name)
+	mgr := New(logger, ifaces[0].Attrs().Name)
 
 	// Add first endpoint
 	mgr.AddAddress(netip.MustParseAddr("f00d::1234"))
 
-	c.Assert(mgr.state, HasLen, 1)
+	require.Len(t, mgr.state, 1)
 	_, ok := mgr.state[netip.MustParseAddr("ff02::1:ff00:1234")]
-	c.Assert(ok, Equals, true)
+	require.True(t, ok)
 
 	// Add another endpoint that shares the same maddr
 	mgr.AddAddress(netip.MustParseAddr("f00d:aabb::1234"))
 
-	c.Assert(mgr.state, HasLen, 1)
+	require.Len(t, mgr.state, 1)
 
 	// Remove the first endpoint
 	mgr.RemoveAddress(netip.MustParseAddr("f00d::1234"))
 
-	c.Assert(mgr.state, HasLen, 1)
+	require.Len(t, mgr.state, 1)
 	_, ok = mgr.state[netip.MustParseAddr("ff02::1:ff00:1234")]
-	c.Assert(ok, Equals, true)
+	require.True(t, ok)
 
 	// Remove the second endpoint
 	mgr.RemoveAddress(netip.MustParseAddr("f00d:aabb::1234"))
 
-	c.Assert(mgr.state, HasLen, 0)
+	require.Empty(t, mgr.state)
 	_, ok = mgr.state[netip.MustParseAddr("ff02::1:ff00:1234")]
-	c.Assert(ok, Equals, false)
+	require.False(t, ok)
 }
 
-func (m *McastManagerSuite) TestAddRemoveNil(c *C) {
+func TestAddRemoveNil(t *testing.T) {
+	logger := hivetest.Logger(t)
 	ifaces, err := netlink.LinkList()
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	if len(ifaces) == 0 {
-		c.Skip("no interfaces to test")
+		t.Skip("no interfaces to test")
 	}
 
 	var (
 		iface = ifaces[0]
-		mgr   = New(iface.Attrs().Name)
+		mgr   = New(logger, iface.Attrs().Name)
 	)
 
 	mgr.AddAddress(netip.Addr{})
-	c.Assert(mgr.state, HasLen, 0)
+	require.Empty(t, mgr.state)
 	mgr.RemoveAddress(netip.Addr{})
-	c.Assert(mgr.state, HasLen, 0)
+	require.Empty(t, mgr.state)
 }

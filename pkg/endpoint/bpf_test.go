@@ -9,35 +9,57 @@ import (
 	"os"
 	"testing"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 
-	"github.com/cilium/cilium/pkg/datapath/linux"
+	"github.com/cilium/cilium/pkg/datapath/linux/config"
+	datapath "github.com/cilium/cilium/pkg/datapath/types"
+	"github.com/cilium/cilium/pkg/identity/identitymanager"
+	"github.com/cilium/cilium/pkg/maps/ctmap"
 	"github.com/cilium/cilium/pkg/testutils"
 	testidentity "github.com/cilium/cilium/pkg/testutils/identity"
 	testipcache "github.com/cilium/cilium/pkg/testutils/ipcache"
 )
 
-func (s *EndpointSuite) TestWriteInformationalComments(c *C) {
-	e := NewEndpointWithState(s, s, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
+func TestWriteInformationalComments(t *testing.T) {
+	logger := hivetest.Logger(t)
+	s := setupEndpointSuite(t)
+
+	model := newTestEndpointModel(100, StateWaitingForIdentity)
+	e, err := NewEndpointFromChangeModel(t.Context(), nil, &MockEndpointBuildQueue{}, nil, s.orchestrator, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+	require.NoError(t, err)
+
+	e.Start(uint16(model.ID))
+	t.Cleanup(e.Stop)
 
 	var f bytes.Buffer
-	err := e.writeInformationalComments(&f)
-	c.Assert(err, IsNil)
+	err = e.writeInformationalComments(&f)
+	require.NoError(t, err)
 }
 
 type writeFunc func(io.Writer) error
 
 func BenchmarkWriteHeaderfile(b *testing.B) {
+	logger := hivetest.Logger(b)
 	testutils.IntegrationTest(b)
 
-	e := NewEndpointWithState(&suite, &suite, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), 100, StateWaitingForIdentity)
-	dp := linux.NewDatapath(linux.DatapathConfiguration{}, nil, nil)
+	s := setupEndpointSuite(b)
+
+	model := newTestEndpointModel(100, StateWaitingForIdentity)
+	e, err := NewEndpointFromChangeModel(b.Context(), nil, &MockEndpointBuildQueue{}, nil, s.orchestrator, nil, nil, nil, identitymanager.NewIDManager(logger), nil, nil, s.repo, testipcache.NewMockIPCache(), &FakeEndpointProxy{}, testidentity.NewMockIdentityAllocator(nil), ctmap.NewFakeGCRunner(), nil, model)
+	require.NoError(b, err)
+
+	e.Start(uint16(model.ID))
+	b.Cleanup(e.Stop)
+
+	configWriter := &config.HeaderfileWriter{}
+	cfg := datapath.LocalNodeConfiguration{}
 
 	targetComments := func(w io.Writer) error {
 		return e.writeInformationalComments(w)
 	}
 	targetConfig := func(w io.Writer) error {
-		return dp.WriteEndpointConfig(w, e)
+		return configWriter.WriteEndpointConfig(w, &cfg, e)
 	}
 
 	var buf bytes.Buffer
@@ -60,7 +82,7 @@ func BenchmarkWriteHeaderfile(b *testing.B) {
 
 	for _, bm := range benchmarks {
 		b.Run(bm.name, func(b *testing.B) {
-			for i := 0; i < b.N; i++ {
+			for b.Loop() {
 				if err := bm.write(bm.output); err != nil {
 					b.Fatal(err)
 				}

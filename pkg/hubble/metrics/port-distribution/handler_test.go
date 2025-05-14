@@ -7,10 +7,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/golang/protobuf/ptypes/wrappers"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	wrappers "google.golang.org/protobuf/types/known/wrapperspb"
 
 	pb "github.com/cilium/cilium/api/v1/flow"
 	"github.com/cilium/cilium/pkg/hubble/metrics/api"
@@ -19,7 +19,18 @@ import (
 
 func TestPortDistributionHandler(t *testing.T) {
 	registry := prometheus.NewRegistry()
-	opts := api.Options{"sourceContext": "namespace", "destinationContext": "namespace"}
+	opts := &api.MetricConfig{
+		ContextOptionConfigs: []*api.ContextOptionConfig{
+			{
+				Name:   "sourceContext",
+				Values: []string{"namespace"},
+			},
+			{
+				Name:   "destinationContext",
+				Values: []string{"namespace"},
+			},
+		},
+	}
 
 	portHandler := &portDistributionHandler{}
 
@@ -85,7 +96,18 @@ func TestPortDistributionHandler(t *testing.T) {
 
 	t.Run("ProcessFlow_MultiplePorts", func(t *testing.T) {
 		registry := prometheus.NewRegistry()
-		opts := api.Options{"sourceContext": "namespace", "destinationContext": "namespace"}
+		opts := &api.MetricConfig{
+			ContextOptionConfigs: []*api.ContextOptionConfig{
+				{
+					Name:   "sourceContext",
+					Values: []string{"namespace"},
+				},
+				{
+					Name:   "destinationContext",
+					Values: []string{"namespace"},
+				},
+			},
+		}
 
 		portHandler := &portDistributionHandler{}
 		require.NoError(t, portHandler.Init(registry, opts))

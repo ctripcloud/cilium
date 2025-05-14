@@ -5,26 +5,24 @@ package route
 
 import (
 	"net"
+	"testing"
 	"time"
 
+	"github.com/cilium/hive/hivetest"
 	"github.com/google/go-cmp/cmp"
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
-	"github.com/vishvananda/netns"
 	"golang.org/x/sys/unix"
-	. "gopkg.in/check.v1"
 
 	"github.com/cilium/cilium/pkg/testutils"
+	"github.com/cilium/cilium/pkg/testutils/netns"
 )
 
-type RouteSuitePrivileged struct{}
-
-var _ = Suite(&RouteSuitePrivileged{})
-
-func (s *RouteSuitePrivileged) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+func setup(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
 }
 
-func testReplaceNexthopRoute(c *C, link netlink.Link, routerNet *net.IPNet) {
+func testReplaceNexthopRoute(t *testing.T, link netlink.Link, routerNet *net.IPNet) {
 	route := Route{
 		Table: 10,
 	}
@@ -35,38 +33,40 @@ func testReplaceNexthopRoute(c *C, link netlink.Link, routerNet *net.IPNet) {
 	defer deleteNexthopRoute(route, link, routerNet)
 
 	replaced, err := replaceNexthopRoute(route, link, routerNet)
-	c.Assert(err, IsNil)
-	c.Assert(replaced, Equals, true)
+	require.NoError(t, err)
+	require.True(t, replaced)
 
 	// We expect routes to always be replaced
 	replaced, err = replaceNexthopRoute(route, link, routerNet)
-	c.Assert(err, IsNil)
-	c.Assert(replaced, Equals, true)
+	require.NoError(t, err)
+	require.True(t, replaced)
 
 	err = deleteNexthopRoute(route, link, routerNet)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
-func (p *RouteSuitePrivileged) TestReplaceNexthopRoute(c *C) {
+func TestReplaceNexthopRoute(t *testing.T) {
+	setup(t)
+
 	link, err := netlink.LinkByName("lo")
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	_, routerNet, err := net.ParseCIDR("1.2.3.4/32")
-	c.Assert(err, IsNil)
-	testReplaceNexthopRoute(c, link, routerNet)
+	require.NoError(t, err)
+	testReplaceNexthopRoute(t, link, routerNet)
 
 	_, routerNet, err = net.ParseCIDR("f00d::a02:100:0:815b/128")
-	c.Assert(err, IsNil)
-	testReplaceNexthopRoute(c, link, routerNet)
+	require.NoError(t, err)
+	testReplaceNexthopRoute(t, link, routerNet)
 }
 
-func testReplaceRoute(c *C, prefixStr, nexthopStr string, lookupTest bool) {
+func testReplaceRoute(t *testing.T, prefixStr, nexthopStr string, lookupTest bool) {
 	_, prefix, err := net.ParseCIDR(prefixStr)
-	c.Assert(err, IsNil)
-	c.Assert(prefix, Not(IsNil))
+	require.NoError(t, err)
+	require.NotNil(t, prefix)
 
 	nexthop := net.ParseIP(nexthopStr)
-	c.Assert(nexthop, Not(IsNil))
+	require.NotNil(t, nexthop)
 
 	rt := Route{
 		Device:  "lo",
@@ -85,92 +85,106 @@ func testReplaceRoute(c *C, prefixStr, nexthopStr string, lookupTest bool) {
 		Scope:  netlink.SCOPE_LINK,
 	})
 
-	err = Upsert(rt)
-	c.Assert(err, IsNil)
+	err = Upsert(hivetest.Logger(t), rt)
+	require.NoError(t, err)
 
 	if lookupTest {
 		// Account for minimal kernel race condition where route is not
 		// yet available
-		c.Assert(testutils.WaitUntil(func() bool {
+		require.NoError(t, testutils.WaitUntil(func() bool {
 			installedRoute, err := Lookup(rt)
-			c.Assert(err, IsNil)
+			require.NoError(t, err)
 			return installedRoute != nil
-		}, 5*time.Second), IsNil)
+		}, 5*time.Second))
 	}
 
 	err = Delete(rt)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 }
 
-func (p *RouteSuitePrivileged) TestReplaceRoute(c *C) {
-	testReplaceRoute(c, "2.2.0.0/16", "1.2.3.4", true)
+func TestReplaceRoute(t *testing.T) {
+	setup(t)
+
+	testReplaceRoute(t, "2.2.0.0/16", "1.2.3.4", true)
 	// lookup test broken for IPv6 as long as use lo as device
-	testReplaceRoute(c, "f00d::a02:200:0:0/96", "f00d::a02:100:0:815b", false)
+	testReplaceRoute(t, "f00d::a02:200:0:0/96", "f00d::a02:100:0:815b", false)
 }
 
-func testReplaceRule(c *C, mark int, from, to *net.IPNet, table int) {
+func testReplaceRule(t *testing.T, mark uint32, from, to *net.IPNet, table int) {
 	rule := Rule{Mark: mark, From: from, To: to, Table: table}
 
 	// delete rule in case it exists from a previous failed run
-	DeleteRule(rule)
+	DeleteRule(netlink.FAMILY_V4, rule)
 
 	rule.Priority = 1
 	err := ReplaceRule(rule)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	exists, err := lookupRule(rule, netlink.FAMILY_V4)
-	c.Assert(err, IsNil)
-	c.Assert(exists, Equals, true)
+	require.NoError(t, err)
+	require.True(t, exists)
 
-	err = DeleteRule(rule)
-	c.Assert(err, IsNil)
+	rule.Mask++
+	exists, err = lookupRule(rule, netlink.FAMILY_V4)
+	require.NoError(t, err)
+	require.False(t, exists)
+	rule.Mask--
+
+	err = DeleteRule(netlink.FAMILY_V4, rule)
+	require.NoError(t, err)
 
 	exists, err = lookupRule(rule, netlink.FAMILY_V4)
-	c.Assert(err, IsNil)
-	c.Assert(exists, Equals, false)
+	require.NoError(t, err)
+	require.False(t, exists)
 }
 
-func testReplaceRuleIPv6(c *C, mark int, from, to *net.IPNet, table int) {
+func testReplaceRuleIPv6(t *testing.T, mark uint32, from, to *net.IPNet, table int) {
 	rule := Rule{Mark: mark, From: from, To: to, Table: table}
 
 	// delete rule in case it exists from a previous failed run
-	DeleteRuleIPv6(rule)
+	DeleteRule(netlink.FAMILY_V6, rule)
 
 	rule.Priority = 1
 	err := ReplaceRuleIPv6(rule)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	exists, err := lookupRule(rule, netlink.FAMILY_V6)
-	c.Assert(err, IsNil)
-	c.Assert(exists, Equals, true)
+	require.NoError(t, err)
+	require.True(t, exists)
 
-	err = DeleteRuleIPv6(rule)
-	c.Assert(err, IsNil)
+	err = DeleteRule(netlink.FAMILY_V6, rule)
+	require.NoError(t, err)
 
 	exists, err = lookupRule(rule, netlink.FAMILY_V6)
-	c.Assert(err, IsNil)
-	c.Assert(exists, Equals, false)
+	require.NoError(t, err)
+	require.False(t, exists)
 }
 
-func (p *RouteSuitePrivileged) TestReplaceRule(c *C) {
+func TestReplaceRule(t *testing.T) {
+	setup(t)
+
 	_, cidr1, err := net.ParseCIDR("10.10.0.0/16")
-	c.Assert(err, IsNil)
-	testReplaceRule(c, 0xf00, nil, nil, 123)
-	testReplaceRule(c, 0xf00, cidr1, nil, 124)
-	testReplaceRule(c, 0, nil, cidr1, 125)
-	testReplaceRule(c, 0, cidr1, cidr1, 126)
+	require.NoError(t, err)
+	testReplaceRule(t, 0xf00, nil, nil, 123)
+	testReplaceRule(t, 0xf00, cidr1, nil, 124)
+	testReplaceRule(t, 0, nil, cidr1, 125)
+	testReplaceRule(t, 0, cidr1, cidr1, 126)
 }
 
-func (p *RouteSuitePrivileged) TestReplaceRule6(c *C) {
+func TestReplaceRule6(t *testing.T) {
+	setup(t)
+
 	_, cidr1, err := net.ParseCIDR("beef::/48")
-	c.Assert(err, IsNil)
-	testReplaceRuleIPv6(c, 0xf00, nil, nil, 123)
-	testReplaceRuleIPv6(c, 0xf00, cidr1, nil, 124)
-	testReplaceRuleIPv6(c, 0, nil, cidr1, 125)
-	testReplaceRuleIPv6(c, 0, cidr1, cidr1, 126)
+	require.NoError(t, err)
+	testReplaceRuleIPv6(t, 0xf00, nil, nil, 123)
+	testReplaceRuleIPv6(t, 0xf00, cidr1, nil, 124)
+	testReplaceRuleIPv6(t, 0, nil, cidr1, 125)
+	testReplaceRuleIPv6(t, 0, cidr1, cidr1, 126)
 }
 
-func (p *RouteSuitePrivileged) TestRule_String(c *C) {
+func TestRule_String(t *testing.T) {
+	setup(t)
+
 	_, fakeIP, _ := net.ParseCIDR("10.10.10.10/32")
 	_, fakeIP2, _ := net.ParseCIDR("1.1.1.1/32")
 
@@ -185,21 +199,21 @@ func (p *RouteSuitePrivileged) TestRule_String(c *C) {
 				From: fakeIP,
 				To:   fakeIP2,
 			},
-			wantStr: "0: from 10.10.10.10/32 to 1.1.1.1/32 lookup 0",
+			wantStr: "0: from 10.10.10.10/32 to 1.1.1.1/32 lookup 0 proto unspec",
 		},
 		{
 			name: "contains priority",
 			rule: Rule{
 				Priority: 1,
 			},
-			wantStr: "1: from all to all lookup 0",
+			wantStr: "1: from all to all lookup 0 proto unspec",
 		},
 		{
 			name: "contains table",
 			rule: Rule{
 				Table: 1,
 			},
-			wantStr: "0: from all to all lookup 1",
+			wantStr: "0: from all to all lookup 1 proto unspec",
 		},
 		{
 			name: "contains mark and mask",
@@ -207,60 +221,45 @@ func (p *RouteSuitePrivileged) TestRule_String(c *C) {
 				Mark: 1,
 				Mask: 1,
 			},
-			wantStr: "0: from all to all lookup 0 mark 0x1 mask 0x1",
+			wantStr: "0: from all to all lookup 0 mark 0x1 mask 0x1 proto unspec",
 		},
 		{
 			name: "main table",
 			rule: Rule{
 				Table: unix.RT_TABLE_MAIN,
 			},
-			wantStr: "0: from all to all lookup main",
+			wantStr: "0: from all to all lookup main proto unspec",
 		},
 	}
 	for _, tt := range tests {
 		if diff := cmp.Diff(tt.wantStr, tt.rule.String()); diff != "" {
-			c.Errorf("%s", diff)
+			t.Errorf("%s", diff)
 		}
 	}
 }
 
-func (p *RouteSuitePrivileged) TestListRules(c *C) {
-	testListRules4(c)
-	testListRules6(c)
+func TestListRules(t *testing.T) {
+	testutils.PrivilegedTest(t)
+
+	testListRules4(t)
+	testListRules6(t)
 }
 
-func testListRules4(c *C) {
+func testListRules4(t *testing.T) {
 	_, fakeIP, _ := net.ParseCIDR("192.0.2.40/32")
 	_, fakeIP2, _ := net.ParseCIDR("192.0.2.60/32")
 
-	runListRules(c, netlink.FAMILY_V4, fakeIP, fakeIP2)
+	runListRules(t, netlink.FAMILY_V4, fakeIP, fakeIP2)
 }
 
-func testListRules6(c *C) {
+func testListRules6(t *testing.T) {
 	_, fakeIP, _ := net.ParseCIDR("fd44:7089:ff32:712b:4000::/64")
 	_, fakeIP2, _ := net.ParseCIDR("fd44:7089:ff32:712b:8000::/96")
 
-	runListRules(c, netlink.FAMILY_V6, fakeIP, fakeIP2)
+	runListRules(t, netlink.FAMILY_V6, fakeIP, fakeIP2)
 }
 
-func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
-	currentNS, err := netns.Get()
-	c.Assert(err, IsNil)
-	defer func() {
-		c.Assert(netns.Set(currentNS), IsNil)
-		c.Log("Set back to previous network ns")
-	}()
-
-	networkNS, err := netns.New()
-	c.Assert(err, IsNil)
-	c.Log("Inside new network ns")
-	defer func() {
-		c.Assert(networkNS.Close(), IsNil)
-		c.Log("Closed new network ns")
-	}()
-
-	defaultRules, _ := ListRules(family, nil)
-
+func runListRules(t *testing.T, family int, fakeIP, fakeIP2 *net.IPNet) {
 	tests := []struct {
 		name       string
 		ruleFilter *Rule
@@ -274,6 +273,7 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun:     func() *netlink.Rule { return nil },
 			postRun:    func(r *netlink.Rule) {},
 			setupWant: func(_ *netlink.Rule) ([]netlink.Rule, bool) {
+				defaultRules, _ := ListRules(family, nil)
 				return defaultRules, false
 			},
 		},
@@ -283,12 +283,13 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -299,12 +300,13 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Dst = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -315,22 +317,23 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Dst = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 
 				rc := *r // Create almost identical copy
 				rc.Src = fakeIP2
-				addRule(c, &rc)
+				addRule(t, &rc)
 
 				return r
 			},
 			postRun: func(r *netlink.Rule) {
-				delRule(c, r)
+				delRule(t, r)
 
 				rc := *r // Delete the almost identical copy
 				rc.Src = fakeIP2
-				delRule(c, &rc)
+				delRule(t, &rc)
 			},
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				rs := []netlink.Rule{}
@@ -349,22 +352,23 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Dst = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 
 				rc := *r // Create almost identical copy
 				rc.Src = fakeIP2
-				addRule(c, &rc)
+				addRule(t, &rc)
 
 				return r
 			},
 			postRun: func(r *netlink.Rule) {
-				delRule(c, r)
+				delRule(t, r)
 
 				rc := *r // Delete the almost identical copy
 				rc.Src = fakeIP2
-				delRule(c, &rc)
+				delRule(t, &rc)
 			},
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				rs := []netlink.Rule{}
@@ -383,25 +387,26 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 5
 				r.Table = 1
-				addRule(c, r)
+				addRule(t, r)
 
 				for i := 2; i < 5; i++ {
 					rc := *r // Create almost identical copy
 					rc.Table = i
-					addRule(c, &rc)
+					addRule(t, &rc)
 				}
 
 				return r
 			},
 			postRun: func(r *netlink.Rule) {
-				delRule(c, r)
+				delRule(t, r)
 
 				for i := 2; i < 5; i++ {
 					rc := *r // Delete the almost identical copy
 					rc.Table = i
-					delRule(c, &rc)
+					delRule(t, &rc)
 				}
 			},
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
@@ -423,12 +428,13 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority otherwise it's auto-assigned
 				r.Table = 199
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -439,13 +445,14 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority and table otherwise it's auto-assigned
 				r.Table = 1
-				r.Mask = 0x5
-				addRule(c, r)
+				r.Mask = func() *uint32 { a := uint32(0x5); return &a }()
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
@@ -456,41 +463,50 @@ func runListRules(c *C, family int, fakeIP, fakeIP2 *net.IPNet) {
 			preRun: func() *netlink.Rule {
 				r := netlink.NewRule()
 				r.Src = fakeIP
+				r.Family = family
 				r.Priority = 1 // Must add priority, table, mask otherwise it's auto-assigned
 				r.Table = 1
-				r.Mask = 0xff
+				r.Mask = func() *uint32 { a := uint32(0xff); return &a }()
 				r.Mark = 0xbb
-				addRule(c, r)
+				addRule(t, r)
 				return r
 			},
-			postRun: func(r *netlink.Rule) { delRule(c, r) },
+			postRun: func(r *netlink.Rule) { delRule(t, r) },
 			setupWant: func(r *netlink.Rule) ([]netlink.Rule, bool) {
 				return []netlink.Rule{*r}, false
 			},
 		},
 	}
+
 	for _, tt := range tests {
-		rule := tt.preRun()
-		rules, err := ListRules(family, tt.ruleFilter)
-		tt.postRun(rule)
+		t.Run(tt.name, func(t *testing.T) {
+			ns := netns.NewNetNS(t)
+			require.NoError(t, ns.Do(func() error {
+				rule := tt.preRun()
+				rules, err := ListRules(family, tt.ruleFilter)
+				tt.postRun(rule)
 
-		wantRules, wantErr := tt.setupWant(rule)
+				wantRules, wantErr := tt.setupWant(rule)
 
-		if diff := cmp.Diff(wantRules, rules); diff != "" {
-			c.Errorf("expected len: %d, got: %d\n%s\n", len(wantRules), len(rules), diff)
-		}
-		c.Assert(err != nil, Equals, wantErr)
+				if diff := cmp.Diff(wantRules, rules); diff != "" {
+					t.Errorf("expected len: %d, got: %d\n%s\n", len(wantRules), len(rules), diff)
+				}
+				require.Equal(t, wantErr, err != nil)
+
+				return nil
+			}))
+		})
 	}
 }
 
-func addRule(c *C, r *netlink.Rule) {
+func addRule(tb testing.TB, r *netlink.Rule) {
 	if err := netlink.RuleAdd(r); err != nil {
-		c.Logf("Unable to add rule: %v", err)
+		tb.Logf("Unable to add rule: %v", err)
 	}
 }
 
-func delRule(c *C, r *netlink.Rule) {
+func delRule(tb testing.TB, r *netlink.Rule) {
 	if err := netlink.RuleDel(r); err != nil {
-		c.Logf("Unable to delete rule: %v", err)
+		tb.Logf("Unable to delete rule: %v", err)
 	}
 }

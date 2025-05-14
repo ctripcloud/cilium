@@ -1,8 +1,10 @@
 # Maintainers
 
-See [Governance](Documentation/community/governance/commit_access.rst) for
+See [Governance](https://github.com/cilium/community/blob/main/GOVERNANCE.md) for
 governance, commit, and vote guidelines as well as committer responsibilities.
-Everybody listed is a committer as per governance definition.
+Everybody listed is a committer as per governance definition. See the 
+[Contributor Ladder](https://github.com/cilium/community/blob/main/CONTRIBUTOR-LADDER.md)
+to learn how to level up through the project.
 
 ## Cilium Committers
 
@@ -18,7 +20,8 @@ Everybody listed is a committer as per governance definition.
  * [Daniel Borkmann] (Isovalent)
  * [Dan Wendlandt] (Isovalent)
  * [Deepesh Pathak]
- * [Eloy Coto] (Red Hat)
+ * [Dorde Lapcevic] (Google)
+ * [Dylan Reimerink] (Isovalent)
  * [Gilberto Bertin] (Isovalent)
  * [Glib Smaga] (Isovalent)
  * [Hemanth Malla] (Datadog)
@@ -27,21 +30,24 @@ Everybody listed is a committer as per governance definition.
  * [Joe Stringer] (Isovalent)
  * [John Fastabend] (Isovalent)
  * [Julian Wiedmann] (Isovalent)
+ * [Jussi Mäki] (Isovalent)
  * [Kornilios Kourtis] (Isovalent)
  * [Laurent Bernaille] (Datadog)
  * [Liz Rice] (Isovalent)
  * [Lorenz Bauer] (Isovalent)
  * [Louis DeLosSantos] (Isovalent)
  * [Maciej Kwiek] (Isovalent)
+ * [Marco Iorio] (Isovalent)
  * [Martynas Pumputis] (Isovalent)
  * [Michal Rostecki] (Deepfence)
  * [Michi Mutsuzaki] (Isovalent)
  * [Natália Réka Ivánkó] (Isovalent)
  * [Nathan Sweet] (Isovalent)
+ * [Nick Young] (Isovalent)
  * [Nicolas Busseneau] (Isovalent)
  * [Nirmoy Das] (AMD)
  * [Paul Chaignon] (Isovalent)
- * [Quentin Monnet] (Isovalent)
+ * [Quentin Monnet] (Hedgehog)
  * [Robin Hahling] (Isovalent)
  * [Sebastian Wicki] (Isovalent)
  * [Tam Mach] (Isovalent)
@@ -50,16 +56,18 @@ Everybody listed is a committer as per governance definition.
  * [Tobias Klauser] (Isovalent)
  * [Tom Hadlaw] (Isovalent)
  * [Vlad Ungureanu] (Palantir)
- * [Weilong Cui] (Google)
- * [Yongkun Gui] (Google)
+ * [Yutaro Hayakawa] (Isovalent)
 
 ## Cilium & Hubble Emeritus Committers
 
 We would like to acknowledge previous committers and their huge contributions to our collective success:
 
+ * [Eloy Coto] (Red Hat)
  * [Ilya Dmitrichenko] (Docker)
  * [Ray Bejjani]
  * [Tom Payne]
+ * [Weilong Cui] (Google)
+ * [Yongkun Gui] (Google)
  * [Zang Li] (Google)
 
 
@@ -78,6 +86,8 @@ project.
 [Daniel Borkmann]: https://github.com/borkmann
 [Dan Wendlandt]: https://github.com/danwent
 [Deepesh Pathak]: https://github.com/fristonio
+[Dorde Lapcevic]: https://github.com/dlapcevic
+[Dylan Reimerink]: https://github.com/dylandreimerink
 [Eloy Coto]: https://github.com/eloycoto
 [Gilberto Bertin]: https://github.com/jibi
 [Glib Smaga]: https://github.com/glibsm
@@ -88,17 +98,20 @@ project.
 [Joe Stringer]: https://github.com/joestringer
 [John Fastabend]: https://github.com/jrfastab
 [Julian Wiedmann]: https://github.com/julianwiedmann
+[Jussi Mäki]: https://github.com/joamaki
 [Kornilios Kourtis]: https://github.com/kkourt
 [Laurent Bernaille]: https://github.com/lbernail
 [Liz Rice]: https://github.com/lizrice
 [Lorenz Bauer]: https://github.com/lmb
 [Louis DeLosSantos]: https://github.com/ldelossa
 [Maciej Kwiek]: https://github.com/nebril
+[Marco Iorio]: https://github.com/giorio94
 [Martynas Pumputis]: https://github.com/brb
 [Michal Rostecki]: https://github.com/vadorovsky
 [Michi Mutsuzaki]: https://github.com/michi-covalent
 [Natália Réka Ivánkó]: https://github.com/sharlns
 [Nathan Sweet]: https://github.com/nathanjsweet
+[Nick Young]: https://github.com/youngnick
 [Nicolas Busseneau]: https://github.com/nbusseneau
 [Nirmoy Das]: https://github.com/nirmoy
 [Paul Chaignon]: https://github.com/pchaigno
@@ -115,4 +128,5 @@ project.
 [Vlad Ungureanu]: https://github.com/ungureanuvladvictor
 [Weilong Cui]: https://github.com/Weil0ng
 [Yongkun Gui]: https://github.com/anfernee
+[Yutaro Hayakawa]: https://github.com/YutaroHayakawa
 [Zang Li]: https://github.com/lzang

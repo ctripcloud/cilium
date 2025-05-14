@@ -5,12 +5,14 @@ package kvstore
 
 import (
 	"context"
+	"testing"
 	"time"
 
-	. "gopkg.in/check.v1"
+	"github.com/cilium/hive/hivetest"
+	"github.com/stretchr/testify/require"
 )
 
-func (s *independentSuite) TestLocalLock(c *C) {
+func TestLocalLock(t *testing.T) {
 	prefix := "locktest/"
 	path := prefix + "foo"
 
@@ -22,37 +24,37 @@ func (s *independentSuite) TestLocalLock(c *C) {
 
 	// Acquie lock1
 	id1, err := locks.lock(context.Background(), path)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// Ensure that staleLockTimeout has passed
 	time.Sleep(staleLockTimeout * 2)
-	locks.runGC()
+	locks.runGC(hivetest.Logger(t))
 
 	// Acquire lock on same path, must unlock local use
 	id2, err := locks.lock(context.Background(), path)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 
 	// Unlock lock1, this should be a no-op
 	locks.unlock(path, id1)
 
 	owner, ok := locks.lockPaths[path]
-	c.Assert(ok, Equals, true)
-	c.Assert(owner.id, Equals, id2)
+	require.True(t, ok)
+	require.Equal(t, id2, owner.id)
 
 	// Unlock lock2, this should be a no-op
 	locks.unlock(path, id2)
 }
 
-func (s *independentSuite) TestLocalLockCancel(c *C) {
+func TestLocalLockCancel(t *testing.T) {
 	path := "locktest/foo"
 	locks := pathLocks{lockPaths: map[string]lockOwner{}}
 	// grab lock to ensure that 2nd lock attempt needs to retry and can be
 	// cancelled
 	id1, err := locks.lock(context.Background(), path)
-	c.Assert(err, IsNil)
+	require.NoError(t, err)
 	defer locks.unlock(path, id1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err = locks.lock(ctx, path)
-	c.Assert(err, Not(IsNil))
+	require.Error(t, err)
 }

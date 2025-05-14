@@ -9,21 +9,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	. "gopkg.in/check.v1"
+	"github.com/stretchr/testify/require"
+
+	"github.com/cilium/cilium/pkg/metrics/metric"
 )
 
-// Hook up gocheck into the "go test" runner.
-func Test(t *testing.T) {
-	TestingT(t)
-}
-
-type MetricsSuite struct{}
-
-var _ = Suite(&MetricsSuite{})
-
-func (s *MetricsSuite) TestAPIEventsTSHelperMiddleware(c *C) {
+func TestAPIEventsTSHelperMiddleware(t *testing.T) {
 	for _, test := range []struct {
 		url         string
 		statusCode  int
@@ -34,9 +26,9 @@ func (s *MetricsSuite) TestAPIEventsTSHelperMiddleware(c *C) {
 		{url: "", statusCode: http.StatusNotFound, expectEvent: false}, // invalid urls should not be emitted.
 	} {
 		req, err := http.NewRequest(http.MethodGet, test.url, nil)
-		c.Assert(err, Equals, nil)
-		gauge := prometheus.NewGaugeVec(prometheus.GaugeOpts{}, []string{LabelEventSource, LabelScope, LabelAction})
-		hist := prometheus.NewHistogramVec(prometheus.HistogramOpts{Name: "test_api_hist"}, []string{LabelEventSource, LabelScope, LabelAction})
+		require.NoError(t, err)
+		gauge := metric.NewGaugeVec(metric.GaugeOpts{}, []string{LabelEventSource, LabelScope, LabelAction})
+		hist := metric.NewHistogramVec(metric.HistogramOpts{Name: "test_api_hist"}, []string{LabelEventSource, LabelScope, LabelAction})
 		middleware := &APIEventTSHelper{
 			Next:      http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(test.statusCode) }),
 			TSGauge:   gauge,
@@ -44,12 +36,12 @@ func (s *MetricsSuite) TestAPIEventsTSHelperMiddleware(c *C) {
 		}
 		middleware.ServeHTTP(httptest.NewRecorder(), req)
 		v := testutil.ToFloat64(gauge.WithLabelValues(LabelEventSourceAPI, "/v1/endpoint", http.MethodGet))
-		c.Assert(v >= float64(time.Now().Unix()), Equals, test.expectEvent)
-		c.Assert(testutil.CollectAndCount(hist, "test_api_hist") == 1, Equals, test.expectEvent)
+		require.Equal(t, test.expectEvent, v >= float64(time.Now().Unix()))
+		require.Equal(t, test.expectEvent, testutil.CollectAndCount(hist, "test_api_hist") == 1)
 	}
 }
 
-func (s *MetricsSuite) Test_getShortPath(c *C) {
+func Test_getShortPath(t *testing.T) {
 	tests := []struct {
 		args string
 		want string
@@ -157,6 +149,6 @@ func (s *MetricsSuite) Test_getShortPath(c *C) {
 	}
 	for _, tt := range tests {
 		got := getShortPath(tt.args)
-		c.Assert(got, Equals, tt.want)
+		require.Equal(t, tt.want, got)
 	}
 }

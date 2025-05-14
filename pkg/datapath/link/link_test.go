@@ -6,40 +6,25 @@ package link
 import (
 	"testing"
 
-	"github.com/cilium/cilium/pkg/testutils"
-
+	"github.com/stretchr/testify/require"
 	"github.com/vishvananda/netlink"
-	. "gopkg.in/check.v1"
+
+	"github.com/cilium/cilium/pkg/testutils"
 )
 
-type LinkSuite struct{}
-
-var _ = Suite(&LinkSuite{})
-
-func (s *LinkSuite) SetUpSuite(c *C) {
-	testutils.PrivilegedCheck(c)
+func setup(tb testing.TB) {
+	testutils.PrivilegedTest(tb)
 }
 
-func Test(t *testing.T) {
-	TestingT(t)
-}
+func TestDeleteByName(t *testing.T) {
+	setup(t)
 
-func (s *LinkSuite) TestDeleteByName(c *C) {
 	testCases := []struct {
-		name        string
-		create      bool
-		expectError bool
+		name   string
+		create bool
 	}{
-		{
-			"foo",
-			true,
-			false,
-		},
-		{
-			"bar",
-			false,
-			true,
-		},
+		{"foo", true},
+		{"bar", false},
 	}
 	var err error
 
@@ -50,19 +35,16 @@ func (s *LinkSuite) TestDeleteByName(c *C) {
 					Name: tc.name,
 				},
 			})
-			c.Assert(err, IsNil)
+			require.NoError(t, err)
 		}
 
-		err = DeleteByName(tc.name)
-		if tc.expectError {
-			c.Assert(err, NotNil)
-		} else {
-			c.Assert(err, IsNil)
-		}
+		require.NoError(t, DeleteByName(tc.name))
 	}
 }
 
-func (s *LinkSuite) TestRename(c *C) {
+func TestRename(t *testing.T) {
+	setup(t)
+
 	testCases := []struct {
 		curName     string
 		newName     string
@@ -91,14 +73,14 @@ func (s *LinkSuite) TestRename(c *C) {
 					Name: tc.curName,
 				},
 			})
-			c.Assert(err, IsNil)
+			require.NoError(t, err)
 		}
 
 		err = Rename(tc.curName, tc.newName)
 		if tc.expectError {
-			c.Assert(err, NotNil)
+			require.Error(t, err)
 		} else {
-			c.Assert(err, IsNil)
+			require.NoError(t, err)
 		}
 
 		DeleteByName(tc.newName)

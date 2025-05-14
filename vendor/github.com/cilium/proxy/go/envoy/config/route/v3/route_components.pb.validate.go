@@ -616,9 +616,39 @@ func (m *VirtualHost) validate(all bool) error {
 
 	}
 
+	if all {
+		switch v := interface{}(m.GetMetadata()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, VirtualHostValidationError{
+					field:  "Metadata",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, VirtualHostValidationError{
+					field:  "Metadata",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetMetadata()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return VirtualHostValidationError{
+				field:  "Metadata",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
 	if len(errors) > 0 {
 		return VirtualHostMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -752,6 +782,7 @@ func (m *FilterAction) validate(all bool) error {
 	if len(errors) > 0 {
 		return FilterActionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -884,6 +915,7 @@ func (m *RouteList) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteListMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1328,9 +1360,20 @@ func (m *Route) validate(all bool) error {
 
 	// no validation rules for StatPrefix
 
-	switch m.Action.(type) {
-
+	oneofActionPresent := false
+	switch v := m.Action.(type) {
 	case *Route_Route:
+		if v == nil {
+			err := RouteValidationError{
+				field:  "Action",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionPresent = true
 
 		if all {
 			switch v := interface{}(m.GetRoute()).(type) {
@@ -1362,6 +1405,17 @@ func (m *Route) validate(all bool) error {
 		}
 
 	case *Route_Redirect:
+		if v == nil {
+			err := RouteValidationError{
+				field:  "Action",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionPresent = true
 
 		if all {
 			switch v := interface{}(m.GetRedirect()).(type) {
@@ -1393,6 +1447,17 @@ func (m *Route) validate(all bool) error {
 		}
 
 	case *Route_DirectResponse:
+		if v == nil {
+			err := RouteValidationError{
+				field:  "Action",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionPresent = true
 
 		if all {
 			switch v := interface{}(m.GetDirectResponse()).(type) {
@@ -1424,6 +1489,17 @@ func (m *Route) validate(all bool) error {
 		}
 
 	case *Route_FilterAction:
+		if v == nil {
+			err := RouteValidationError{
+				field:  "Action",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionPresent = true
 
 		if all {
 			switch v := interface{}(m.GetFilterAction()).(type) {
@@ -1455,6 +1531,17 @@ func (m *Route) validate(all bool) error {
 		}
 
 	case *Route_NonForwardingAction:
+		if v == nil {
+			err := RouteValidationError{
+				field:  "Action",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionPresent = true
 
 		if all {
 			switch v := interface{}(m.GetNonForwardingAction()).(type) {
@@ -1486,6 +1573,9 @@ func (m *Route) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofActionPresent {
 		err := RouteValidationError{
 			field:  "Action",
 			reason: "value is required",
@@ -1494,12 +1584,12 @@ func (m *Route) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
 		return RouteMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1675,9 +1765,18 @@ func (m *WeightedCluster) validate(all bool) error {
 
 	// no validation rules for RuntimeKeyPrefix
 
-	switch m.RandomValueSpecifier.(type) {
-
+	switch v := m.RandomValueSpecifier.(type) {
 	case *WeightedCluster_HeaderName:
+		if v == nil {
+			err := WeightedClusterValidationError{
+				field:  "RandomValueSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if !_WeightedCluster_HeaderName_Pattern.MatchString(m.GetHeaderName()) {
 			err := WeightedClusterValidationError{
@@ -1690,11 +1789,14 @@ func (m *WeightedCluster) validate(all bool) error {
 			errors = append(errors, err)
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return WeightedClusterMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -1838,6 +1940,7 @@ func (m *ClusterSpecifierPlugin) validate(all bool) error {
 	if len(errors) > 0 {
 		return ClusterSpecifierPluginMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2154,15 +2257,46 @@ func (m *RouteMatch) validate(all bool) error {
 
 	}
 
-	switch m.PathSpecifier.(type) {
-
+	oneofPathSpecifierPresent := false
+	switch v := m.PathSpecifier.(type) {
 	case *RouteMatch_Prefix:
+		if v == nil {
+			err := RouteMatchValidationError{
+				field:  "PathSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPathSpecifierPresent = true
 		// no validation rules for Prefix
-
 	case *RouteMatch_Path:
+		if v == nil {
+			err := RouteMatchValidationError{
+				field:  "PathSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPathSpecifierPresent = true
 		// no validation rules for Path
-
 	case *RouteMatch_SafeRegex:
+		if v == nil {
+			err := RouteMatchValidationError{
+				field:  "PathSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPathSpecifierPresent = true
 
 		if m.GetSafeRegex() == nil {
 			err := RouteMatchValidationError{
@@ -2205,6 +2339,17 @@ func (m *RouteMatch) validate(all bool) error {
 		}
 
 	case *RouteMatch_ConnectMatcher_:
+		if v == nil {
+			err := RouteMatchValidationError{
+				field:  "PathSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPathSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetConnectMatcher()).(type) {
@@ -2236,6 +2381,17 @@ func (m *RouteMatch) validate(all bool) error {
 		}
 
 	case *RouteMatch_PathSeparatedPrefix:
+		if v == nil {
+			err := RouteMatchValidationError{
+				field:  "PathSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPathSpecifierPresent = true
 
 		if !_RouteMatch_PathSeparatedPrefix_Pattern.MatchString(m.GetPathSeparatedPrefix()) {
 			err := RouteMatchValidationError{
@@ -2249,6 +2405,17 @@ func (m *RouteMatch) validate(all bool) error {
 		}
 
 	case *RouteMatch_PathMatchPolicy:
+		if v == nil {
+			err := RouteMatchValidationError{
+				field:  "PathSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPathSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetPathMatchPolicy()).(type) {
@@ -2280,6 +2447,9 @@ func (m *RouteMatch) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofPathSpecifierPresent {
 		err := RouteMatchValidationError{
 			field:  "PathSpecifier",
 			reason: "value is required",
@@ -2288,12 +2458,12 @@ func (m *RouteMatch) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
 		return RouteMatchMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -2520,9 +2690,47 @@ func (m *CorsPolicy) validate(all bool) error {
 		}
 	}
 
-	switch m.EnabledSpecifier.(type) {
+	if all {
+		switch v := interface{}(m.GetForwardNotMatchingPreflights()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, CorsPolicyValidationError{
+					field:  "ForwardNotMatchingPreflights",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, CorsPolicyValidationError{
+					field:  "ForwardNotMatchingPreflights",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetForwardNotMatchingPreflights()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return CorsPolicyValidationError{
+				field:  "ForwardNotMatchingPreflights",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
 
+	switch v := m.EnabledSpecifier.(type) {
 	case *CorsPolicy_FilterEnabled:
+		if v == nil {
+			err := CorsPolicyValidationError{
+				field:  "EnabledSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetFilterEnabled()).(type) {
@@ -2553,11 +2761,14 @@ func (m *CorsPolicy) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return CorsPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3290,9 +3501,20 @@ func (m *RouteAction) validate(all bool) error {
 		}
 	}
 
-	switch m.ClusterSpecifier.(type) {
-
+	oneofClusterSpecifierPresent := false
+	switch v := m.ClusterSpecifier.(type) {
 	case *RouteAction_Cluster:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "ClusterSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofClusterSpecifierPresent = true
 
 		if utf8.RuneCountInString(m.GetCluster()) < 1 {
 			err := RouteActionValidationError{
@@ -3306,6 +3528,17 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	case *RouteAction_ClusterHeader:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "ClusterSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofClusterSpecifierPresent = true
 
 		if utf8.RuneCountInString(m.GetClusterHeader()) < 1 {
 			err := RouteActionValidationError{
@@ -3330,6 +3563,17 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	case *RouteAction_WeightedClusters:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "ClusterSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofClusterSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetWeightedClusters()).(type) {
@@ -3361,9 +3605,30 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	case *RouteAction_ClusterSpecifierPlugin:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "ClusterSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofClusterSpecifierPresent = true
 		// no validation rules for ClusterSpecifierPlugin
-
 	case *RouteAction_InlineClusterSpecifierPlugin:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "ClusterSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofClusterSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetInlineClusterSpecifierPlugin()).(type) {
@@ -3395,6 +3660,9 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofClusterSpecifierPresent {
 		err := RouteActionValidationError{
 			field:  "ClusterSpecifier",
 			reason: "value is required",
@@ -3403,12 +3671,19 @@ func (m *RouteAction) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
-
-	switch m.HostRewriteSpecifier.(type) {
-
+	switch v := m.HostRewriteSpecifier.(type) {
 	case *RouteAction_HostRewriteLiteral:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "HostRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if !_RouteAction_HostRewriteLiteral_Pattern.MatchString(m.GetHostRewriteLiteral()) {
 			err := RouteActionValidationError{
@@ -3422,6 +3697,16 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	case *RouteAction_AutoHostRewrite:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "HostRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetAutoHostRewrite()).(type) {
@@ -3453,6 +3738,16 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	case *RouteAction_HostRewriteHeader:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "HostRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if !_RouteAction_HostRewriteHeader_Pattern.MatchString(m.GetHostRewriteHeader()) {
 			err := RouteActionValidationError{
@@ -3466,6 +3761,16 @@ func (m *RouteAction) validate(all bool) error {
 		}
 
 	case *RouteAction_HostRewritePathRegex:
+		if v == nil {
+			err := RouteActionValidationError{
+				field:  "HostRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetHostRewritePathRegex()).(type) {
@@ -3496,11 +3801,14 @@ func (m *RouteAction) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return RouteActionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -3921,6 +4229,7 @@ func (m *RetryPolicy) validate(all bool) error {
 	if len(errors) > 0 {
 		return RetryPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4065,6 +4374,7 @@ func (m *HedgePolicy) validate(all bool) error {
 	if len(errors) > 0 {
 		return HedgePolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4186,19 +4496,46 @@ func (m *RedirectAction) validate(all bool) error {
 
 	// no validation rules for StripQuery
 
-	switch m.SchemeRewriteSpecifier.(type) {
-
+	switch v := m.SchemeRewriteSpecifier.(type) {
 	case *RedirectAction_HttpsRedirect:
+		if v == nil {
+			err := RedirectActionValidationError{
+				field:  "SchemeRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 		// no validation rules for HttpsRedirect
-
 	case *RedirectAction_SchemeRedirect:
+		if v == nil {
+			err := RedirectActionValidationError{
+				field:  "SchemeRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 		// no validation rules for SchemeRedirect
-
+	default:
+		_ = v // ensures v is used
 	}
-
-	switch m.PathRewriteSpecifier.(type) {
-
+	switch v := m.PathRewriteSpecifier.(type) {
 	case *RedirectAction_PathRedirect:
+		if v == nil {
+			err := RedirectActionValidationError{
+				field:  "PathRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if !_RedirectAction_PathRedirect_Pattern.MatchString(m.GetPathRedirect()) {
 			err := RedirectActionValidationError{
@@ -4212,6 +4549,16 @@ func (m *RedirectAction) validate(all bool) error {
 		}
 
 	case *RedirectAction_PrefixRewrite:
+		if v == nil {
+			err := RedirectActionValidationError{
+				field:  "PathRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if !_RedirectAction_PrefixRewrite_Pattern.MatchString(m.GetPrefixRewrite()) {
 			err := RedirectActionValidationError{
@@ -4225,6 +4572,16 @@ func (m *RedirectAction) validate(all bool) error {
 		}
 
 	case *RedirectAction_RegexRewrite:
+		if v == nil {
+			err := RedirectActionValidationError{
+				field:  "PathRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetRegexRewrite()).(type) {
@@ -4255,11 +4612,14 @@ func (m *RedirectAction) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return RedirectActionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4405,6 +4765,7 @@ func (m *DirectResponseAction) validate(all bool) error {
 	if len(errors) > 0 {
 		return DirectResponseActionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4506,6 +4867,7 @@ func (m *NonForwardingAction) validate(all bool) error {
 	if len(errors) > 0 {
 		return NonForwardingActionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4647,6 +5009,7 @@ func (m *Decorator) validate(all bool) error {
 	if len(errors) > 0 {
 		return DecoratorMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -4865,6 +5228,7 @@ func (m *Tracing) validate(all bool) error {
 	if len(errors) > 0 {
 		return TracingMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -5008,6 +5372,7 @@ func (m *VirtualCluster) validate(all bool) error {
 	if len(errors) > 0 {
 		return VirtualClusterMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -5195,9 +5560,41 @@ func (m *RateLimit) validate(all bool) error {
 		}
 	}
 
+	if all {
+		switch v := interface{}(m.GetHitsAddend()).(type) {
+		case interface{ ValidateAll() error }:
+			if err := v.ValidateAll(); err != nil {
+				errors = append(errors, RateLimitValidationError{
+					field:  "HitsAddend",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		case interface{ Validate() error }:
+			if err := v.Validate(); err != nil {
+				errors = append(errors, RateLimitValidationError{
+					field:  "HitsAddend",
+					reason: "embedded message failed validation",
+					cause:  err,
+				})
+			}
+		}
+	} else if v, ok := interface{}(m.GetHitsAddend()).(interface{ Validate() error }); ok {
+		if err := v.Validate(); err != nil {
+			return RateLimitValidationError{
+				field:  "HitsAddend",
+				reason: "embedded message failed validation",
+				cause:  err,
+			}
+		}
+	}
+
+	// no validation rules for ApplyOnStreamDone
+
 	if len(errors) > 0 {
 		return RateLimitMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -5319,12 +5716,30 @@ func (m *HeaderMatcher) validate(all bool) error {
 
 	// no validation rules for TreatMissingHeaderAsEmpty
 
-	switch m.HeaderMatchSpecifier.(type) {
-
+	switch v := m.HeaderMatchSpecifier.(type) {
 	case *HeaderMatcher_ExactMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 		// no validation rules for ExactMatch
-
 	case *HeaderMatcher_SafeRegexMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetSafeRegexMatch()).(type) {
@@ -5356,6 +5771,16 @@ func (m *HeaderMatcher) validate(all bool) error {
 		}
 
 	case *HeaderMatcher_RangeMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetRangeMatch()).(type) {
@@ -5387,9 +5812,28 @@ func (m *HeaderMatcher) validate(all bool) error {
 		}
 
 	case *HeaderMatcher_PresentMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 		// no validation rules for PresentMatch
-
 	case *HeaderMatcher_PrefixMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if utf8.RuneCountInString(m.GetPrefixMatch()) < 1 {
 			err := HeaderMatcherValidationError{
@@ -5403,6 +5847,16 @@ func (m *HeaderMatcher) validate(all bool) error {
 		}
 
 	case *HeaderMatcher_SuffixMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if utf8.RuneCountInString(m.GetSuffixMatch()) < 1 {
 			err := HeaderMatcherValidationError{
@@ -5416,6 +5870,16 @@ func (m *HeaderMatcher) validate(all bool) error {
 		}
 
 	case *HeaderMatcher_ContainsMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if utf8.RuneCountInString(m.GetContainsMatch()) < 1 {
 			err := HeaderMatcherValidationError{
@@ -5429,6 +5893,16 @@ func (m *HeaderMatcher) validate(all bool) error {
 		}
 
 	case *HeaderMatcher_StringMatch:
+		if v == nil {
+			err := HeaderMatcherValidationError{
+				field:  "HeaderMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetStringMatch()).(type) {
@@ -5459,11 +5933,14 @@ func (m *HeaderMatcher) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return HeaderMatcherMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -5584,9 +6061,18 @@ func (m *QueryParameterMatcher) validate(all bool) error {
 		errors = append(errors, err)
 	}
 
-	switch m.QueryParameterMatchSpecifier.(type) {
-
+	switch v := m.QueryParameterMatchSpecifier.(type) {
 	case *QueryParameterMatcher_StringMatch:
+		if v == nil {
+			err := QueryParameterMatcherValidationError{
+				field:  "QueryParameterMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if m.GetStringMatch() == nil {
 			err := QueryParameterMatcherValidationError{
@@ -5629,13 +6115,25 @@ func (m *QueryParameterMatcher) validate(all bool) error {
 		}
 
 	case *QueryParameterMatcher_PresentMatch:
+		if v == nil {
+			err := QueryParameterMatcherValidationError{
+				field:  "QueryParameterMatchSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 		// no validation rules for PresentMatch
-
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return QueryParameterMatcherMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -5810,9 +6308,41 @@ func (m *InternalRedirectPolicy) validate(all bool) error {
 
 	// no validation rules for AllowCrossSchemeRedirect
 
+	_InternalRedirectPolicy_ResponseHeadersToCopy_Unique := make(map[string]struct{}, len(m.GetResponseHeadersToCopy()))
+
+	for idx, item := range m.GetResponseHeadersToCopy() {
+		_, _ = idx, item
+
+		if _, exists := _InternalRedirectPolicy_ResponseHeadersToCopy_Unique[item]; exists {
+			err := InternalRedirectPolicyValidationError{
+				field:  fmt.Sprintf("ResponseHeadersToCopy[%v]", idx),
+				reason: "repeated value must contain unique items",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		} else {
+			_InternalRedirectPolicy_ResponseHeadersToCopy_Unique[item] = struct{}{}
+		}
+
+		if !_InternalRedirectPolicy_ResponseHeadersToCopy_Pattern.MatchString(item) {
+			err := InternalRedirectPolicyValidationError{
+				field:  fmt.Sprintf("ResponseHeadersToCopy[%v]", idx),
+				reason: "value does not match regex pattern \"^[^\\x00\\n\\r]*$\"",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
+
 	if len(errors) > 0 {
 		return InternalRedirectPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -5889,6 +6419,8 @@ var _ interface {
 	ErrorName() string
 } = InternalRedirectPolicyValidationError{}
 
+var _InternalRedirectPolicy_ResponseHeadersToCopy_Pattern = regexp.MustCompile("^[^\x00\n\r]*$")
+
 // Validate checks the field values on FilterConfig with the rules defined in
 // the proto definition for this message. If any rules are violated, the first
 // error encountered is returned, or nil if there are no violations.
@@ -5942,9 +6474,12 @@ func (m *FilterConfig) validate(all bool) error {
 
 	// no validation rules for IsOptional
 
+	// no validation rules for Disabled
+
 	if len(errors) > 0 {
 		return FilterConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -6279,9 +6814,18 @@ func (m *WeightedCluster_ClusterWeight) validate(all bool) error {
 		}
 	}
 
-	switch m.HostRewriteSpecifier.(type) {
-
+	switch v := m.HostRewriteSpecifier.(type) {
 	case *WeightedCluster_ClusterWeight_HostRewriteLiteral:
+		if v == nil {
+			err := WeightedCluster_ClusterWeightValidationError{
+				field:  "HostRewriteSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if !_WeightedCluster_ClusterWeight_HostRewriteLiteral_Pattern.MatchString(m.GetHostRewriteLiteral()) {
 			err := WeightedCluster_ClusterWeightValidationError{
@@ -6294,11 +6838,14 @@ func (m *WeightedCluster_ClusterWeight) validate(all bool) error {
 			errors = append(errors, err)
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return WeightedCluster_ClusterWeightMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -6410,6 +6957,7 @@ func (m *RouteMatch_GrpcRouteMatchOptions) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteMatch_GrpcRouteMatchOptionsMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -6572,6 +7120,7 @@ func (m *RouteMatch_TlsContextMatchOptions) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteMatch_TlsContextMatchOptionsMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -6675,6 +7224,7 @@ func (m *RouteMatch_ConnectMatcher) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteMatch_ConnectMatcherMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -6844,9 +7394,12 @@ func (m *RouteAction_RequestMirrorPolicy) validate(all bool) error {
 		}
 	}
 
+	// no validation rules for DisableShadowHostSuffixAppend
+
 	if len(errors) > 0 {
 		return RouteAction_RequestMirrorPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -6950,9 +7503,20 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 
 	// no validation rules for Terminal
 
-	switch m.PolicySpecifier.(type) {
-
+	oneofPolicySpecifierPresent := false
+	switch v := m.PolicySpecifier.(type) {
 	case *RouteAction_HashPolicy_Header_:
+		if v == nil {
+			err := RouteAction_HashPolicyValidationError{
+				field:  "PolicySpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPolicySpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetHeader()).(type) {
@@ -6984,6 +7548,17 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 		}
 
 	case *RouteAction_HashPolicy_Cookie_:
+		if v == nil {
+			err := RouteAction_HashPolicyValidationError{
+				field:  "PolicySpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPolicySpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetCookie()).(type) {
@@ -7015,6 +7590,17 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 		}
 
 	case *RouteAction_HashPolicy_ConnectionProperties_:
+		if v == nil {
+			err := RouteAction_HashPolicyValidationError{
+				field:  "PolicySpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPolicySpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetConnectionProperties()).(type) {
@@ -7046,6 +7632,17 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 		}
 
 	case *RouteAction_HashPolicy_QueryParameter_:
+		if v == nil {
+			err := RouteAction_HashPolicyValidationError{
+				field:  "PolicySpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPolicySpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetQueryParameter()).(type) {
@@ -7077,6 +7674,17 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 		}
 
 	case *RouteAction_HashPolicy_FilterState_:
+		if v == nil {
+			err := RouteAction_HashPolicyValidationError{
+				field:  "PolicySpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofPolicySpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetFilterState()).(type) {
@@ -7108,6 +7716,9 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofPolicySpecifierPresent {
 		err := RouteAction_HashPolicyValidationError{
 			field:  "PolicySpecifier",
 			reason: "value is required",
@@ -7116,12 +7727,12 @@ func (m *RouteAction_HashPolicy) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
 		return RouteAction_HashPolicyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -7303,6 +7914,7 @@ func (m *RouteAction_UpgradeConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_UpgradeConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -7493,6 +8105,7 @@ func (m *RouteAction_MaxStreamDuration) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_MaxStreamDurationMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -7646,6 +8259,7 @@ func (m *RouteAction_HashPolicy_Header) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_HashPolicy_HeaderMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -7725,6 +8339,171 @@ var _ interface {
 
 var _RouteAction_HashPolicy_Header_HeaderName_Pattern = regexp.MustCompile("^[^\x00\n\r]*$")
 
+// Validate checks the field values on RouteAction_HashPolicy_CookieAttribute
+// with the rules defined in the proto definition for this message. If any
+// rules are violated, the first error encountered is returned, or nil if
+// there are no violations.
+func (m *RouteAction_HashPolicy_CookieAttribute) Validate() error {
+	return m.validate(false)
+}
+
+// ValidateAll checks the field values on
+// RouteAction_HashPolicy_CookieAttribute with the rules defined in the proto
+// definition for this message. If any rules are violated, the result is a
+// list of violation errors wrapped in
+// RouteAction_HashPolicy_CookieAttributeMultiError, or nil if none found.
+func (m *RouteAction_HashPolicy_CookieAttribute) ValidateAll() error {
+	return m.validate(true)
+}
+
+func (m *RouteAction_HashPolicy_CookieAttribute) validate(all bool) error {
+	if m == nil {
+		return nil
+	}
+
+	var errors []error
+
+	if utf8.RuneCountInString(m.GetName()) < 1 {
+		err := RouteAction_HashPolicy_CookieAttributeValidationError{
+			field:  "Name",
+			reason: "value length must be at least 1 runes",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if len(m.GetName()) > 16384 {
+		err := RouteAction_HashPolicy_CookieAttributeValidationError{
+			field:  "Name",
+			reason: "value length must be at most 16384 bytes",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if !_RouteAction_HashPolicy_CookieAttribute_Name_Pattern.MatchString(m.GetName()) {
+		err := RouteAction_HashPolicy_CookieAttributeValidationError{
+			field:  "Name",
+			reason: "value does not match regex pattern \"^[^\\x00\\n\\r]*$\"",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if len(m.GetValue()) > 16384 {
+		err := RouteAction_HashPolicy_CookieAttributeValidationError{
+			field:  "Value",
+			reason: "value length must be at most 16384 bytes",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if !_RouteAction_HashPolicy_CookieAttribute_Value_Pattern.MatchString(m.GetValue()) {
+		err := RouteAction_HashPolicy_CookieAttributeValidationError{
+			field:  "Value",
+			reason: "value does not match regex pattern \"^[^\\x00\\n\\r]*$\"",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if len(errors) > 0 {
+		return RouteAction_HashPolicy_CookieAttributeMultiError(errors)
+	}
+
+	return nil
+}
+
+// RouteAction_HashPolicy_CookieAttributeMultiError is an error wrapping
+// multiple validation errors returned by
+// RouteAction_HashPolicy_CookieAttribute.ValidateAll() if the designated
+// constraints aren't met.
+type RouteAction_HashPolicy_CookieAttributeMultiError []error
+
+// Error returns a concatenation of all the error messages it wraps.
+func (m RouteAction_HashPolicy_CookieAttributeMultiError) Error() string {
+	var msgs []string
+	for _, err := range m {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// AllErrors returns a list of validation violation errors.
+func (m RouteAction_HashPolicy_CookieAttributeMultiError) AllErrors() []error { return m }
+
+// RouteAction_HashPolicy_CookieAttributeValidationError is the validation
+// error returned by RouteAction_HashPolicy_CookieAttribute.Validate if the
+// designated constraints aren't met.
+type RouteAction_HashPolicy_CookieAttributeValidationError struct {
+	field  string
+	reason string
+	cause  error
+	key    bool
+}
+
+// Field function returns field value.
+func (e RouteAction_HashPolicy_CookieAttributeValidationError) Field() string { return e.field }
+
+// Reason function returns reason value.
+func (e RouteAction_HashPolicy_CookieAttributeValidationError) Reason() string { return e.reason }
+
+// Cause function returns cause value.
+func (e RouteAction_HashPolicy_CookieAttributeValidationError) Cause() error { return e.cause }
+
+// Key function returns key value.
+func (e RouteAction_HashPolicy_CookieAttributeValidationError) Key() bool { return e.key }
+
+// ErrorName returns error name.
+func (e RouteAction_HashPolicy_CookieAttributeValidationError) ErrorName() string {
+	return "RouteAction_HashPolicy_CookieAttributeValidationError"
+}
+
+// Error satisfies the builtin error interface
+func (e RouteAction_HashPolicy_CookieAttributeValidationError) Error() string {
+	cause := ""
+	if e.cause != nil {
+		cause = fmt.Sprintf(" | caused by: %v", e.cause)
+	}
+
+	key := ""
+	if e.key {
+		key = "key for "
+	}
+
+	return fmt.Sprintf(
+		"invalid %sRouteAction_HashPolicy_CookieAttribute.%s: %s%s",
+		key,
+		e.field,
+		e.reason,
+		cause)
+}
+
+var _ error = RouteAction_HashPolicy_CookieAttributeValidationError{}
+
+var _ interface {
+	Field() string
+	Reason() string
+	Key() bool
+	Cause() error
+	ErrorName() string
+} = RouteAction_HashPolicy_CookieAttributeValidationError{}
+
+var _RouteAction_HashPolicy_CookieAttribute_Name_Pattern = regexp.MustCompile("^[^\x00\n\r]*$")
+
+var _RouteAction_HashPolicy_CookieAttribute_Value_Pattern = regexp.MustCompile("^[^\x00\n\r]*$")
+
 // Validate checks the field values on RouteAction_HashPolicy_Cookie with the
 // rules defined in the proto definition for this message. If any rules are
 // violated, the first error encountered is returned, or nil if there are no violations.
@@ -7789,9 +8568,44 @@ func (m *RouteAction_HashPolicy_Cookie) validate(all bool) error {
 
 	// no validation rules for Path
 
+	for idx, item := range m.GetAttributes() {
+		_, _ = idx, item
+
+		if all {
+			switch v := interface{}(item).(type) {
+			case interface{ ValidateAll() error }:
+				if err := v.ValidateAll(); err != nil {
+					errors = append(errors, RouteAction_HashPolicy_CookieValidationError{
+						field:  fmt.Sprintf("Attributes[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			case interface{ Validate() error }:
+				if err := v.Validate(); err != nil {
+					errors = append(errors, RouteAction_HashPolicy_CookieValidationError{
+						field:  fmt.Sprintf("Attributes[%v]", idx),
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			}
+		} else if v, ok := interface{}(item).(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return RouteAction_HashPolicy_CookieValidationError{
+					field:  fmt.Sprintf("Attributes[%v]", idx),
+					reason: "embedded message failed validation",
+					cause:  err,
+				}
+			}
+		}
+
+	}
+
 	if len(errors) > 0 {
 		return RouteAction_HashPolicy_CookieMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -7898,6 +8712,7 @@ func (m *RouteAction_HashPolicy_ConnectionProperties) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_HashPolicy_ConnectionPropertiesMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8013,6 +8828,7 @@ func (m *RouteAction_HashPolicy_QueryParameter) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_HashPolicy_QueryParameterMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8128,6 +8944,7 @@ func (m *RouteAction_HashPolicy_FilterState) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_HashPolicy_FilterStateMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8264,6 +9081,7 @@ func (m *RouteAction_UpgradeConfig_ConnectConfig) validate(all bool) error {
 	if len(errors) > 0 {
 		return RouteAction_UpgradeConfig_ConnectConfigMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8375,9 +9193,18 @@ func (m *RetryPolicy_RetryPriority) validate(all bool) error {
 		errors = append(errors, err)
 	}
 
-	switch m.ConfigType.(type) {
-
+	switch v := m.ConfigType.(type) {
 	case *RetryPolicy_RetryPriority_TypedConfig:
+		if v == nil {
+			err := RetryPolicy_RetryPriorityValidationError{
+				field:  "ConfigType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetTypedConfig()).(type) {
@@ -8408,11 +9235,14 @@ func (m *RetryPolicy_RetryPriority) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return RetryPolicy_RetryPriorityMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8522,9 +9352,18 @@ func (m *RetryPolicy_RetryHostPredicate) validate(all bool) error {
 		errors = append(errors, err)
 	}
 
-	switch m.ConfigType.(type) {
-
+	switch v := m.ConfigType.(type) {
 	case *RetryPolicy_RetryHostPredicate_TypedConfig:
+		if v == nil {
+			err := RetryPolicy_RetryHostPredicateValidationError{
+				field:  "ConfigType",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
 
 		if all {
 			switch v := interface{}(m.GetTypedConfig()).(type) {
@@ -8555,11 +9394,14 @@ func (m *RetryPolicy_RetryHostPredicate) validate(all bool) error {
 			}
 		}
 
+	default:
+		_ = v // ensures v is used
 	}
 
 	if len(errors) > 0 {
 		return RetryPolicy_RetryHostPredicateMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8733,6 +9575,7 @@ func (m *RetryPolicy_RetryBackOff) validate(all bool) error {
 	if len(errors) > 0 {
 		return RetryPolicy_RetryBackOffMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -8867,6 +9710,7 @@ func (m *RetryPolicy_ResetHeader) validate(all bool) error {
 	if len(errors) > 0 {
 		return RetryPolicy_ResetHeaderMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -9046,6 +9890,7 @@ func (m *RetryPolicy_RateLimitedRetryBackOff) validate(all bool) error {
 	if len(errors) > 0 {
 		return RetryPolicy_RateLimitedRetryBackOffMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -9146,9 +9991,20 @@ func (m *RateLimit_Action) validate(all bool) error {
 
 	var errors []error
 
-	switch m.ActionSpecifier.(type) {
-
+	oneofActionSpecifierPresent := false
+	switch v := m.ActionSpecifier.(type) {
 	case *RateLimit_Action_SourceCluster_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetSourceCluster()).(type) {
@@ -9180,6 +10036,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_DestinationCluster_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetDestinationCluster()).(type) {
@@ -9211,6 +10078,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_RequestHeaders_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetRequestHeaders()).(type) {
@@ -9241,7 +10119,60 @@ func (m *RateLimit_Action) validate(all bool) error {
 			}
 		}
 
+	case *RateLimit_Action_QueryParameters_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
+
+		if all {
+			switch v := interface{}(m.GetQueryParameters()).(type) {
+			case interface{ ValidateAll() error }:
+				if err := v.ValidateAll(); err != nil {
+					errors = append(errors, RateLimit_ActionValidationError{
+						field:  "QueryParameters",
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			case interface{ Validate() error }:
+				if err := v.Validate(); err != nil {
+					errors = append(errors, RateLimit_ActionValidationError{
+						field:  "QueryParameters",
+						reason: "embedded message failed validation",
+						cause:  err,
+					})
+				}
+			}
+		} else if v, ok := interface{}(m.GetQueryParameters()).(interface{ Validate() error }); ok {
+			if err := v.Validate(); err != nil {
+				return RateLimit_ActionValidationError{
+					field:  "QueryParameters",
+					reason: "embedded message failed validation",
+					cause:  err,
+				}
+			}
+		}
+
 	case *RateLimit_Action_RemoteAddress_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetRemoteAddress()).(type) {
@@ -9273,6 +10204,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_GenericKey_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetGenericKey()).(type) {
@@ -9304,6 +10246,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_HeaderValueMatch_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetHeaderValueMatch()).(type) {
@@ -9335,6 +10288,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_DynamicMetadata:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetDynamicMetadata()).(type) {
@@ -9366,6 +10330,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_Metadata:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetMetadata()).(type) {
@@ -9397,6 +10372,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_Extension:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetExtension()).(type) {
@@ -9428,6 +10414,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_MaskedRemoteAddress_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetMaskedRemoteAddress()).(type) {
@@ -9459,6 +10456,17 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	case *RateLimit_Action_QueryParameterValueMatch_:
+		if v == nil {
+			err := RateLimit_ActionValidationError{
+				field:  "ActionSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofActionSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetQueryParameterValueMatch()).(type) {
@@ -9490,6 +10498,9 @@ func (m *RateLimit_Action) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofActionSpecifierPresent {
 		err := RateLimit_ActionValidationError{
 			field:  "ActionSpecifier",
 			reason: "value is required",
@@ -9498,12 +10509,12 @@ func (m *RateLimit_Action) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
 		return RateLimit_ActionMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -9600,9 +10611,20 @@ func (m *RateLimit_Override) validate(all bool) error {
 
 	var errors []error
 
-	switch m.OverrideSpecifier.(type) {
-
+	oneofOverrideSpecifierPresent := false
+	switch v := m.OverrideSpecifier.(type) {
 	case *RateLimit_Override_DynamicMetadata_:
+		if v == nil {
+			err := RateLimit_OverrideValidationError{
+				field:  "OverrideSpecifier",
+				reason: "oneof value cannot be a typed-nil",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+		oneofOverrideSpecifierPresent = true
 
 		if all {
 			switch v := interface{}(m.GetDynamicMetadata()).(type) {
@@ -9634,6 +10656,9 @@ func (m *RateLimit_Override) validate(all bool) error {
 		}
 
 	default:
+		_ = v // ensures v is used
+	}
+	if !oneofOverrideSpecifierPresent {
 		err := RateLimit_OverrideValidationError{
 			field:  "OverrideSpecifier",
 			reason: "value is required",
@@ -9642,12 +10667,12 @@ func (m *RateLimit_Override) validate(all bool) error {
 			return err
 		}
 		errors = append(errors, err)
-
 	}
 
 	if len(errors) > 0 {
 		return RateLimit_OverrideMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -9724,6 +10749,149 @@ var _ interface {
 	ErrorName() string
 } = RateLimit_OverrideValidationError{}
 
+// Validate checks the field values on RateLimit_HitsAddend with the rules
+// defined in the proto definition for this message. If any rules are
+// violated, the first error encountered is returned, or nil if there are no violations.
+func (m *RateLimit_HitsAddend) Validate() error {
+	return m.validate(false)
+}
+
+// ValidateAll checks the field values on RateLimit_HitsAddend with the rules
+// defined in the proto definition for this message. If any rules are
+// violated, the result is a list of violation errors wrapped in
+// RateLimit_HitsAddendMultiError, or nil if none found.
+func (m *RateLimit_HitsAddend) ValidateAll() error {
+	return m.validate(true)
+}
+
+func (m *RateLimit_HitsAddend) validate(all bool) error {
+	if m == nil {
+		return nil
+	}
+
+	var errors []error
+
+	if wrapper := m.GetNumber(); wrapper != nil {
+
+		if wrapper.GetValue() > 1000000000 {
+			err := RateLimit_HitsAddendValidationError{
+				field:  "Number",
+				reason: "value must be less than or equal to 1000000000",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
+
+	if m.GetFormat() != "" {
+
+		if !strings.HasPrefix(m.GetFormat(), "%") {
+			err := RateLimit_HitsAddendValidationError{
+				field:  "Format",
+				reason: "value does not have prefix \"%\"",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+		if !strings.HasSuffix(m.GetFormat(), "%") {
+			err := RateLimit_HitsAddendValidationError{
+				field:  "Format",
+				reason: "value does not have suffix \"%\"",
+			}
+			if !all {
+				return err
+			}
+			errors = append(errors, err)
+		}
+
+	}
+
+	if len(errors) > 0 {
+		return RateLimit_HitsAddendMultiError(errors)
+	}
+
+	return nil
+}
+
+// RateLimit_HitsAddendMultiError is an error wrapping multiple validation
+// errors returned by RateLimit_HitsAddend.ValidateAll() if the designated
+// constraints aren't met.
+type RateLimit_HitsAddendMultiError []error
+
+// Error returns a concatenation of all the error messages it wraps.
+func (m RateLimit_HitsAddendMultiError) Error() string {
+	var msgs []string
+	for _, err := range m {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// AllErrors returns a list of validation violation errors.
+func (m RateLimit_HitsAddendMultiError) AllErrors() []error { return m }
+
+// RateLimit_HitsAddendValidationError is the validation error returned by
+// RateLimit_HitsAddend.Validate if the designated constraints aren't met.
+type RateLimit_HitsAddendValidationError struct {
+	field  string
+	reason string
+	cause  error
+	key    bool
+}
+
+// Field function returns field value.
+func (e RateLimit_HitsAddendValidationError) Field() string { return e.field }
+
+// Reason function returns reason value.
+func (e RateLimit_HitsAddendValidationError) Reason() string { return e.reason }
+
+// Cause function returns cause value.
+func (e RateLimit_HitsAddendValidationError) Cause() error { return e.cause }
+
+// Key function returns key value.
+func (e RateLimit_HitsAddendValidationError) Key() bool { return e.key }
+
+// ErrorName returns error name.
+func (e RateLimit_HitsAddendValidationError) ErrorName() string {
+	return "RateLimit_HitsAddendValidationError"
+}
+
+// Error satisfies the builtin error interface
+func (e RateLimit_HitsAddendValidationError) Error() string {
+	cause := ""
+	if e.cause != nil {
+		cause = fmt.Sprintf(" | caused by: %v", e.cause)
+	}
+
+	key := ""
+	if e.key {
+		key = "key for "
+	}
+
+	return fmt.Sprintf(
+		"invalid %sRateLimit_HitsAddend.%s: %s%s",
+		key,
+		e.field,
+		e.reason,
+		cause)
+}
+
+var _ error = RateLimit_HitsAddendValidationError{}
+
+var _ interface {
+	Field() string
+	Reason() string
+	Key() bool
+	Cause() error
+	ErrorName() string
+} = RateLimit_HitsAddendValidationError{}
+
 // Validate checks the field values on RateLimit_Action_SourceCluster with the
 // rules defined in the proto definition for this message. If any rules are
 // violated, the first error encountered is returned, or nil if there are no violations.
@@ -9749,6 +10917,7 @@ func (m *RateLimit_Action_SourceCluster) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_SourceClusterMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -9852,6 +11021,7 @@ func (m *RateLimit_Action_DestinationCluster) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_DestinationClusterMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -9990,6 +11160,7 @@ func (m *RateLimit_Action_RequestHeaders) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_RequestHeadersMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -10069,6 +11240,135 @@ var _ interface {
 
 var _RateLimit_Action_RequestHeaders_HeaderName_Pattern = regexp.MustCompile("^[^\x00\n\r]*$")
 
+// Validate checks the field values on RateLimit_Action_QueryParameters with
+// the rules defined in the proto definition for this message. If any rules
+// are violated, the first error encountered is returned, or nil if there are
+// no violations.
+func (m *RateLimit_Action_QueryParameters) Validate() error {
+	return m.validate(false)
+}
+
+// ValidateAll checks the field values on RateLimit_Action_QueryParameters with
+// the rules defined in the proto definition for this message. If any rules
+// are violated, the result is a list of violation errors wrapped in
+// RateLimit_Action_QueryParametersMultiError, or nil if none found.
+func (m *RateLimit_Action_QueryParameters) ValidateAll() error {
+	return m.validate(true)
+}
+
+func (m *RateLimit_Action_QueryParameters) validate(all bool) error {
+	if m == nil {
+		return nil
+	}
+
+	var errors []error
+
+	if utf8.RuneCountInString(m.GetQueryParameterName()) < 1 {
+		err := RateLimit_Action_QueryParametersValidationError{
+			field:  "QueryParameterName",
+			reason: "value length must be at least 1 runes",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	if utf8.RuneCountInString(m.GetDescriptorKey()) < 1 {
+		err := RateLimit_Action_QueryParametersValidationError{
+			field:  "DescriptorKey",
+			reason: "value length must be at least 1 runes",
+		}
+		if !all {
+			return err
+		}
+		errors = append(errors, err)
+	}
+
+	// no validation rules for SkipIfAbsent
+
+	if len(errors) > 0 {
+		return RateLimit_Action_QueryParametersMultiError(errors)
+	}
+
+	return nil
+}
+
+// RateLimit_Action_QueryParametersMultiError is an error wrapping multiple
+// validation errors returned by
+// RateLimit_Action_QueryParameters.ValidateAll() if the designated
+// constraints aren't met.
+type RateLimit_Action_QueryParametersMultiError []error
+
+// Error returns a concatenation of all the error messages it wraps.
+func (m RateLimit_Action_QueryParametersMultiError) Error() string {
+	var msgs []string
+	for _, err := range m {
+		msgs = append(msgs, err.Error())
+	}
+	return strings.Join(msgs, "; ")
+}
+
+// AllErrors returns a list of validation violation errors.
+func (m RateLimit_Action_QueryParametersMultiError) AllErrors() []error { return m }
+
+// RateLimit_Action_QueryParametersValidationError is the validation error
+// returned by RateLimit_Action_QueryParameters.Validate if the designated
+// constraints aren't met.
+type RateLimit_Action_QueryParametersValidationError struct {
+	field  string
+	reason string
+	cause  error
+	key    bool
+}
+
+// Field function returns field value.
+func (e RateLimit_Action_QueryParametersValidationError) Field() string { return e.field }
+
+// Reason function returns reason value.
+func (e RateLimit_Action_QueryParametersValidationError) Reason() string { return e.reason }
+
+// Cause function returns cause value.
+func (e RateLimit_Action_QueryParametersValidationError) Cause() error { return e.cause }
+
+// Key function returns key value.
+func (e RateLimit_Action_QueryParametersValidationError) Key() bool { return e.key }
+
+// ErrorName returns error name.
+func (e RateLimit_Action_QueryParametersValidationError) ErrorName() string {
+	return "RateLimit_Action_QueryParametersValidationError"
+}
+
+// Error satisfies the builtin error interface
+func (e RateLimit_Action_QueryParametersValidationError) Error() string {
+	cause := ""
+	if e.cause != nil {
+		cause = fmt.Sprintf(" | caused by: %v", e.cause)
+	}
+
+	key := ""
+	if e.key {
+		key = "key for "
+	}
+
+	return fmt.Sprintf(
+		"invalid %sRateLimit_Action_QueryParameters.%s: %s%s",
+		key,
+		e.field,
+		e.reason,
+		cause)
+}
+
+var _ error = RateLimit_Action_QueryParametersValidationError{}
+
+var _ interface {
+	Field() string
+	Reason() string
+	Key() bool
+	Cause() error
+	ErrorName() string
+} = RateLimit_Action_QueryParametersValidationError{}
+
 // Validate checks the field values on RateLimit_Action_RemoteAddress with the
 // rules defined in the proto definition for this message. If any rules are
 // violated, the first error encountered is returned, or nil if there are no violations.
@@ -10094,6 +11394,7 @@ func (m *RateLimit_Action_RemoteAddress) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_RemoteAddressMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -10227,6 +11528,7 @@ func (m *RateLimit_Action_MaskedRemoteAddress) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_MaskedRemoteAddressMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -10343,6 +11645,7 @@ func (m *RateLimit_Action_GenericKey) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_GenericKeyMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -10533,6 +11836,7 @@ func (m *RateLimit_Action_HeaderValueMatch) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_HeaderValueMatchMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -10690,6 +11994,7 @@ func (m *RateLimit_Action_DynamicMetaData) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_DynamicMetaDataMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -10854,9 +12159,12 @@ func (m *RateLimit_Action_MetaData) validate(all bool) error {
 		errors = append(errors, err)
 	}
 
+	// no validation rules for SkipIfAbsent
+
 	if len(errors) > 0 {
 		return RateLimit_Action_MetaDataMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -11047,6 +12355,7 @@ func (m *RateLimit_Action_QueryParameterValueMatch) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Action_QueryParameterValueMatchMultiError(errors)
 	}
+
 	return nil
 }
 
@@ -11191,6 +12500,7 @@ func (m *RateLimit_Override_DynamicMetadata) validate(all bool) error {
 	if len(errors) > 0 {
 		return RateLimit_Override_DynamicMetadataMultiError(errors)
 	}
+
 	return nil
 }
 

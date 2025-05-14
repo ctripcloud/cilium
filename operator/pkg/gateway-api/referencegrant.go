@@ -4,6 +4,8 @@
 package gateway_api
 
 import (
+	"log/slog"
+
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -15,7 +17,15 @@ type referenceGrantReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 
-	Model *internalModel
+	logger *slog.Logger
+}
+
+func newReferenceGrantReconciler(mgr ctrl.Manager, logger *slog.Logger) *referenceGrantReconciler {
+	return &referenceGrantReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		logger: logger,
+	}
 }
 
 // SetupWithManager sets up the controller with the Manager.

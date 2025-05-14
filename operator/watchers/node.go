@@ -4,7 +4,10 @@
 package watchers
 
 import (
+	"fmt"
+	"log/slog"
 	"sync"
+	"time"
 
 	k8sErrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,16 +33,8 @@ var (
 	slimNodeStoreSynced = make(chan struct{})
 
 	nodeController cache.Controller
-
-	nodeQueue = workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "node-queue")
+	nodeQueue      workqueue.TypedRateLimitingInterface[string]
 )
-
-// NodeQueueShutDown is a wrapper to expose ShutDown for the global nodeQueue.
-// It is meant to be used in unit test like the identity-gc one in operator/identity/
-// in order to avoid goleak complaining about leaked goroutines.
-func NodeQueueShutDown() {
-	nodeQueue.ShutDown()
-}
 
 type slimNodeGetter interface {
 	GetK8sSlimNode(nodeName string) (*slim_corev1.Node, error)
@@ -75,23 +70,27 @@ func (nodeGetter) ListK8sSlimNode() []*slim_corev1.Node {
 }
 
 // nodesInit starts up a node watcher to handle node events.
-func nodesInit(wg *sync.WaitGroup, slimClient slimclientset.Interface, stopCh <-chan struct{}) {
+func nodesInit(wg *sync.WaitGroup, slimClient slimclientset.Interface, stopCh <-chan struct{}, logger *slog.Logger) {
 	nodeSyncOnce.Do(func() {
+		nodeQueue = workqueue.NewTypedRateLimitingQueueWithConfig[string](
+			workqueue.NewTypedItemExponentialFailureRateLimiter[string](1*time.Second, 120*time.Second),
+			workqueue.TypedRateLimitingQueueConfig[string]{Name: "node-queue"},
+		)
 		slimNodeStore, nodeController = informer.NewInformer(
 			utils.ListerWatcherFromTyped[*slim_corev1.NodeList](slimClient.CoreV1().Nodes()),
 			&slim_corev1.Node{},
 			0,
 			cache.ResourceEventHandlerFuncs{
-				AddFunc: func(obj interface{}) {
+				AddFunc: func(obj any) {
 					key, _ := queueKeyFunc(obj)
 					nodeQueue.Add(key)
 				},
-				UpdateFunc: func(_, newObj interface{}) {
+				UpdateFunc: func(_, newObj any) {
 					key, _ := queueKeyFunc(newObj)
 					nodeQueue.Add(key)
 				},
 			},
-			convertToNode,
+			transformToNode,
 		)
 		wg.Add(1)
 		go func() {
@@ -105,7 +104,7 @@ func nodesInit(wg *sync.WaitGroup, slimClient slimclientset.Interface, stopCh <-
 	})
 }
 
-func convertToNode(obj interface{}) interface{} {
+func transformToNode(obj any) (any, error) {
 	switch concreteObj := obj.(type) {
 	case *slim_corev1.Node:
 		n := &slim_corev1.Node{
@@ -122,11 +121,11 @@ func convertToNode(obj interface{}) interface{} {
 			},
 		}
 		*concreteObj = slim_corev1.Node{}
-		return n
+		return n, nil
 	case cache.DeletedFinalStateUnknown:
 		node, ok := concreteObj.Obj.(*slim_corev1.Node)
 		if !ok {
-			return obj
+			return nil, fmt.Errorf("unknown object type %T", concreteObj.Obj)
 		}
 		dfsu := cache.DeletedFinalStateUnknown{
 			Key: concreteObj.Key,
@@ -146,8 +145,8 @@ func convertToNode(obj interface{}) interface{} {
 		}
 		// Small GC optimization
 		*node = slim_corev1.Node{}
-		return dfsu
+		return dfsu, nil
 	default:
-		return obj
+		return nil, fmt.Errorf("unknown object type %T", concreteObj)
 	}
 }

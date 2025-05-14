@@ -38,10 +38,9 @@ each other via that port.
 
 .. note::
 
-   When running in the tunneling mode (i.e. with VXLAN or Geneve), pod to pod
-   traffic will be sent only over the WireGuard tunnel which means that the
-   packets will bypass the other tunnel, and thus they will be encapsulated
-   only once.
+   When running in tunnel routing mode, pod to pod traffic is encapsulated twice.
+   It is first sent to the VXLAN / Geneve tunnel interface, and then subsequently
+   also encapsulated by the WireGuard tunnel.
 
 Enable WireGuard in Cilium
 ==========================
@@ -53,18 +52,6 @@ WireGuard module on older kernels).
 See `WireGuard Installation <https://www.wireguard.com/install/>`_ for details
 on how to install the kernel module on your Linux distribution.
 
-If your kernel or distribution does not support WireGuard, Cilium agent can be
-configured to fall back on the user-space implementation via the
-``--enable-wireguard-userspace-fallback`` flag. When this flag is enabled and
-Cilium detects that the kernel has no native support for WireGuard, it
-will fallback on the ``wireguard-go`` user-space implementation of WireGuard.
-When running the user-space implementation, encryption and decryption of packets
-is performed by the ``cilium-agent`` process. As a consequence, connectivity
-between Cilium-managed endpoints will be unavailable whenever the
-``cilium-agent`` process is restarted, such as during upgrades or configuration
-changes. Running WireGuard in user-space mode is therefore not recommended for
-production workloads that require high availability.
-
 .. tabs::
 
     .. group-tab:: Cilium CLI
@@ -72,9 +59,11 @@ production workloads that require high availability.
        If you are deploying Cilium with the Cilium CLI, pass the following
        options:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-          cilium install --encryption wireguard
+          cilium install |CHART_VERSION| \
+             --set encryption.enabled=true \
+             --set encryption.type=wireguard
 
     .. group-tab:: Helm
 
@@ -88,9 +77,18 @@ production workloads that require high availability.
              --set encryption.enabled=true \\
              --set encryption.type=wireguard
 
-WireGuard may also be enabled manually by setting setting the
+WireGuard may also be enabled manually by setting the
 ``enable-wireguard: true`` option in the Cilium ``ConfigMap`` and restarting
 each Cilium agent instance.
+
+.. note::
+
+   When running with the CNI chaining (e.g., :ref:`chaining_aws_cni`), set the
+   Helm option ``cni.enableRouteMTUForCNIChaining`` to ``true`` to force Cilium
+   to set a correct MTU for Pods. Otherwise, Pod traffic encrypted with
+   WireGuard might get fragmented, which can lead to a network performance
+   degradation.
+
 
 Validate the Setup
 ==================
@@ -104,7 +102,7 @@ commands:
 
    .. code-block:: shell-session
 
-      cilium status | grep Encryption
+      cilium-dbg status | grep Encryption
 
       Encryption: Wireguard [cilium_wg0 (Pubkey: <..>, Port: 51871, Peers: 2)]
 
@@ -145,7 +143,7 @@ commands can be helpful:
 .. code-block:: shell-session
 
    # From node A:
-   cilium debuginfo --output json | jq .encryption
+   cilium-dbg debuginfo --output json | jq .encryption
    {
      "wireguard": {
        "interfaces": [
@@ -170,7 +168,7 @@ commands can be helpful:
      }
    }
    # From node B:
-   cilium debuginfo --output json | jq .encryption
+   cilium-dbg debuginfo --output json | jq .encryption
    {
      "wireguard": {
        "interfaces": [
@@ -215,6 +213,8 @@ have WireGuard encryption enabled, i.e. mixed mode is currently not supported.
 In addition, UDP traffic between nodes of different clusters on port ``51871``
 must be allowed.
 
+.. _node-node-wg:
+
 Node-to-Node Encryption (beta)
 ==============================
 
@@ -230,9 +230,12 @@ options:
        If you are deploying Cilium with the Cilium CLI, pass the following
        options:
 
-       .. code-block:: shell-session
+       .. parsed-literal::
 
-          cilium install --encryption wireguard --node-encryption
+          cilium install |CHART_VERSION| \
+             --set encryption.enabled=true \
+             --set encryption.type=wireguard \
+             --set encryption.nodeEncryption=true
 
     .. group-tab:: Helm
 
@@ -282,6 +285,88 @@ options:
   recommended, as it will require you to always manually update a node's public
   key in its corresponding ``CiliumNode`` CRD when a worker node's public key
   changes, given that the worker node will be unable to do so itself.
+
+  N/S load balancer traffic isn't encrypted when an intermediate node redirects
+  a request to a different node with the following load balancer configuration:
+
+  - LoadBalancer & NodePort XDP Acceleration
+  - Direct Server Return (DSR) in non-Geneve dispatch mode
+
+  Egress Gateway replies are not encrypted when XDP Acceleration is enabled.
+
+Which traffic is encrypted
+==========================
+
+The following table denotes which packets are encrypted with WireGuard depending
+on the mode. Configurations or communication pairs not present in the following
+table are not subject to encryption with WireGuard and therefore assumed to be unencrypted.
+
++----------------+-------------------+----------------------+-----------------+
+| Origin         | Destination       | Configuration        | Encryption mode |
++================+===================+======================+=================+
+| Pod            | remote Pod        | any                  | default         |
++----------------+-------------------+----------------------+-----------------+
+| Pod            | remote Node       | any                  | node-to-node    |
++----------------+-------------------+----------------------+-----------------+
+| Node           | remote Pod        | any                  | node-to-node    |
++----------------+-------------------+----------------------+-----------------+
+| Node           | remote Node       | any                  | node-to-node    |
++----------------+-------------------+----------------------+-----------------+
+| **Services**                                                                |
++----------------+-------------------+----------------------+-----------------+
+| Pod            | remote Pod via    | any                  | default         |
+|                | ClusterIP Service |                      |                 |
++----------------+-------------------+----------------------+-----------------+
+| Pod            | remote Pod via    | Socket LB            | default         |
+|                | non ClusterIP     |                      |                 |
+|                | Service (e.g.,    |                      |                 |
+|                | NodePort)         |                      |                 |
++----------------+-------------------+----------------------+-----------------+
+| Pod            | remote Pod via    | kube-proxy           | node-to-node    |
+|                | non ClusterIP     |                      |                 |
+|                | Service           |                      |                 |
++----------------+-------------------+----------------------+-----------------+
+| Client outside | remote Pod via    | KPR,                 | default         |
+| cluster        | Service           | overlay routing,     |                 |
+|                |                   | without DSR,         |                 |
+|                |                   | without XDP          |                 |
++----------------+-------------------+----------------------+-----------------+
+| Client outside | remote Pod via    | native routing,      | node-to-node    |
+| cluster        | Service           | without XDP          |                 |
++----------------+-------------------+----------------------+-----------------+
+| Client outside | remote Pod or     | DSR in Geneve mode,  | default         |
+| cluster        | remote Node via   | without XDP          |                 |
+|                | Service           |                      |                 |
++----------------+-------------------+----------------------+-----------------+
+| Pod            | remote Pod via L7 | L7 Proxy / Ingress   | default         |
+|                | Proxy or L7       |                      |                 |
+|                | Ingress Service   |                      |                 |
++----------------+-------------------+----------------------+-----------------+
+| **Egress Gateway**                                                          |
++----------------+-------------------+----------------------+-----------------+
+| Pod            |Egress Gateway node| Egress Gateway       | default         |
++----------------+-------------------+----------------------+-----------------+
+| Egress Gateway | Pod               | Egress Gateway       | default         |
+| node           |                   | without XDP          |                 |
++----------------+-------------------+----------------------+-----------------+
+
+* **Pod**: Cilium-managed K8s Pod running in non-host network namespace.
+* **Node**: K8s host running Cilium, or Pod running in host network namespace
+  managed by Cilium.
+* **Service**: K8s Service (ClusterIP, NodePort, LoadBalancer, ExternalIP).
+* **Client outside cluster**: Any client which runs outside K8s cluster.
+  Request between client and Node is not encrypted. Depending on Cilium
+  configuration (see the table at the beginning of this section), it might be
+  encrypted only between intermediate Node (which received client request first)
+  and destination Node.
+
+Known Issues
+==========================
+
+* Packets may be dropped when configuring the WireGuard device leading to
+  connectivity issues. This happens when endpoints are added or removed or
+  when node updates occur. In some cases this may lead to failed calls to
+  ``sendmsg`` and ``sendto``. See :gh-issue:`33159` for more details.
 
 Legal
 =====

@@ -18,6 +18,8 @@ plugin is called to attach eBPF programs to the network devices set up by the
 AWS VPC CNI plugin in order to enforce network policies, perform load-balancing
 and provide encryption.
 
+.. image:: aws-cilium-architecture.png
+
 .. include:: cni-chaining-limitations.rst
 
 .. admonition:: Video
@@ -69,7 +71,6 @@ Deploy Cilium via Helm:
      --set cni.exclusive=false \\
      --set enableIPv4Masquerade=false \\
      --set routingMode=native
-     --set endpointRoutes.enabled=true
 
 This will enable chaining with the AWS VPC CNI plugin. It will also disable
 tunneling, as it's not required since ENI IP addresses can be directly routed
@@ -130,7 +131,7 @@ to the IAM role associated with the EKS cluster:
         --policy-arn arn:aws:iam::aws:policy/AmazonEKSVPCResourceController \
         --role-name "${EKS_CLUSTER_ROLE_NAME}"
 
-Then, and as mentioned above, make sure that the version of the AWS VPC CNI
+Then, as mentioned above, make sure that the version of the AWS VPC CNI
 plugin running in the cluster is up-to-date:
 
 .. code-block:: shell-session

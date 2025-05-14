@@ -4,17 +4,21 @@
 package api
 
 import (
-	. "gopkg.in/check.v1"
+	"testing"
+
+	"github.com/stretchr/testify/require"
 )
 
 // TestRulesDeepEqual tests that individual rules (via Rule.DeepEqual()) and
 // a collection of rules (via Rules.DeepEqual()) correctly validates the
 // equality of the rule or rules.
-func (s *PolicyAPITestSuite) TestRulesDeepEqual(c *C) {
+func TestRulesDeepEqual(t *testing.T) {
+	setUpSuite(t)
+
 	var invalidRules *Rules
 
-	c.Assert(invalidRules.DeepEqual(nil), Equals, true)
-	c.Assert(invalidRules.DeepEqual(invalidRules), Equals, true)
+	require.True(t, invalidRules.DeepEqual(nil))
+	require.True(t, invalidRules.DeepEqual(invalidRules))
 
 	wcSelector1 := WildcardEndpointSelector
 	validPortRules := Rules{
@@ -37,10 +41,10 @@ func (s *PolicyAPITestSuite) TestRulesDeepEqual(c *C) {
 			}}),
 	}
 
-	c.Assert(invalidRules.DeepEqual(&validPortRules), Equals, false)
-	c.Assert(validPortRules.DeepEqual(invalidRules), Equals, false)
-	c.Assert(validPortRules.DeepEqual(nil), Equals, false)
-	c.Assert(validPortRules.DeepEqual(&validPortRules), Equals, true)
+	require.False(t, invalidRules.DeepEqual(&validPortRules))
+	require.False(t, validPortRules.DeepEqual(invalidRules))
+	require.False(t, validPortRules.DeepEqual(nil))
+	require.True(t, validPortRules.DeepEqual(&validPortRules))
 
 	// Same as WildcardEndpointSelector, but different pointer.
 	wcSelector2 := NewESFromLabels()
@@ -49,5 +53,5 @@ func (s *PolicyAPITestSuite) TestRulesDeepEqual(c *C) {
 	}
 	validPortRulesClone[0].EndpointSelector = wcSelector2
 
-	c.Assert(validPortRules.DeepEqual(&validPortRulesClone), Equals, true)
+	require.True(t, validPortRules.DeepEqual(&validPortRulesClone))
 }

@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"unsafe"
 
 	"github.com/cilium/cilium/pkg/bpf"
 	cmtypes "github.com/cilium/cilium/pkg/clustermesh/types"
+	"github.com/cilium/cilium/pkg/ebpf"
 	"github.com/cilium/cilium/pkg/option"
 	"github.com/cilium/cilium/pkg/types"
 )
@@ -21,30 +23,24 @@ const (
 	// RemoteEndpointMap.
 	MaxEntries = 512000
 
+	// OldName is the canonical name for the v1 IPCache map on the filesystem.
+	OldName = "cilium_ipcache"
+
 	// Name is the canonical name for the IPCache map on the filesystem.
-	Name = "cilium_ipcache"
+	Name = "cilium_ipcache_v2"
 )
 
 // Key implements the bpf.MapKey interface.
 //
 // Must be in sync with struct ipcache_key in <bpf/lib/maps.h>
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapKey
 type Key struct {
 	Prefixlen uint32 `align:"lpm_key"`
-	Pad1      uint16 `align:"pad1"`
-	ClusterID uint8  `align:"cluster_id"`
+	ClusterID uint16 `align:"cluster_id"`
+	Pad1      uint8  `align:"pad1"`
 	Family    uint8  `align:"family"`
 	// represents both IPv6 and IPv4 (in the lowest four bytes)
 	IP types.IPv6 `align:"$union0"`
 }
-
-// GetKeyPtr returns the unsafe pointer to the BPF key
-func (k *Key) GetKeyPtr() unsafe.Pointer { return unsafe.Pointer(k) }
-
-// NewValue returns a new empty instance of the structure representing the BPF
-// map value
-func (k Key) NewValue() bpf.MapValue { return &RemoteEndpointInfo{} }
 
 func getStaticPrefixBits() uint32 {
 	staticMatchSize := unsafe.Sizeof(Key{})
@@ -74,22 +70,10 @@ func (k Key) String() string {
 	prefixLen := int(k.Prefixlen - getStaticPrefixBits())
 	clusterID := uint32(k.ClusterID)
 
-	return cmtypes.PrefixClusterFrom(addr, prefixLen, clusterID).String()
+	return cmtypes.PrefixClusterFrom(netip.PrefixFrom(addr, prefixLen), cmtypes.WithClusterID(clusterID)).String()
 }
 
-func (k Key) IPNet() *net.IPNet {
-	cidr := &net.IPNet{}
-	prefixLen := k.Prefixlen - getStaticPrefixBits()
-	switch k.Family {
-	case bpf.EndpointKeyIPv4:
-		cidr.IP = net.IP(k.IP[:net.IPv4len])
-		cidr.Mask = net.CIDRMask(int(prefixLen), 32)
-	case bpf.EndpointKeyIPv6:
-		cidr.IP = net.IP(k.IP[:net.IPv6len])
-		cidr.Mask = net.CIDRMask(int(prefixLen), 128)
-	}
-	return cidr
-}
+func (k *Key) New() bpf.MapKey { return &Key{} }
 
 func (k Key) Prefix() netip.Prefix {
 	var addr netip.Addr
@@ -113,7 +97,7 @@ func getPrefixLen(prefixBits int) uint32 {
 
 // NewKey returns an Key based on the provided IP address, mask, and ClusterID.
 // The address family is automatically detected
-func NewKey(ip net.IP, mask net.IPMask, clusterID uint8) Key {
+func NewKey(ip net.IP, mask net.IPMask, clusterID uint16) Key {
 	result := Key{}
 
 	ones, _ := mask.Size()
@@ -138,24 +122,111 @@ func NewKey(ip net.IP, mask net.IPMask, clusterID uint8) Key {
 	return result
 }
 
+// RemoteEndpointInfoFlags represents various flags that can be attached to
+// remote endpoints in the IPCache.
+type RemoteEndpointInfoFlags uint8
+
+// String returns a human-readable representation of the flags present in the
+// RemoteEndpointInfoFlags.
+// The output format is the string name of each flag contained in the flag set,
+// separated by a comma. If no flags are set, then "<none>" is returned.
+func (f RemoteEndpointInfoFlags) String() string {
+	flags := ""
+	if f&FlagSkipTunnel != 0 {
+		flags += "skiptunnel,"
+	}
+	if f&FlagHasTunnelEndpoint != 0 {
+		flags += "hastunnel,"
+	}
+	if f&FlagIPv6TunnelEndpoint != 0 {
+		flags += "ipv6tunnel,"
+	}
+
+	if flags == "" {
+		return "<none>"
+	}
+	return strings.TrimSuffix(flags, ",")
+}
+
+const (
+	// FlagSkipTunnel can be applied to a remote endpoint to signal that
+	// packets destined for said endpoint shall not be forwarded through
+	// a VXLAN/Geneve tunnel, regardless of Cilium's configuration.
+	FlagSkipTunnel RemoteEndpointInfoFlags = 1 << iota
+	// FlagHasTunnelEndpoint is set when the tunnel endpoint is not null. It
+	// aims to simplify the logic compared to checking the IPv6 address.
+	FlagHasTunnelEndpoint
+	// FlagIPv6TunnelEndpoint is set when the tunnel endpoint IP address
+	// is an IPv6 address.
+	FlagIPv6TunnelEndpoint
+)
+
 // RemoteEndpointInfo implements the bpf.MapValue interface. It contains the
 // security identity of a remote endpoint.
-// +k8s:deepcopy-gen=true
-// +k8s:deepcopy-gen:interfaces=github.com/cilium/cilium/pkg/bpf.MapValue
 type RemoteEndpointInfo struct {
-	SecurityIdentity uint32     `align:"sec_identity"`
-	TunnelEndpoint   types.IPv4 `align:"tunnel_endpoint"`
-	NodeID           uint16     `align:"node_id"`
-	Key              uint8      `align:"key"`
+	SecurityIdentity uint32 `align:"sec_identity"`
+	// represents both IPv6 and IPv4 (in the lowest four bytes)
+	TunnelEndpoint types.IPv6 `align:"tunnel_endpoint"`
+	_              uint16
+	Key            uint8                   `align:"key"`
+	Flags          RemoteEndpointInfoFlags `align:"flag_skip_tunnel"`
 }
 
 func (v *RemoteEndpointInfo) String() string {
-	return fmt.Sprintf("identity=%d encryptkey=%d tunnelendpoint=%s nodeid=%d",
-		v.SecurityIdentity, v.Key, v.TunnelEndpoint, v.NodeID)
+	return fmt.Sprintf("identity=%d encryptkey=%d tunnelendpoint=%s flags=%s",
+		v.SecurityIdentity, v.Key, v.GetTunnelEndpoint(), v.Flags)
 }
 
-// GetValuePtr returns the unsafe pointer to the BPF value.
-func (v *RemoteEndpointInfo) GetValuePtr() unsafe.Pointer { return unsafe.Pointer(v) }
+func (v *RemoteEndpointInfo) GetTunnelEndpoint() net.IP {
+	if v.Flags&FlagIPv6TunnelEndpoint == 0 {
+		return v.TunnelEndpoint[:4]
+	}
+	return v.TunnelEndpoint[:]
+}
+
+func (v *RemoteEndpointInfo) New() bpf.MapValue { return &RemoteEndpointInfo{} }
+
+// RemoteEndpointInfoV1 implements the bpf.MapValue interface for the v1
+// ipcache map value.
+type RemoteEndpointInfoV1 struct {
+	SecurityIdentity uint32     `align:"sec_identity"`
+	TunnelEndpoint   types.IPv4 `align:"tunnel_endpoint"`
+	_                uint16
+	Key              uint8                   `align:"key"`
+	Flags            RemoteEndpointInfoFlags `align:"flag_skip_tunnel"`
+}
+
+func (v *RemoteEndpointInfoV1) String() string {
+	return fmt.Sprintf("identity=%d encryptkey=%d tunnelendpoint=%s flags=%s",
+		v.SecurityIdentity, v.Key, v.TunnelEndpoint, v.Flags)
+}
+
+func (v *RemoteEndpointInfoV1) New() bpf.MapValue { return &RemoteEndpointInfoV1{} }
+
+// NewValue returns a RemoteEndpointInfo based on the provided security
+// identity, tunnel endpoint IP, IPsec key, and flags. The address family is
+// automatically detected.
+func NewValue(secID uint32, tunnelEndpoint net.IP, key uint8, flags RemoteEndpointInfoFlags) RemoteEndpointInfo {
+	result := RemoteEndpointInfo{}
+
+	result.SecurityIdentity = secID
+	result.Key = key
+	result.Flags = flags
+
+	if tunnelEndpoint == nil {
+		return result
+	}
+
+	result.Flags |= FlagHasTunnelEndpoint
+	if ip4 := tunnelEndpoint.To4(); ip4 != nil {
+		copy(result.TunnelEndpoint[:], ip4)
+	} else {
+		copy(result.TunnelEndpoint[:], tunnelEndpoint)
+		result.Flags |= FlagIPv6TunnelEndpoint
+	}
+
+	return result
+}
 
 // Map represents an IPCache BPF map.
 type Map struct {
@@ -165,14 +236,21 @@ type Map struct {
 func newIPCacheMap(name string) *bpf.Map {
 	return bpf.NewMap(
 		name,
-		bpf.MapTypeLPMTrie,
+		ebpf.LPMTrie,
 		&Key{},
-		int(unsafe.Sizeof(Key{})),
 		&RemoteEndpointInfo{},
-		int(unsafe.Sizeof(RemoteEndpointInfo{})),
 		MaxEntries,
-		bpf.BPF_F_NO_PREALLOC, 0,
-		bpf.ConvertKeyValue)
+		bpf.BPF_F_NO_PREALLOC)
+}
+
+func newIPCacheMapV1(name string) *bpf.Map {
+	return bpf.NewMap(
+		name,
+		ebpf.LPMTrie,
+		&Key{},
+		&RemoteEndpointInfoV1{},
+		MaxEntries,
+		bpf.BPF_F_NO_PREALLOC)
 }
 
 // NewMap instantiates a Map.
@@ -183,18 +261,15 @@ func NewMap(name string) *Map {
 	}
 }
 
-// GetMaxPrefixLengths determines how many unique prefix lengths are supported
-// simultaneously based on the underlying BPF map type in use.
-func (m *Map) GetMaxPrefixLengths() (ipv6, ipv4 int) {
-	return net.IPv6len*8 + 1, net.IPv4len*8 + 1
-}
-
 var (
 	// IPCache is a mapping of all endpoint IPs in the cluster which this
 	// Cilium agent is a part of to their corresponding security identities.
 	// It is a singleton; there is only one such map per agent.
 	ipcache *Map
 	once    = &sync.Once{}
+
+	oldIPcache     *Map
+	onceOldIPcache = &sync.Once{}
 )
 
 // IPCacheMap gets the ipcache Map singleton. If it has not already been done,
@@ -206,8 +281,13 @@ func IPCacheMap() *Map {
 	return ipcache
 }
 
-// Reopen attempts to close and re-open the IPCache map at the standard path
-// on the filesystem.
-func Reopen() error {
-	return IPCacheMap().Reopen()
+// IPCacheMapV1 does the same as IPCacheMap but for the v1 ipcache map,
+// from v1.18.
+func IPCacheMapV1() *Map {
+	onceOldIPcache.Do(func() {
+		oldIPcache = &Map{
+			Map: *newIPCacheMapV1(OldName),
+		}
+	})
+	return oldIPcache
 }

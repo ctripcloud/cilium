@@ -56,7 +56,7 @@ plugins
   Plugins to integrate with Kubernetes and Docker
 
 test
-  End-to-end integration tests run in the :ref:`testsuite`.
+  End-to-end integration tests run in the :ref:`testsuite-legacy`.
 
 Cilium
 ------
@@ -186,9 +186,6 @@ pkg/ipcache
 pkg/k8s
   All interactions with Kubernetes
 
-pkg/kafka
-  Kafka protocol proxy and policy implementation
-
 pkg/kvstore
   Key-value store abstraction layer with backends for etcd
 
@@ -219,9 +216,6 @@ pkg/policy
 
 pkg/proxy
   Layer 7 proxy abstraction
-
-pkg/service
-  Representation of a load-balancing service
 
 pkg/trigger
   Implementation of trigger functionality to implement event-driven

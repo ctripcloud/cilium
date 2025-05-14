@@ -7,82 +7,64 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/netip"
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"github.com/sirupsen/logrus"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/cilium/cilium/api/v1/models"
 	"github.com/cilium/cilium/pkg/common"
 	"github.com/cilium/cilium/pkg/controller"
+	"github.com/cilium/cilium/pkg/datapath/linux/safenetlink"
 	"github.com/cilium/cilium/pkg/endpoint/regeneration"
 	"github.com/cilium/cilium/pkg/fqdn"
 	"github.com/cilium/cilium/pkg/fqdn/restore"
 	"github.com/cilium/cilium/pkg/identity"
-	"github.com/cilium/cilium/pkg/ipcache"
 	"github.com/cilium/cilium/pkg/labels"
 	"github.com/cilium/cilium/pkg/labelsfilter"
+	"github.com/cilium/cilium/pkg/logging"
 	"github.com/cilium/cilium/pkg/logging/logfields"
 	"github.com/cilium/cilium/pkg/mac"
 	"github.com/cilium/cilium/pkg/node"
 	"github.com/cilium/cilium/pkg/option"
+	"github.com/cilium/cilium/pkg/time"
 )
 
-// getCiliumVersionString returns the first line containing ciliumCHeaderPrefix.
-func getCiliumVersionString(epCHeaderFilePath string) ([]byte, error) {
-	f, err := os.Open(epCHeaderFilePath)
-	if err != nil {
-		return []byte{}, err
-	}
-	br := bufio.NewReader(f)
-	defer f.Close()
-	for {
-		b, err := br.ReadBytes('\n')
-		if errors.Is(err, io.EOF) {
-			return []byte{}, nil
-		}
-		if err != nil {
-			return []byte{}, err
-		}
-		if bytes.Contains(b, []byte(ciliumCHeaderPrefix)) {
-			return b, nil
-		}
-	}
-}
+var (
+	restoreEndpointIdentityControllerGroup = controller.NewGroup("restore-endpoint-identity")
+	initialGlobalIdentitiesControllerGroup = controller.NewGroup("initial-global-identities")
+)
 
-// hostObjFileName is the name of the host object file.
-const hostObjFileName = "bpf_host.o"
-
-func hasHostObjectFile(epDir string) bool {
-	hostObjFilepath := filepath.Join(epDir, hostObjFileName)
-	_, err := os.Stat(hostObjFilepath)
-	return err == nil
+type EndpointParser interface {
+	ParseEndpoint(epJSON []byte) (*Endpoint, error)
 }
 
 // ReadEPsFromDirNames returns a mapping of endpoint ID to endpoint of endpoints
 // from a list of directory names that can possible contain an endpoint.
-func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGetter policyRepoGetter,
-	namedPortsGetter namedPortsGetter, basePath string, eptsDirNames []string) map[uint16]*Endpoint {
-
+func ReadEPsFromDirNames(ctx context.Context, logger *slog.Logger, parser EndpointParser, basePath string, eptsDirNames []string) map[uint16]*Endpoint {
 	completeEPDirNames, incompleteEPDirNames := partitionEPDirNamesByRestoreStatus(eptsDirNames)
 
 	if len(incompleteEPDirNames) > 0 {
 		for _, epDirName := range incompleteEPDirNames {
-			scopedLog := log.WithFields(logrus.Fields{
-				logfields.EndpointID: epDirName,
-			})
 			fullDirName := filepath.Join(basePath, epDirName)
-			scopedLog.Info(fmt.Sprintf("Found incomplete restore directory %s. Removing it...", fullDirName))
+			logger.Info(
+				fmt.Sprintf("Found incomplete restore directory %s. Removing it...", fullDirName),
+				logfields.EndpointID, epDirName,
+			)
 			if err := os.RemoveAll(epDirName); err != nil {
-				scopedLog.WithError(err).Warn(fmt.Sprintf("Error while removing directory %s. Ignoring it...", fullDirName))
+				logger.Warn(
+					fmt.Sprintf("Error while removing directory %s. Ignoring it...", fullDirName),
+					logfields.Error, err,
+					logfields.EndpointID, epDirName,
+				)
 			}
 		}
 	}
@@ -90,44 +72,21 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGe
 	possibleEPs := map[uint16]*Endpoint{}
 	for _, epDirName := range completeEPDirNames {
 		epDir := filepath.Join(basePath, epDirName)
-		isHost := hasHostObjectFile(epDir)
 
-		cHeaderFile := filepath.Join(epDir, common.CHeaderFileName)
-		scopedLog := log.WithFields(logrus.Fields{
-			logfields.EndpointID: epDirName,
-			logfields.Path:       cHeaderFile,
-		})
-		// This function checks the presence of a bug previously observed: the
-		// file was sometimes only found after the second check.
-		// We can remove this if we haven't seen the issue occur after a while.
-		headerFileExists := func() error {
-			_, fileExists := os.Stat(cHeaderFile)
-			for i := 0; i < 2 && fileExists != nil; i++ {
-				time.Sleep(100 * time.Millisecond)
-				_, err := os.Stat(cHeaderFile)
-				if (fileExists == nil) != (err == nil) {
-					scopedLog.WithError(err).Warn("BUG: stat() has unstable behavior")
-				}
-				fileExists = err
-			}
-			return fileExists
-		}
+		scopedLogger := logger.With(
+			logfields.EndpointID, epDirName,
+			logfields.Path, epDir,
+		)
 
-		if err := headerFileExists(); err != nil {
-			scopedLog.WithError(err).Warn("C header file not found. Ignoring endpoint")
+		state, err := findEndpointState(scopedLogger, epDir)
+		if err != nil {
+			scopedLogger.Warn("Couldn't find state, ignoring endpoint", logfields.Error, err)
 			continue
 		}
 
-		scopedLog.Debug("Found endpoint C header file")
-
-		bEp, err := getCiliumVersionString(cHeaderFile)
+		ep, err := parser.ParseEndpoint(state)
 		if err != nil {
-			scopedLog.WithError(err).Warn("Unable to read the C header file")
-			continue
-		}
-		ep, err := parseEndpoint(ctx, owner, policyGetter, namedPortsGetter, bEp)
-		if err != nil {
-			scopedLog.WithError(err).Warn("Unable to parse the C header file")
+			scopedLogger.Warn("Unable to parse the C header file", logfields.Error, err)
 			continue
 		}
 		if _, ok := possibleEPs[ep.ID]; ok {
@@ -142,11 +101,60 @@ func ReadEPsFromDirNames(ctx context.Context, owner regeneration.Owner, policyGe
 
 		// We need to save the host endpoint ID as we'll need it to regenerate
 		// other endpoints.
-		if isHost {
+		if ep.IsHost() {
 			node.SetEndpointID(ep.GetID())
 		}
 	}
 	return possibleEPs
+}
+
+// findEndpointState finds the JSON representation of an endpoint's state in
+// a directory.
+//
+// It prefers reading from the endpoint state JSON file and falls back to
+// reading from the header.
+func findEndpointState(logger *slog.Logger, dir string) ([]byte, error) {
+	state, err := os.ReadFile(filepath.Join(dir, common.EndpointStateFileName))
+	if err == nil {
+		logger.Debug("Restore from JSON file")
+		return state, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+
+	// Fall back to reading state from the C header.
+	// Remove this at some point in the far future.
+	f, err := os.Open(filepath.Join(dir, common.CHeaderFileName))
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	logger.Debug("Restore from C header file")
+
+	br := bufio.NewReader(f)
+	var line []byte
+	for {
+		b, err := br.ReadBytes('\n')
+		if errors.Is(err, io.EOF) {
+			return nil, os.ErrNotExist
+		}
+		if err != nil {
+			return nil, err
+		}
+		if bytes.Contains(b, []byte(ciliumCHeaderPrefix)) {
+			line = b
+			break
+		}
+	}
+
+	epSlice := bytes.Split(line, []byte{':'})
+	if len(epSlice) != 2 {
+		return nil, fmt.Errorf("invalid format %q. Should contain a single ':'", line)
+	}
+
+	return base64.StdEncoding.AppendDecode(nil, epSlice[1])
 }
 
 // partitionEPDirNamesByRestoreStatus partitions the provided list of directory
@@ -185,39 +193,70 @@ func partitionEPDirNamesByRestoreStatus(eptsDirNames []string) (complete []strin
 // RegenerateAfterRestore performs the following operations on the specified
 // Endpoint:
 // * allocates an identity for the Endpoint
+// * fetches the latest labels from the pod.
 // * regenerates the endpoint
 // Returns an error if any operation fails while trying to perform the above
 // operations.
-func (e *Endpoint) RegenerateAfterRestore() error {
-	if err := e.restoreIdentity(); err != nil {
+func (e *Endpoint) RegenerateAfterRestore(regenerator *Regenerator, resolveMetadata MetadataResolverCB) error {
+	if err := e.restoreHostIfindex(); err != nil {
 		return err
 	}
 
-	scopedLog := log.WithField(logfields.EndpointID, e.ID)
+	if err := e.restoreIdentity(regenerator); err != nil {
+		return err
+	}
+
+	// Now that we have restored the endpoints' identity, run the metadata
+	// resolver so that we can fetch the latest labels from the pod for this
+	// endpoint.
+	e.RunRestoredMetadataResolver(resolveMetadata)
 
 	regenerationMetadata := &regeneration.ExternalRegenerationMetadata{
 		Reason:            "syncing state to host",
-		RegenerationLevel: regeneration.RegenerateWithDatapathRewrite,
+		RegenerationLevel: regeneration.RegenerateWithDatapath,
 	}
 	if buildSuccess := <-e.Regenerate(regenerationMetadata); !buildSuccess {
 		return fmt.Errorf("failed while regenerating endpoint")
 	}
 
-	// NOTE: unconditionalRLock is used here because it's used only for logging an already restored endpoint
-	e.unconditionalRLock()
-	scopedLog.WithField(logfields.IPAddr, []string{e.GetIPv4Address(), e.GetIPv6Address()}).Info("Restored endpoint")
-	e.runlock()
+	e.getLogger().Info(
+		"Restored endpoint",
+		logfields.IPAddrs,
+		[]any{
+			logfields.IPv4, e.GetIPv4Address(),
+			logfields.IPv6, e.GetIPv6Address(),
+		},
+	)
 	return nil
 }
 
-func (e *Endpoint) restoreIdentity() error {
+// restoreHostIfindex looks up the host interface's ifindex using netlink and
+// populates the value in the Endpoint. This used to be left at zero for
+// whatever reason, so the zero ifindex got persisted to disk.
+//
+// Try to populate the ifindex field using netlink so we can rely on it to
+// generate the host's endpoint configuration.
+func (e *Endpoint) restoreHostIfindex() error {
+	if !e.isHost || e.ifIndex != 0 {
+		return nil
+	}
+
+	l, err := safenetlink.LinkByName(e.ifName)
+	if err != nil {
+		return fmt.Errorf("get host interface: %w", err)
+	}
+	e.ifIndex = l.Attrs().Index
+
+	return nil
+}
+
+func (e *Endpoint) restoreIdentity(regenerator *Regenerator) error {
 	if err := e.rlockAlive(); err != nil {
 		e.logDisconnectedMutexAction(err, "before filtering labels during regenerating restored endpoint")
 		return err
 	}
-	scopedLog := log.WithField(logfields.EndpointID, e.ID)
 	// Filter the restored labels with the new daemon's filter
-	l, _ := labelsfilter.Filter(e.OpLabels.AllLabels())
+	l, _ := labelsfilter.Filter(e.labels.AllLabels())
 	e.runlock()
 
 	// Getting the ep's identity while we are restoring should block the
@@ -231,6 +270,7 @@ func (e *Endpoint) restoreIdentity() error {
 	)
 	e.UpdateController(controllerName,
 		controller.ControllerParams{
+			Group: restoreEndpointIdentityControllerGroup,
 			DoFunc: func(ctx context.Context) (err error) {
 				allocateCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
 				defer cancel()
@@ -261,16 +301,17 @@ func (e *Endpoint) restoreIdentity() error {
 		// If the endpoint is removed, this controller will cancel the allocator
 		// WaitForInitialGlobalIdentities function.
 		controllerName := fmt.Sprintf("waiting-initial-global-identities-ep (%v)", e.ID)
-		var gotInitialGlobalIdentities = make(chan struct{})
+		gotInitialGlobalIdentities := make(chan struct{})
 		e.UpdateController(controllerName,
 			controller.ControllerParams{
+				Group: initialGlobalIdentitiesControllerGroup,
 				DoFunc: func(ctx context.Context) (err error) {
 					identityCtx, cancel := context.WithTimeout(ctx, option.Config.KVstoreConnectivityTimeout)
 					defer cancel()
 
 					err = e.allocator.WaitForInitialGlobalIdentities(identityCtx)
 					if err != nil {
-						scopedLog.WithError(err).Warn("Failed while waiting for initial global identities")
+						e.getLogger().Warn("Failed while waiting for initial global identities", logfields.Error, err)
 						return err
 					}
 					close(gotInitialGlobalIdentities)
@@ -290,12 +331,22 @@ func (e *Endpoint) restoreIdentity() error {
 	// Wait for ipcache sync before regeneration for endpoints including
 	// the ones with fixed identity (e.g. host endpoint), this ensures that
 	// the regenerated datapath always lookups from a ready ipcache map.
+	// Additionally wait for node synchronization, as nodes also contribute
+	// entries to the ipcache map, most notably about the remote node IPs.
 	if option.Config.KVStore != "" {
-		ipcache.WaitForKVStoreSync()
+		if err := regenerator.WaitForKVStoreSync(e.aliveCtx); err != nil {
+			return ErrNotAlive
+		}
+	}
+
+	// Wait for ipcache and identities synchronization from all remote clusters,
+	// to prevent disrupting cross-cluster connections on endpoint regeneration.
+	if err := regenerator.WaitForClusterMeshIPIdentitiesSync(e.aliveCtx); err != nil {
+		return err
 	}
 
 	if err := e.lockAlive(); err != nil {
-		scopedLog.Warn("Endpoint to restore has been deleted")
+		e.getLogger().Warn("Endpoint to restore has been deleted")
 		return err
 	}
 
@@ -303,11 +354,11 @@ func (e *Endpoint) restoreIdentity() error {
 
 	if e.SecurityIdentity != nil {
 		if oldSecID := e.SecurityIdentity.ID; id.ID != oldSecID {
-			log.WithFields(logrus.Fields{
-				logfields.EndpointID:              e.ID,
-				logfields.IdentityLabels + ".old": oldSecID,
-				logfields.IdentityLabels + ".new": id.ID,
-			}).Info("Security identity for endpoint is different from the security identity restored for the endpoint")
+			e.getLogger().Info(
+				"Security identity for endpoint is different from the security identity restored for the endpoint",
+				logfields.IdentityOld, oldSecID,
+				logfields.IdentityNew, id.ID,
+			)
 
 			// The identity of the endpoint being
 			// restored has changed. This can be
@@ -361,29 +412,36 @@ func (e *Endpoint) restoreIdentity() error {
 // serializableEndpoint, which contains all of the fields that are needed upon
 // restoring an Endpoint after cilium-agent restarts.
 func (e *Endpoint) toSerializedEndpoint() *serializableEndpoint {
-
 	return &serializableEndpoint{
-		ID:                    e.ID,
-		ContainerName:         e.containerName,
-		ContainerID:           e.containerID,
-		DockerNetworkID:       e.dockerNetworkID,
-		DockerEndpointID:      e.dockerEndpointID,
-		IfName:                e.ifName,
-		IfIndex:               e.ifIndex,
-		OpLabels:              e.OpLabels,
-		LXCMAC:                e.mac,
-		IPv6:                  e.IPv6,
-		IPv4:                  e.IPv4,
-		NodeMAC:               e.nodeMAC,
-		SecurityIdentity:      e.SecurityIdentity,
-		Options:               e.Options,
-		DNSRules:              e.DNSRules,
-		DNSHistory:            e.DNSHistory,
-		DNSZombies:            e.DNSZombies,
-		K8sPodName:            e.K8sPodName,
-		K8sNamespace:          e.K8sNamespace,
-		DatapathConfiguration: e.DatapathConfiguration,
-		CiliumEndpointUID:     e.ciliumEndpointUID,
+		ID:                       e.ID,
+		ContainerName:            e.GetContainerName(),
+		ContainerID:              e.GetContainerID(),
+		DockerNetworkID:          e.dockerNetworkID,
+		DockerEndpointID:         e.dockerEndpointID,
+		IfName:                   e.ifName,
+		IfIndex:                  e.ifIndex,
+		ContainerIfName:          e.containerIfName,
+		DisableLegacyIdentifiers: e.disableLegacyIdentifiers,
+		Labels:                   e.labels,
+		LXCMAC:                   e.mac,
+		IPv6:                     e.IPv6,
+		IPv6IPAMPool:             e.IPv6IPAMPool,
+		IPv4:                     e.IPv4,
+		IPv4IPAMPool:             e.IPv4IPAMPool,
+		NodeMAC:                  e.nodeMAC,
+		SecurityIdentity:         e.SecurityIdentity,
+		Options:                  e.Options,
+		DNSRules:                 e.DNSRules,
+		DNSRulesV2:               e.DNSRulesV2,
+		DNSHistory:               e.DNSHistory,
+		DNSZombies:               e.DNSZombies,
+		K8sPodName:               e.K8sPodName,
+		K8sNamespace:             e.K8sNamespace,
+		K8sUID:                   e.K8sUID,
+		DatapathConfiguration:    e.DatapathConfiguration,
+		CiliumEndpointUID:        e.ciliumEndpointUID,
+		Properties:               e.properties,
+		NetnsCookie:              e.NetNsCookie,
 	}
 }
 
@@ -422,10 +480,15 @@ type serializableEndpoint struct {
 	// ifIndex is the interface index of the host face interface (veth pair)
 	IfIndex int
 
-	// OpLabels is the endpoint's label configuration
-	//
-	// FIXME: Rename this field to Labels
-	OpLabels labels.OpLabels
+	// ContainerIfName is the name of the container facing interface (veth pair).
+	ContainerIfName string
+
+	// DisableLegacyIdentifiers disables lookup using legacy endpoint identifiers
+	// (container name, container id, pod name) for this endpoint.
+	DisableLegacyIdentifiers bool
+
+	// Labels is the endpoint's label configuration
+	Labels labels.OpLabels `json:"OpLabels"`
 
 	// mac is the MAC address of the endpoint
 	//
@@ -435,8 +498,14 @@ type serializableEndpoint struct {
 	// IPv6 is the IPv6 address of the endpoint
 	IPv6 netip.Addr
 
+	// IPv6IPAMPool is the IPAM address pool from which the IPv6 address was allocated
+	IPv6IPAMPool string
+
 	// IPv4 is the IPv4 address of the endpoint
 	IPv4 netip.Addr
+
+	// IPv4IPAMPool is the IPAM address pool from which the IPv4 address was allocated
+	IPv4IPAMPool string
 
 	// nodeMAC is the MAC of the node (agent). The MAC is different for every endpoint.
 	NodeMAC mac.MAC
@@ -450,6 +519,10 @@ type serializableEndpoint struct {
 
 	// DNSRules is the collection of current DNS rules for this endpoint.
 	DNSRules restore.DNSRules
+
+	// DNSRulesV2 is the collection of current DNS rules for this endpoint,
+	// that conform to using V2 of the PortProto key.
+	DNSRulesV2 restore.DNSRules
 
 	// DNSHistory is the collection of still-valid DNS responses intercepted for
 	// this endpoint.
@@ -465,6 +538,9 @@ type serializableEndpoint struct {
 	// K8sNamespace is the Kubernetes namespace of the endpoint
 	K8sNamespace string
 
+	// K8sUID is the Kubernetes pod UID of the endpoint
+	K8sUID string
+
 	// DatapathConfiguration is the endpoint's datapath configuration as
 	// passed in via the plugin that created the endpoint, e.g. the CNI
 	// plugin which performed the plumbing will enable certain datapath
@@ -476,6 +552,12 @@ type serializableEndpoint struct {
 	// This is used to avoid overwriting/deleting ciliumendpoints that are managed
 	// by other endpoints.
 	CiliumEndpointUID types.UID
+
+	// Properties are used to store some internal property about this Endpoint.
+	Properties map[string]any
+
+	// NetnsCookie is the network namespace cookie of the Endpoint.
+	NetnsCookie uint64
 }
 
 // UnmarshalJSON expects that the contents of `raw` are a serializableEndpoint,
@@ -484,12 +566,13 @@ func (ep *Endpoint) UnmarshalJSON(raw []byte) error {
 	// We may have to populate structures in the Endpoint manually to do the
 	// translation from serializableEndpoint --> Endpoint.
 	restoredEp := &serializableEndpoint{
-		OpLabels:   labels.NewOpLabels(),
+		Labels:     labels.NewOpLabels(),
+		Options:    option.NewIntOptions(&EndpointMutableOptionLibrary),
 		DNSHistory: fqdn.NewDNSCacheWithLimit(option.Config.ToFQDNsMinTTL, option.Config.ToFQDNsMaxIPsPerHost),
-		DNSZombies: fqdn.NewDNSZombieMappings(option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
+		DNSZombies: fqdn.NewDNSZombieMappings(logging.DefaultSlogLogger, option.Config.ToFQDNsMaxDeferredConnectionDeletes, option.Config.ToFQDNsMaxIPsPerHost),
 	}
 	if err := json.Unmarshal(raw, restoredEp); err != nil {
-		return fmt.Errorf("error unmarshaling serializableEndpoint from base64 representation: %s", err)
+		return fmt.Errorf("error unmarshaling serializableEndpoint from base64 representation: %w", err)
 	}
 
 	ep.fromSerializedEndpoint(restoredEp)
@@ -504,24 +587,37 @@ func (ep *Endpoint) MarshalJSON() ([]byte, error) {
 func (ep *Endpoint) fromSerializedEndpoint(r *serializableEndpoint) {
 	ep.ID = r.ID
 	ep.createdAt = time.Now()
-	ep.containerName = r.ContainerName
-	ep.containerID = r.ContainerID
+	ep.InitialEnvoyPolicyComputed = make(chan struct{})
+	ep.containerName.Store(&r.ContainerName)
+	ep.containerID.Store(&r.ContainerID)
 	ep.dockerNetworkID = r.DockerNetworkID
 	ep.dockerEndpointID = r.DockerEndpointID
 	ep.ifName = r.IfName
 	ep.ifIndex = r.IfIndex
-	ep.OpLabels = r.OpLabels
+	ep.containerIfName = r.ContainerIfName
+	ep.disableLegacyIdentifiers = r.DisableLegacyIdentifiers
+	ep.labels = r.Labels
 	ep.mac = r.LXCMAC
 	ep.IPv6 = r.IPv6
+	ep.IPv6IPAMPool = r.IPv6IPAMPool
 	ep.IPv4 = r.IPv4
+	ep.IPv4IPAMPool = r.IPv4IPAMPool
 	ep.nodeMAC = r.NodeMAC
 	ep.SecurityIdentity = r.SecurityIdentity
 	ep.DNSRules = r.DNSRules
+	ep.DNSRulesV2 = r.DNSRulesV2
 	ep.DNSHistory = r.DNSHistory
 	ep.DNSZombies = r.DNSZombies
 	ep.K8sPodName = r.K8sPodName
 	ep.K8sNamespace = r.K8sNamespace
+	ep.K8sUID = r.K8sUID
 	ep.DatapathConfiguration = r.DatapathConfiguration
 	ep.Options = r.Options
 	ep.ciliumEndpointUID = r.CiliumEndpointUID
+	if r.Properties != nil {
+		ep.properties = r.Properties
+	} else {
+		ep.properties = map[string]any{}
+	}
+	ep.NetNsCookie = r.NetnsCookie
 }
