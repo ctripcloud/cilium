@@ -1,0 +1,24 @@
+operator/pkg/ipam/nodemanager/node.go
+  s_16ad6bfb6377de::t_dd6f148a88ae40 382
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.4.38-trip",
+  "base_commit_sha": "693cf6d49c300a04b6d10169187037beb4031c37",
+  "prompts": {},
+  "humans": {
+    "h_6e3cf1694217e7": {
+      "author": "hzhang56 <hzhang56@trip.com>"
+    }
+  },
+  "sessions": {
+    "s_16ad6bfb6377de": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "83d3098a-89f4-46e8-b93b-3788f836614c",
+        "model": "default"
+      },
+      "human_author": "hzhang56 <hzhang56@trip.com>"
+    }
+  }
+}
